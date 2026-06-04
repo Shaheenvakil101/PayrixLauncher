@@ -1,0 +1,21 @@
+# Visual Studio / Rider
+.vs/
+*.vsidx
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build output
+bin/
+obj/
+
+# NuGet
+*.nupkg
+packages/
+
+# Generated scripts
+PayrixTool_Presentation.py
+
+# Logs
+*.log

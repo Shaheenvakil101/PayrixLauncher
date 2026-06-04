@@ -1,0 +1,16016 @@
+﻿using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.CompilerServices;
+using System.Text.Json;
+using System.Windows;
+using System.Windows.Input;
+using PayrixLauncher.Models;
+using PayrixLauncher.Services;
+using WpfColor = System.Windows.Media.Color;
+using WpfBrush = System.Windows.Media.SolidColorBrush;
+using WpfMessageBox = System.Windows.MessageBox;
+using TestStatus = PayrixLauncher.Models.TestStatus;
+
+namespace PayrixLauncher;
+
+public partial class MainWindow : Window, INotifyPropertyChanged
+{
+    private readonly ObservableCollection<Transaction> _transactions = [];
+    private readonly ObservableCollection<TransactionItem> _items = [];
+    private readonly ObservableCollection<DisbursementEntry> _disbEntries = [];
+    private readonly List<string> _rawJsons = [];
+    private readonly ObservableCollection<WebhookTestCase> _testCases = [];
+    private readonly ObservableCollection<TransactionItem> _postTxnItems = [];
+    private CancellationTokenSource? _testCts;
+
+    // ── Sidebar navigation state ──────────────────────────────────────────────
+    private System.Windows.Controls.Button? _activeNavBtn;
+
+    // ── Bulk-add guard — suppresses per-item KPI refresh; call RefreshOverviewKpis() after ──
+    private bool _suppressKpiRefresh;
+
+    // ── CoreUsersBox / AccountUsersBox: maps display label → canonical email ──
+    private Dictionary<string, string> _coreUserEmailMap = new(StringComparer.OrdinalIgnoreCase);
+    private List<string> _coreUserAllItems = [];
+
+    // ── RestoreEmailBox: Host DB Account emails (independent from Core user list) ──
+    private List<string> _hostAccountAllItems = [];
+
+    private static readonly JsonSerializerOptions PrettyJson = new()
+    {
+        WriteIndented = true,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+    private void OnPropertyChanged([CallerMemberName] string? name = null)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+
+    private bool _isSandbox = true;
+    public bool IsSandbox
+    {
+        get => _isSandbox;
+        set { _isSandbox = value; OnPropertyChanged(); UpdateEnvironmentUI(); }
+    }
+
+    public MainWindow(string? userName = null, string? userEmail = null)
+    {
+        InitializeComponent();
+        DataContext = this;
+        if (!string.IsNullOrEmpty(userName))
+        {
+            SidebarUserName.Text   = userName;
+            SidebarAvatarText.Text = userName[0].ToString().ToUpper();
+        }
+        if (!string.IsNullOrEmpty(userEmail))
+            SidebarUserRole.Text = userEmail;
+        TxnGrid.ItemsSource           = _transactions;
+        ItemsGrid.ItemsSource         = _items;
+        DisbEntryGrid.ItemsSource     = _disbEntries;
+        DisbGrid.ItemsSource          = _disbRecords;
+        DisbEntryDetailGrid.ItemsSource = _disbDetailEntries;
+        // Post Txn tab — seed with one sample row and bind the editable grid
+        _postTxnItems.Add(new TransactionItem { ItemSequenceNumber = 1, Description = "Professional Services", Quantity = 1, Price = 999, Total = 999, Um = "EA", ProductCode = "SVCHR" });
+        PostTxnItemsGrid.ItemsSource = _postTxnItems;
+        LoadSettings();
+        InitHttpClient();
+        InitEnvironments();
+        InitPerformanceTester();
+        InitWebhookTests();   // must run AFTER LoadSettings so EntityCustomBox is populated
+        UpdateEnvironmentUI();
+        AutoDetectLocalSettingsOnStartup();   // fill Local DB boxes from INI if not already saved
+        // Sidebar: set initial active button to Overview
+        _activeNavBtn = (System.Windows.Controls.Button)NavTxnViewer;
+        // Refresh Overview KPIs whenever the transaction collection changes
+        // (_suppressKpiRefresh batches bulk adds so we only recompute once at the end)
+        _transactions.CollectionChanged += (_, _) => { if (!_suppressKpiRefresh) RefreshOverviewKpis(); };
+    }
+
+    // ── Logout ───────────────────────────────────────────────────────────────
+
+    private void LogoutBtn_Click(object sender, MouseButtonEventArgs e)
+    {
+        SaveSettings();
+
+        // Show login window again
+        var login = new LoginWindow();
+        bool? result = login.ShowDialog();
+
+        if (result == true)
+        {
+            // Update sidebar with new user
+            if (!string.IsNullOrEmpty(login.LoggedInName))
+            {
+                SidebarUserName.Text   = login.LoggedInName;
+                SidebarAvatarText.Text = login.LoggedInName[0].ToString().ToUpper();
+            }
+            if (!string.IsNullOrEmpty(login.LoggedInEmail))
+                SidebarUserRole.Text = login.LoggedInEmail;
+        }
+        // If cancelled, stay on current session — do nothing
+    }
+
+    // ── Sidebar navigation ────────────────────────────────────────────────────
+
+    private void SidebarNav_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Button btn) return;
+
+        // Switch tab
+        if (int.TryParse(btn.Tag?.ToString(), out int tabIdx))
+            MainTabControl.SelectedIndex = tabIdx;
+
+        // Update active visual
+        if (_activeNavBtn != null && _activeNavBtn != btn)
+            _activeNavBtn.Style = (System.Windows.Style)Resources["NavBtn"];
+        btn.Style = (System.Windows.Style)Resources["NavBtnActive"];
+        _activeNavBtn = btn;
+    }
+
+    // ── Overview KPI properties ───────────────────────────────────────────────
+
+    private static readonly System.Globalization.CultureInfo _usd = System.Globalization.CultureInfo.GetCultureInfo("en-US");
+
+    public int    OverviewTxnCount      => _transactions.Count;
+    public string OverviewApproved      => _transactions.Sum(t => t.Approved ?? 0).ToString("C2", _usd);
+    public int    OverviewAchCount      => _transactions.Count(t => t.IsAch);
+    public int    OverviewCardCount     => _transactions.Count(t => !t.IsAch);
+    public int    OverviewFailedCount   => _transactions.Count(t => t.Status == 4);
+    public int    OverviewReturnedCount => _transactions.Count(t => !string.IsNullOrEmpty(t.Returned));
+    public int    OverviewSettledCount  => _transactions.Count(t => !string.IsNullOrEmpty(t.Settled));
+    public string OverviewSettledAmount => _transactions.Where(t => !string.IsNullOrEmpty(t.Settled))
+                                                        .Sum(t => t.SettledTotal ?? t.Approved ?? 0)
+                                                        .ToString("C2", _usd);
+    public int    OverviewPendingCount  => _transactions.Count(t => t.Status == 1);
+    public int    OverviewCapturedCount => _transactions.Count(t => t.Status == 3);
+    public string OverviewAvgAmount     => _transactions.Count == 0 ? "$0.00"
+                                          : (_transactions.Sum(t => t.Approved ?? 0) / _transactions.Count).ToString("C2", _usd);
+    public int    OverviewDisbursedCount=> _transactions.Count(t => !string.IsNullOrEmpty(t.DisbursementId));
+
+    // ── Dashboard KPIs ────────────────────────────────────────────────────────
+    public string DashTotalVolume     => _transactions.Sum(t => t.ApprovedDollars).ToString("C2", _usd);
+    public string DashSettlementRate
+    {
+        get
+        {
+            var total    = _transactions.Count;
+            if (total == 0) return "—";
+            var settled  = _transactions.Count(t => t.Status == 3 || t.Status == 4);
+            return $"{settled * 100.0 / total:F1}%";
+        }
+    }
+    public int    DashActiveMerchants  => _merchants.Count(m => m.Status == 1);
+    public int    DashApprovedCount    => _transactions.Count(t => t.Status == 1);
+    public int    DashCapturedCount    => _transactions.Count(t => t.Status == 3);
+    public int    DashDeclinedCount    => _transactions.Count(t => t.Status == 2);
+    public int    DashErrorCount       => _transactions.Count(t => t.Status == 4 && !t.IsAch);
+    public int    DashSettledAchCount  => _transactions.Count(t => t.Status == 4 &&  t.IsAch);
+    public int    DashReturnedCount    => _transactions.Count(t => t.Status == 5 &&  t.IsAch);
+    public string DashApprovedAmount   => _transactions.Where(t => t.Status == 1).Sum(t => t.ApprovedDollars).ToString("C2", _usd);
+    public string DashAvgAmount        => OverviewAvgAmount;
+
+    // ── API Tools KPIs (live from collections + request log) ─────────────────
+    public int    OverviewApiCount        => _collections.Sum(c => c.Requests.Count);
+    public int    OverviewCollectionCount => _collections.Count;
+    public int    OverviewRecentCount     => Services.RequestLogService.Load().Count;
+    public string OverviewApiCountFmt     => OverviewApiCount.ToString("N0");
+
+    // Per-collection breakdown for the mini table (top 6 by size)
+    public IEnumerable<(string Name, int Count)> OverviewTopCollections
+        => _collections
+           .OrderByDescending(c => c.Requests.Count)
+           .Take(6)
+           .Select(c => (c.Name, c.Requests.Count));
+
+    private void RefreshOverviewKpis()
+    {
+        OnPropertyChanged(nameof(OverviewTxnCount));
+        OnPropertyChanged(nameof(OverviewApproved));
+        OnPropertyChanged(nameof(OverviewAchCount));
+        OnPropertyChanged(nameof(OverviewCardCount));
+        OnPropertyChanged(nameof(OverviewFailedCount));
+        OnPropertyChanged(nameof(OverviewReturnedCount));
+        OnPropertyChanged(nameof(OverviewSettledCount));
+        OnPropertyChanged(nameof(OverviewSettledAmount));
+        OnPropertyChanged(nameof(OverviewPendingCount));
+        OnPropertyChanged(nameof(OverviewCapturedCount));
+        OnPropertyChanged(nameof(OverviewAvgAmount));
+        OnPropertyChanged(nameof(OverviewDisbursedCount));
+        // Dashboard KPIs
+        OnPropertyChanged(nameof(DashTotalVolume));
+        OnPropertyChanged(nameof(DashSettlementRate));
+        OnPropertyChanged(nameof(DashActiveMerchants));
+        OnPropertyChanged(nameof(DashApprovedCount));
+        OnPropertyChanged(nameof(DashCapturedCount));
+        OnPropertyChanged(nameof(DashDeclinedCount));
+        OnPropertyChanged(nameof(DashErrorCount));
+        OnPropertyChanged(nameof(DashSettledAchCount));
+        OnPropertyChanged(nameof(DashReturnedCount));
+        OnPropertyChanged(nameof(DashApprovedAmount));
+        OnPropertyChanged(nameof(DashAvgAmount));
+    }
+
+    private void RefreshOverviewApiKpis()
+    {
+        OnPropertyChanged(nameof(OverviewApiCount));
+        OnPropertyChanged(nameof(OverviewApiCountFmt));
+        OnPropertyChanged(nameof(OverviewCollectionCount));
+        OnPropertyChanged(nameof(OverviewRecentCount));
+        OnPropertyChanged(nameof(OverviewTopCollections));
+    }
+
+    // ── Settings tab — theme toggle ───────────────────────────────────────────
+
+    private void SettingsLightTheme_Click(object sender, RoutedEventArgs e)
+    {
+        _isDarkMode = false;
+        ApplyTheme(false);
+        SaveSettings();
+    }
+
+    private void SettingsDarkTheme_Click(object sender, RoutedEventArgs e)
+    {
+        _isDarkMode = true;
+        ApplyTheme(true);
+        SaveSettings();
+    }
+
+    // ── Settings: load on start, save on close ────────────────────────────────
+
+    private void LoadSettings()
+    {
+        var s = SettingsService.Load();
+
+        // API keys — fall back to hard-coded defaults if not saved yet
+        SandboxApiKeyBox.Password    = string.IsNullOrEmpty(s.SandboxApiKey)
+            ? "b0dc9c7268b2702b1e2a87ea52cab2c4" : s.SandboxApiKey;
+        ProductionApiKeyBox.Password = string.IsNullOrEmpty(s.ProductionApiKey)
+            ? "207145d3c5189e2a588699ab37a11aee" : s.ProductionApiKey;
+
+        // Environment
+        _isSandbox = s.IsSandbox;
+        OnPropertyChanged(nameof(IsSandbox));
+
+        // Transaction search
+        if (!string.IsNullOrEmpty(s.UserEmail))     UserEmailBox.Text   = s.UserEmail;
+        if (!string.IsNullOrEmpty(s.SearchLimit))   SearchLimitBox.Text = s.SearchLimit;
+        if (!string.IsNullOrEmpty(s.TransactionIds)) TxnIdsBox.Text     = s.TransactionIds;
+        if (!string.IsNullOrEmpty(s.DisbursementId))    DisbursementIdBox.Text = s.DisbursementId;
+        if (!string.IsNullOrEmpty(s.DisbursementLimit)) DisbLimitBox.Text      = s.DisbursementLimit;
+        if (s.LatestCountIndex >= 0 && s.LatestCountIndex < LatestCountBox.Items.Count)
+            LatestCountBox.SelectedIndex = s.LatestCountIndex;
+
+        // Webhook Tests
+        if (s.WebhookEnvIndex >= 0 && s.WebhookEnvIndex < WebhookEnvBox.Items.Count)
+            WebhookEnvBox.SelectedIndex = s.WebhookEnvIndex;
+        if (!string.IsNullOrEmpty(s.WebhookUrl)) WebhookUrlBox.Text = s.WebhookUrl;
+        if (!string.IsNullOrEmpty(s.EntityCustomField)) EntityCustomBox.Text = s.EntityCustomField;
+        if (!string.IsNullOrEmpty(s.AchTxnId))  AchTxnIdBox.Text  = s.AchTxnId;
+        if (!string.IsNullOrEmpty(s.AchAmount)) AchAmountBox.Text = s.AchAmount;
+        if (s.WebhookTypeIndex >= 0 && s.WebhookTypeIndex < WebhookTypeBox.Items.Count)
+            WebhookTypeBox.SelectedIndex = s.WebhookTypeIndex;
+        // KPI visibility
+        if (!s.KpiVisible)
+        {
+            KpiGrid.Visibility = Visibility.Collapsed;
+            KpiToggleText.Text = "KPIs ▼";
+            KpiToggleBorder.Background = new WpfBrush(WpfColor.FromRgb(224, 231, 255));
+        }
+
+        // Restore section collapse states
+        // Email: default Visible in XAML — collapse only if previously saved as collapsed
+        if (s.EmailSectionCollapsed)  { EmailSectionContent.Visibility  = Visibility.Collapsed; EmailSectionArrow.Text  = "▶"; }
+        if (s.TxnSectionCollapsed)    { TxnSectionContent.Visibility    = Visibility.Collapsed; TxnSectionArrow.Text    = "▶"; }
+        // Disb: default Collapsed in XAML — expand only if previously saved as NOT collapsed
+        if (!s.DisbSectionCollapsed)  { DisbSectionContent.Visibility   = Visibility.Visible;   DisbSectionArrow.Text   = "▼"; }
+        if (s.SearchPanelCollapsed)   { SearchSectionsPanel.Visibility  = Visibility.Collapsed; ControlsCardArrow.Text  = "Expand"; }
+        // Restore pin states
+        if (s.EmailSectionPinned) { EmailPinBtn.Tag = "pinned"; EmailPinBtn.Text = "📌"; EmailPinBtn.ToolTip = "Unpin section"; EmailSectionContent.Visibility = Visibility.Visible; EmailSectionArrow.Text = "▼"; }
+        if (s.TxnSectionPinned)   { TxnPinBtn.Tag   = "pinned"; TxnPinBtn.Text   = "📌"; TxnPinBtn.ToolTip   = "Unpin section"; TxnSectionContent.Visibility   = Visibility.Visible; TxnSectionArrow.Text   = "▼"; }
+        if (s.DisbSectionPinned)  { DisbPinBtn.Tag  = "pinned"; DisbPinBtn.Text  = "📌"; DisbPinBtn.ToolTip  = "Unpin section"; DisbSectionContent.Visibility  = Visibility.Visible; DisbSectionArrow.Text  = "▼"; }
+
+        // Webhook config panel (date filter / entity custom / DB strings)
+        if (s.WebhookConfigExpanded)
+        {
+            WebhookDateFilterPanel.Visibility   = Visibility.Visible;
+            WebhookEntityCustomPanel.Visibility = Visibility.Visible;
+            WebhookDbConfigPanel.Visibility     = Visibility.Visible;
+            WebhookConfigToggleText.Text        = "⚙ Config ▲";
+            if (WebhookConfigToggleText2 is not null)
+                WebhookConfigToggleText2.Text   = "⚙ Config ▲";
+        }
+
+        // Theme — always apply explicitly so the UI, toggle state and _isDarkMode flag
+        // are guaranteed to be in sync regardless of what App.xaml pre-loaded.
+        _isDarkMode = s.IsDarkMode;
+        ApplyTheme(_isDarkMode);
+
+        // Host DB connection strings per environment
+        // Migrate legacy single value into Local slot if present
+        if (!string.IsNullOrEmpty(s.LocalHostDbConnectionString))
+            LocalHostDbBox.Text    = s.LocalHostDbConnectionString;
+        else if (!string.IsNullOrEmpty(s.HostDbConnectionString))
+            LocalHostDbBox.Text    = s.HostDbConnectionString;
+        if (!string.IsNullOrEmpty(s.StagingHostDbConnectionString))
+            StagingHostDbBox.Text  = s.StagingHostDbConnectionString;
+        if (!string.IsNullOrEmpty(s.SprintHostDbConnectionString))
+            SprintHostDbBox.Text   = s.SprintHostDbConnectionString;
+        if (!string.IsNullOrEmpty(s.CoreAccountEmail))
+            CoreAccountEmailBox.Text = s.CoreAccountEmail;
+        if (!string.IsNullOrEmpty(s.LocalMainDbConnectionString))
+            LocalMainDbBox.Text    = s.LocalMainDbConnectionString;
+        if (!string.IsNullOrEmpty(s.StagingMainDbConnectionString))
+            StagingMainDbBox.Text  = s.StagingMainDbConnectionString;
+        if (!string.IsNullOrEmpty(s.SprintMainDbConnectionString))
+            SprintMainDbBox.Text   = s.SprintMainDbConnectionString;
+
+        // Core DB Utility credentials
+        if (!string.IsNullOrEmpty(s.CoreHostServer))   HostServerBox.Text   = s.CoreHostServer;
+        if (!string.IsNullOrEmpty(s.CoreHostUser))     HostUserBox.Text     = s.CoreHostUser;
+        if (!string.IsNullOrEmpty(s.CoreHostPassword)) HostPasswordBox.Password = s.CoreHostPassword;
+        if (!string.IsNullOrEmpty(s.CoreHostDatabase)) HostDatabaseBox.Text = s.CoreHostDatabase;
+
+        if (!string.IsNullOrEmpty(s.CoreDbServer))     CoreServerBox.Text   = s.CoreDbServer;
+        if (!string.IsNullOrEmpty(s.CoreDbUser))       CoreUserBox.Text     = s.CoreDbUser;
+        if (!string.IsNullOrEmpty(s.CoreDbPassword))   CorePasswordBox.Password = s.CoreDbPassword;
+
+        // Window size & position
+        if (!double.IsNaN(s.WindowLeft) && !double.IsNaN(s.WindowTop))
+        {
+            Left = s.WindowLeft;
+            Top  = s.WindowTop;
+        }
+        if (s.WindowWidth  > 400) Width  = s.WindowWidth;
+        if (s.WindowHeight > 300) Height = s.WindowHeight;
+    }
+
+    protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+    {
+        SaveSettings();
+        base.OnClosing(e);
+    }
+
+    private void SaveSettings()
+    {
+        // Load existing settings first so we preserve fields not managed by the UI
+        // (e.g. OAuth client IDs stored directly in settings.json)
+        var existing = SettingsService.Load();
+
+        SettingsService.Save(new AppSettings
+        {
+            // ── OAuth credentials — carry forward from file, never overwrite ──
+            GoogleClientId     = existing.GoogleClientId,
+            GoogleClientSecret = existing.GoogleClientSecret,
+            MicrosoftClientId  = existing.MicrosoftClientId,
+            AppleClientId      = existing.AppleClientId,
+            IsSandbox        = IsSandbox,
+            SandboxApiKey    = SandboxApiKeyBox.Password,
+            ProductionApiKey = ProductionApiKeyBox.Password,
+            UserEmail        = UserEmailBox.Text.Trim(),
+            SearchLimit      = SearchLimitBox.Text.Trim(),
+            LatestCountIndex = LatestCountBox.SelectedIndex,
+            TransactionIds   = TxnIdsBox.Text.Trim(),
+            DisbursementId    = DisbursementIdBox.Text.Trim(),
+            DisbursementLimit = DisbLimitBox.Text.Trim(),
+            WebhookEnvIndex  = WebhookEnvBox.SelectedIndex,
+            WebhookUrl                     = WebhookUrlBox.Text.Trim(),
+            LocalHostDbConnectionString    = LocalHostDbBox.Text.Trim(),
+            StagingHostDbConnectionString  = StagingHostDbBox.Text.Trim(),
+            SprintHostDbConnectionString   = SprintHostDbBox.Text.Trim(),
+            CoreAccountEmail               = CoreAccountEmailBox.Text.Trim(),
+            LocalMainDbConnectionString    = LocalMainDbBox.Text.Trim(),
+            StagingMainDbConnectionString  = StagingMainDbBox.Text.Trim(),
+            SprintMainDbConnectionString   = SprintMainDbBox.Text.Trim(),
+            EntityCustomField = EntityCustomBox.Text.Trim(),
+            AchTxnId         = AchTxnIdBox.Text.Trim(),
+            AchAmount        = AchAmountBox.Text.Trim(),
+            WebhookTypeIndex = WebhookTypeBox.SelectedIndex,
+            KpiVisible          = KpiGrid.Visibility == Visibility.Visible,
+            EmailSectionCollapsed = EmailSectionContent.Visibility  == Visibility.Collapsed,
+            TxnSectionCollapsed   = TxnSectionContent.Visibility    == Visibility.Collapsed,
+            DisbSectionCollapsed  = DisbSectionContent.Visibility   == Visibility.Collapsed,
+            EmailSectionPinned = EmailPinBtn.Tag?.ToString() == "pinned",
+            TxnSectionPinned   = TxnPinBtn.Tag?.ToString()   == "pinned",
+            DisbSectionPinned  = DisbPinBtn.Tag?.ToString()  == "pinned",
+            SearchPanelCollapsed  = SearchSectionsPanel.Visibility  == Visibility.Collapsed,
+            WebhookConfigExpanded = WebhookDateFilterPanel.Visibility == Visibility.Visible,
+            IsDarkMode       = _isDarkMode,
+            WindowWidth      = Width,
+            WindowHeight     = Height,
+            WindowLeft       = Left,
+            WindowTop        = Top,
+            // Core DB Utility
+            CoreHostServer   = HostServerBox.Text.Trim(),
+            CoreHostUser     = HostUserBox.Text.Trim(),
+            CoreHostPassword = HostPasswordBox.Password,
+            CoreHostDatabase = HostDatabaseBox.Text.Trim(),
+            CoreDbServer     = CoreServerBox.Text.Trim(),
+            CoreDbUser       = CoreUserBox.Text.Trim(),
+            CoreDbPassword   = CorePasswordBox.Password,
+        });
+    }
+
+    // ── Environment toggle ────────────────────────────────────────────────────
+
+    private void SandboxBorder_Click(object sender, MouseButtonEventArgs e) => IsSandbox = true;
+
+    private void ProductionBorder_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (!IsSandbox) return; // already on Production — no prompt needed
+
+        var dlg = new PasswordDialog { Owner = this };
+        if (dlg.ShowDialog() == true)
+            IsSandbox = false;
+    }
+
+    private void UpdateEnvironmentUI()
+    {
+        // Sandbox: indigo when active, neutral card-surface when inactive
+        SandboxBorder.Background = IsSandbox
+            ? new WpfBrush(WpfColor.FromRgb(79, 70, 229))   // #4F46E5
+            : (System.Windows.Media.Brush)(TryFindResource("EnvBtnInactiveBg") ?? System.Windows.Media.Brushes.White);
+        SandboxBorder.BorderBrush = IsSandbox
+            ? new WpfBrush(WpfColor.FromRgb(67, 56, 202))   // #4338CA
+            : (System.Windows.Media.Brush)(TryFindResource("EnvBtnInactiveBorder") ?? new WpfBrush(WpfColor.FromRgb(203, 213, 225)));
+
+        // Production: emerald when active, neutral card-surface when inactive
+        ProductionBorder.Background = !IsSandbox
+            ? new WpfBrush(WpfColor.FromRgb(5, 150, 105))   // #059669
+            : (System.Windows.Media.Brush)(TryFindResource("EnvBtnInactiveBg") ?? System.Windows.Media.Brushes.White);
+        ProductionBorder.BorderBrush = !IsSandbox
+            ? new WpfBrush(WpfColor.FromRgb(4, 120, 87))    // #047857
+            : (System.Windows.Media.Brush)(TryFindResource("EnvBtnInactiveBorder") ?? new WpfBrush(WpfColor.FromRgb(203, 213, 225)));
+
+        ActiveUrlText.Text = IsSandbox
+            ? $"→ {PayrixService.SandboxBaseUrl}"
+            : $"→ {PayrixService.ProductionBaseUrl}";
+
+        // Sync env labels on Reports and Merchants tabs
+        if (MerchantEnvLabel != null)
+            MerchantEnvLabel.Text = IsSandbox ? "Sandbox" : "Production";
+        if (ReportEnvLabel != null)
+            ReportEnvLabel.Text = IsSandbox ? "Sandbox" : "Production";
+        if (DashEnvLabel != null)
+            DashEnvLabel.Text = IsSandbox ? "Sandbox" : "Production";
+        if (AccountEnvLabel != null)
+            AccountEnvLabel.Text = IsSandbox ? "Sandbox" : "Production";
+        if (DisbEnvLabel != null)
+            DisbEnvLabel.Text = IsSandbox ? "Sandbox" : "Production";
+
+        SetConnectionStatus(false);
+    }
+
+    // ── Fetch transactions ────────────────────────────────────────────────────
+
+    private async void FetchBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+        var envLabel = IsSandbox ? "Sandbox" : "Production";
+
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            SetStatus($"Please enter a {envLabel} API key.", error: true);
+            return;
+        }
+
+        var ids = TxnIdsBox.Text
+            .Split([',', '\n', '\r'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => s.Trim())
+            .Where(s => s.Length > 0)
+            .ToArray();
+
+        if (ids.Length == 0)
+        {
+            SetStatus("Please enter at least one transaction ID.", error: true);
+            return;
+        }
+
+        await FetchTransactionsByIdsAsync(ids);
+    }
+
+    private async Task FetchTransactionsByIdsAsync(string[] ids)
+    {
+        var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+        var envLabel = IsSandbox ? "Sandbox" : "Production";
+
+        FetchBtn.IsEnabled = false;
+        FetchLatestBtn.IsEnabled = false;
+        SetExportEnabled(false);
+        SetStatus($"[{envLabel}] Fetching {ids.Length} transaction(s)...");
+        SetConnectionStatus(false);
+
+        _transactions.Clear();
+        _items.Clear();
+        _disbEntries.Clear();
+        _rawJsons.Clear();
+        _selectedTransaction = null;
+        ClearRawJson();
+        UpdateSummary();
+        ShowItemsPlaceholder(true);
+
+        try
+        {
+            var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service = new PayrixService(apiKey, environment);
+            int success = 0, failed = 0;
+            var _fetchLock  = new object();
+            var _sem        = new SemaphoreSlim(5, 5);
+            // Collect results outside ObservableCollection; bulk-add after WhenAll to fire
+            // CollectionChanged (→ RefreshOverviewKpis) only once instead of per-item.
+            var collected   = new List<(Transaction txn, string rawJson)>();
+
+            SetStatus($"[{envLabel}] Fetching {ids.Length} transaction(s) in parallel…");
+            await Task.WhenAll(ids.Select(async id =>
+            {
+                await _sem.WaitAsync();
+                try
+                {
+                    var (txn, rawJson, error) = await service.GetTransactionAsync(id);
+                    if (error is not null || txn is null)
+                    {
+                        lock (_fetchLock) failed++;
+                        return;
+                    }
+                    await EnrichTransactionAsync(service, txn, envLabel, bulkMode: true);
+                    lock (_fetchLock) { collected.Add((txn, rawJson)); success++; }
+                }
+                catch { lock (_fetchLock) { failed++; } }
+                finally { _sem.Release(); }
+            }));
+
+            // Batch-add to ObservableCollection — fires KPI refresh only once
+            _suppressKpiRefresh = true;
+            try   { foreach (var (t, r) in collected) { _transactions.Add(t); _rawJsons.Add(r); } }
+            finally { _suppressKpiRefresh = false; RefreshOverviewKpis(); }
+
+            if (_rawJsons.Count > 0)
+            {
+                SetRawJson(_rawJsons.Count == 1
+                    ? PrettyPrint(_rawJsons[0])
+                    : "[" + Environment.NewLine +
+                      string.Join("," + Environment.NewLine, _rawJsons.Select(PrettyPrint)) +
+                      Environment.NewLine + "]");
+            }
+
+            UpdateSummary();
+            SetConnectionStatus(success > 0);
+
+            SetStatus(
+                failed == 0
+                    ? $"[{envLabel}] Fetched {success} transaction(s) successfully."
+                    : $"[{envLabel}] Fetched {success} OK, {failed} failed.",
+                error: failed > 0 && success == 0);
+
+            SetExportEnabled(_transactions.Count > 0);
+
+            if (_transactions.Count > 0)
+            {
+                await StampDisbursementIdsAsync(service, _transactions, envLabel);
+                LoadAllItems();
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Unexpected error: {ex.Message}", error: true);
+            WpfMessageBox.Show($"Error during fetch:\n\n{ex.Message}\n\n{ex.InnerException?.Message}",
+                "Fetch Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            FetchBtn.IsEnabled = true;
+            FetchLatestBtn.IsEnabled = true;
+        }
+    }
+
+    // ── Fetch latest IDs by email ─────────────────────────────────────────────
+
+    private async void SearchEmailBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+        var envLabel = IsSandbox ? "Sandbox" : "Production";
+
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            SetStatus($"Please enter a {envLabel} API key.", error: true);
+            return;
+        }
+
+        var email = UserEmailBox.Text.Trim();
+        var hasEmail = !string.IsNullOrEmpty(email);
+        var limit = int.TryParse(SearchLimitBox.Text.Trim(), out var l) && l > 0 ? l : 20;
+
+        SearchEmailBtn.IsEnabled = false;
+        FetchBtn.IsEnabled = false;
+        FetchLatestBtn.IsEnabled = false;
+        SetExportEnabled(false);
+        SetStatus(hasEmail
+            ? $"[{envLabel}] Searching transactions for {email}…"
+            : $"[{envLabel}] Fetching latest {limit} transactions…");
+        SetConnectionStatus(false);
+
+        _transactions.Clear();
+        _items.Clear();
+        _disbEntries.Clear();
+        _rawJsons.Clear();
+        _selectedTransaction = null;
+        ClearRawJson();
+        UpdateSummary();
+        ShowItemsPlaceholder(true);
+
+        try
+        {
+            var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service = new PayrixService(apiKey, environment);
+
+            // Fetch regular + ACH in parallel, merge by ID
+            // Pass null email when box is empty so service fetches without email filter
+            var fetchAll = service.SearchByEmailAsync(hasEmail ? email : null, limit * 5);
+            var fetchAch = service.SearchByPaymentCategoryAsync(hasEmail ? email : null, "ach", limit);
+            await Task.WhenAll(fetchAll, fetchAch);
+
+            var (allTxns, rawJson, error) = fetchAll.Result;
+            var (achTxns, _, _)           = fetchAch.Result;
+
+            // Always show raw response so the user can inspect it
+            _rawJsons.Add(rawJson);
+            SetRawJson(PrettyPrint(rawJson));
+
+            if (error is not null && allTxns.Count == 0 && achTxns.Count == 0)
+            {
+                SetStatus($"Search error: {error}", error: true);
+                return;
+            }
+
+            var merged = allTxns
+                .Concat(achTxns)
+                .GroupBy(t => t.Id)
+                .Select(g => g.First())
+                .OrderByDescending(t => t.Created)
+                .Take(limit)
+                .ToList();
+
+            if (merged.Count == 0)
+            {
+                var noResultMsg = hasEmail
+                    ? $"[{envLabel}] No transactions found for {email}. Check Raw JSON tab for API response."
+                    : $"[{envLabel}] No transactions found. Check Raw JSON tab for API response.";
+                SetStatus(noResultMsg, error: true);
+                return;
+            }
+
+            // Enrich all transactions in parallel (items + payment + DB per txn concurrently)
+            SetStatus($"[{envLabel}] Loading line items for {merged.Count} transaction(s)…");
+            await Task.WhenAll(merged.Select(txn => EnrichTransactionAsync(service, txn, envLabel, bulkMode: true)));
+            _suppressKpiRefresh = true;
+            try   { foreach (var txn in merged) _transactions.Add(txn); }
+            finally { _suppressKpiRefresh = false; RefreshOverviewKpis(); }
+
+            UpdateSummary();
+            SetConnectionStatus(true);
+
+            var achCount = merged.Count(t => t.IsAch);
+            var foundMsg = hasEmail
+                ? $"[{envLabel}] Found {merged.Count} transaction(s) for {email}"
+                : $"[{envLabel}] Fetched {merged.Count} latest transaction(s)";
+            SetStatus(foundMsg + (achCount > 0 ? $" (including {achCount} ACH)." : "."));
+
+            SetExportEnabled(true);
+
+            if (_transactions.Count > 0)
+            {
+                await StampDisbursementIdsAsync(service, _transactions, envLabel);
+                LoadAllItems();
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Search failed: {ex.Message}", error: true);
+            WpfMessageBox.Show($"Error searching transactions:\n\n{ex.Message}\n\n{ex.InnerException?.Message}",
+                "Search Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            SearchEmailBtn.IsEnabled = true;
+            FetchBtn.IsEnabled = true;
+            FetchLatestBtn.IsEnabled = true;
+        }
+    }
+
+    private async void FetchLatestBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+        var envLabel = IsSandbox ? "Sandbox" : "Production";
+
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            SetStatus($"Please enter a {envLabel} API key.", error: true);
+            return;
+        }
+
+        var email    = UserEmailBox.Text.Trim();
+        var hasEmail = !string.IsNullOrEmpty(email);
+
+        var countText = (LatestCountBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "1";
+        var count = int.TryParse(countText, out var n) && n > 0 ? n : 1;
+
+        FetchLatestBtn.IsEnabled = false;
+        FetchBtn.IsEnabled = false;
+        SearchEmailBtn.IsEnabled = false;
+        SetExportEnabled(false);
+        SetStatus(hasEmail
+            ? $"[{envLabel}] Fetching latest {count} transaction(s) for {email}…"
+            : $"[{envLabel}] Fetching latest {count} transaction(s)…");
+        SetConnectionStatus(false);
+
+        _transactions.Clear();
+        _items.Clear();
+        _disbEntries.Clear();
+        _rawJsons.Clear();
+        _selectedTransaction = null;
+        ClearRawJson();
+        UpdateSummary();
+        ShowItemsPlaceholder(true);
+
+        try
+        {
+            var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service = new PayrixService(apiKey, environment);
+
+            // Fetch regular transactions AND ACH in parallel, then merge
+            // Pass null email when box is empty — service fetches latest without filter
+            var emailArg = hasEmail ? email : null;
+            var fetchAll = service.SearchByEmailAsync(emailArg, count * 5);
+            var fetchAch = service.SearchByPaymentCategoryAsync(emailArg, "ach", count);
+            await Task.WhenAll(fetchAll, fetchAch);
+
+            var (allTxns, rawJson, allError) = fetchAll.Result;
+            var (achTxns, _, _)              = fetchAch.Result;
+
+            // Merge: union by ID, sort newest-first, take requested count
+            var merged = allTxns
+                .Concat(achTxns)
+                .GroupBy(t => t.Id)
+                .Select(g => g.First())
+                .OrderByDescending(t => t.Created)
+                .Take(count)
+                .ToList();
+
+            if (allError is not null && merged.Count == 0)
+            {
+                SetStatus($"Error: {allError}", error: true);
+                return;
+            }
+
+            if (merged.Count == 0)
+            {
+                var noMsg = hasEmail
+                    ? $"[{envLabel}] No transactions found for '{email}'. Check the email or switch environment."
+                    : $"[{envLabel}] No transactions found. Check API key or switch environment.";
+                SetStatus(noMsg, error: true);
+                return;
+            }
+
+            foreach (var txn in merged)
+            {
+                await EnrichTransactionAsync(service, txn, envLabel, bulkMode: true);
+                _transactions.Add(txn);
+            }
+
+            TxnIdsBox.Text = string.Join(", ", merged.Select(t => t.Id).Where(id => id is not null));
+
+            _rawJsons.Add(rawJson);
+            SetRawJson(PrettyPrint(rawJson));
+
+            UpdateSummary();
+            SetConnectionStatus(true);
+
+            var achCount = merged.Count(t => t.IsAch);
+            var okMsg = hasEmail
+                ? $"[{envLabel}] Loaded {merged.Count} transaction(s) for {email}"
+                : $"[{envLabel}] Loaded latest {merged.Count} transaction(s)";
+            SetStatus(okMsg + (achCount > 0 ? $" (including {achCount} ACH)." : "."));
+
+            SetExportEnabled(true);
+
+            if (_transactions.Count > 0)
+            {
+                await StampDisbursementIdsAsync(service, _transactions, envLabel);
+                LoadAllItems();
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Fetch Latest failed: {ex.Message}", error: true);
+            WpfMessageBox.Show($"Error loading transactions:\n\n{ex.Message}\n\n{ex.InnerException?.Message}",
+                "Load Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            FetchLatestBtn.IsEnabled = true;
+            FetchBtn.IsEnabled = true;
+            SearchEmailBtn.IsEnabled = true;
+        }
+    }
+
+    // ── Fetch ACH / Credit Card quick-filter ─────────────────────────────────
+
+    private void FetchAchBtn_Click(object sender, RoutedEventArgs e)
+        => _ = FetchByPaymentCategoryAsync("ach");
+
+    private void FetchCardBtn_Click(object sender, RoutedEventArgs e)
+        => _ = FetchByPaymentCategoryAsync("card");
+
+    private async Task FetchByPaymentCategoryAsync(string category)
+    {
+        var apiKey   = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+        var envLabel = IsSandbox ? "Sandbox" : "Production";
+
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            SetStatus("Please enter an API key.", error: true);
+            return;
+        }
+
+        var email = UserEmailBox.Text.Trim();
+        // Use the same count dropdown as Fetch Latest so the user controls quantity in one place
+        var countText = (LatestCountBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "20";
+        var limit = int.TryParse(countText, out var l) && l > 0 ? l : 20;
+        var label = category == "ach" ? "ACH/eCheck" : "Credit Card";
+
+        FetchAchBtn.IsEnabled  = false;
+        FetchCardBtn.IsEnabled = false;
+        FetchBtn.IsEnabled     = false;
+        SearchEmailBtn.IsEnabled = false;
+        SetExportEnabled(false);
+        SetStatus($"[{envLabel}] Fetching {label} transactions…");
+        SetConnectionStatus(false);
+
+        _transactions.Clear();
+        _items.Clear();
+        _disbEntries.Clear();
+        _rawJsons.Clear();
+        _selectedTransaction = null;
+        ClearRawJson();
+        UpdateSummary();
+        ShowItemsPlaceholder(true);
+
+        try
+        {
+            var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service = new PayrixService(apiKey, environment);
+
+            var (txns, rawJson, error) = await service.SearchByPaymentCategoryAsync(
+                string.IsNullOrEmpty(email) ? null : email, category, limit);
+
+            _rawJsons.Add(rawJson);
+            SetRawJson(PrettyPrint(rawJson));
+
+            if (error is not null && txns.Count == 0)
+            {
+                SetStatus($"[{envLabel}] {error}", error: true);
+                return;
+            }
+
+            SetStatus($"[{envLabel}] Loading line items for {txns.Count} transaction(s)…");
+            await Task.WhenAll(txns.Select(txn => EnrichTransactionAsync(service, txn, envLabel, bulkMode: true)));
+            _suppressKpiRefresh = true;
+            try   { foreach (var txn in txns) _transactions.Add(txn); }
+            finally { _suppressKpiRefresh = false; RefreshOverviewKpis(); }
+
+            // Show fetched IDs in the TxnIdsBox
+            TxnIdsBox.Text = string.Join(", ", txns.Select(t => t.Id).Where(id => id is not null));
+
+            UpdateSummary();
+            SetConnectionStatus(_transactions.Count > 0);
+            SetStatus($"[{envLabel}] Loaded {txns.Count} {label} transaction(s)." +
+                      (error is not null ? $"  ⚠ {error}" : ""));
+
+            SetExportEnabled(_transactions.Count > 0);
+
+            if (_transactions.Count > 0)
+            {
+                await StampDisbursementIdsAsync(service, _transactions, envLabel);
+                LoadAllItems();
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Fetch failed: {ex.Message}", error: true);
+            WpfMessageBox.Show($"Error fetching {label} transactions:\n\n{ex.Message}",
+                "Fetch Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            FetchAchBtn.IsEnabled    = true;
+            FetchCardBtn.IsEnabled   = true;
+            FetchBtn.IsEnabled       = true;
+            SearchEmailBtn.IsEnabled = true;
+        }
+    }
+
+    // ── Clear ─────────────────────────────────────────────────────────────────
+
+    private void ClearBtn_Click(object sender, RoutedEventArgs e)
+    {
+        TxnIdsBox.Text = "";
+        _transactions.Clear();
+        _items.Clear();
+        _disbEntries.Clear();
+        _rawJsons.Clear();
+        _selectedTransaction = null;
+        ClearRawJson();
+        UpdateSummary();
+        ShowItemsPlaceholder(true);
+        SetStatus("Cleared.");
+        SetConnectionStatus(false);
+        SetExportEnabled(false);
+    }
+
+    private void TxnGrid_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (TxnGrid.SelectedCells.Count > 0 &&
+            TxnGrid.SelectedCells[0].Item is Transaction txn)
+        {
+            // Populate Transaction IDs box only when ID column is clicked
+            var clickedHeader = TxnGrid.SelectedCells[0].Column?.Header?.ToString()?.Trim();
+            if (clickedHeader == "ID" && !string.IsNullOrEmpty(txn.Id))
+                TxnIdsBox.Text = txn.Id;
+
+            var idx = _transactions.IndexOf(txn);
+            if (idx >= 0 && idx < _rawJsons.Count)
+                SetRawJson(PrettyPrint(_rawJsons[idx]));
+
+            if (txn != _selectedTransaction)
+                _ = LoadItemsForTransactionAsync(txn);
+        }
+    }
+
+    private Transaction? _selectedTransaction;
+
+    private void LoadItemsForTransaction(Transaction txn) =>
+        _ = LoadItemsForTransactionAsync(txn);
+
+    private async Task LoadItemsForTransactionAsync(Transaction txn)
+    {
+        _selectedTransaction = txn;
+        _items.Clear();
+        // Switch away from disbursement-entries view if active
+        _disbEntries.Clear();
+        DisbEntryGrid.Visibility = Visibility.Collapsed;
+
+        var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+        var hasApiKey = !string.IsNullOrEmpty(apiKey);
+
+        // Use already-fetched items if available, otherwise fetch on demand
+        if (txn.Items.Count > 0)
+        {
+            foreach (var item in txn.Items)
+                _items.Add(item);
+        }
+        else if (txn.Id is not null && hasApiKey)
+        {
+            ShowItemsPlaceholder(false);
+            SetStatus($"Fetching line items for {txn.Id}...");
+            var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service = new PayrixService(apiKey, environment);
+            var fetchedItems = await service.GetTransactionItemsAsync(txn.Id);
+            foreach (var item in fetchedItems)
+            {
+                txn.Items.Add(item);
+                _items.Add(item);
+            }
+        }
+
+        // Lazily complete any enrichment that was skipped during bulk load (payment details, company name)
+        if (hasApiKey && (txn.PaymentDetails is null || txn.CoreCompanyName is null))
+        {
+            try
+            {
+                var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+                var service = new PayrixService(apiKey, environment);
+                await EnrichSingleTransactionAsync(service, txn);
+            }
+            catch { /* non-critical — UI still shows items */ }
+        }
+
+        if (_items.Count > 0)
+            SetStatus($"Loaded {_items.Count} line item(s) for {txn.Id}.");
+
+        UpdateItemsSummary();
+        ShowItemsPlaceholder(false); // Always show grid when a transaction is selected
+    }
+
+    private void LoadAllItems()
+    {
+        _items.Clear();
+        _selectedTransaction = null;
+        foreach (var txn in _transactions)
+            foreach (var item in txn.Items)
+                _items.Add(item);
+        UpdateItemsSummary();
+        ShowItemsPlaceholder(false);
+    }
+
+    // Limits concurrent Payrix API enrichment calls to avoid saturating HttpClient's connection pool.
+    private static readonly SemaphoreSlim _enrichSemaphore = new(6, 6);
+
+    /// <param name="bulkMode">
+    /// When true (batch fetch): only fetch missing items — skip payment details and DB company
+    /// resolution which each add an extra network/DB round-trip per transaction and are not
+    /// needed until the user selects a row.
+    /// </param>
+    private async Task EnrichTransactionAsync(PayrixService service, Transaction txn, string envLabel,
+                                              bool bulkMode = false)
+    {
+        await _enrichSemaphore.WaitAsync();   // resume on UI thread — result application touches bound collections
+        try
+        {
+            // Items: only fetch if expand[items][] didn't already return them with the batch call
+            var itemsTask = (txn.Items.Count == 0 && txn.Id is not null)
+                ? service.GetTransactionItemsAsync(txn.Id)
+                : Task.FromResult<List<TransactionItem>>([]);
+
+            // Payment details + DB company: deferred in bulk mode — loaded lazily on row selection
+            var paymentTask = (!bulkMode && txn.Payment is not null && txn.PaymentDetails is null)
+                ? service.GetPaymentAsync(txn.Payment)
+                : Task.FromResult<PaymentInfo?>(null);
+
+            var hostConn = ActiveHostDbConnectionString();
+            var mainConn = ActiveMainDbConnectionString();
+            Task<string?> companyTask = Task.FromResult<string?>(null);
+            if (!bulkMode && txn.CoreCompanyName is null && txn.Id is not null
+                && !string.IsNullOrEmpty(hostConn) && !string.IsNullOrEmpty(mainConn))
+            {
+                companyTask = ResolveCompanyNameAsync(hostConn, mainConn, txn.Id);
+            }
+
+            await Task.WhenAll(itemsTask, paymentTask, companyTask);   // no ConfigureAwait(false) — stay on UI thread
+
+            if (txn.Items.Count == 0)
+                foreach (var item in itemsTask.Result)
+                    txn.Items.Add(item);
+
+            if (txn.PaymentDetails is null && paymentTask.Result is not null)
+                txn.PaymentDetails = paymentTask.Result;
+
+            if (txn.CoreCompanyName is null && companyTask.Result is not null)
+                txn.CoreCompanyName = companyTask.Result;
+        }
+        finally
+        {
+            _enrichSemaphore.Release();
+        }
+    }
+
+    /// <summary>
+    /// Enriches a single transaction fully (payment + company) — called when the user selects a row
+    /// so that details which were skipped during bulk load are populated on demand.
+    /// </summary>
+    private async Task EnrichSingleTransactionAsync(PayrixService service, Transaction txn)
+    {
+        var paymentTask = (txn.Payment is not null && txn.PaymentDetails is null)
+            ? service.GetPaymentAsync(txn.Payment)
+            : Task.FromResult<PaymentInfo?>(null);
+
+        var hostConn = ActiveHostDbConnectionString();
+        var mainConn = ActiveMainDbConnectionString();
+        Task<string?> companyTask = Task.FromResult<string?>(null);
+        if (txn.CoreCompanyName is null && txn.Id is not null
+            && !string.IsNullOrEmpty(hostConn) && !string.IsNullOrEmpty(mainConn))
+        {
+            companyTask = ResolveCompanyNameAsync(hostConn, mainConn, txn.Id);
+        }
+
+        await Task.WhenAll(paymentTask, companyTask);
+
+        if (txn.PaymentDetails is null && paymentTask.Result is not null)
+            txn.PaymentDetails = paymentTask.Result;
+
+        if (txn.CoreCompanyName is null && companyTask.Result is not null)
+            txn.CoreCompanyName = companyTask.Result;
+    }
+
+    /// <summary>Resolves company name from host + main DB — extracted so it can run on a thread pool thread.</summary>
+    private static async Task<string?> ResolveCompanyNameAsync(string hostConn, string mainConn, string txnId)
+    {
+        try
+        {
+            var (cmpId, _, _) = await HostDbService.GetIdsForTransactionAsync(hostConn, txnId);
+            if (string.IsNullOrEmpty(cmpId)) return null;
+            var (name, _) = await HostDbService.GetCompanyNameAsync(mainConn, cmpId);
+            return string.IsNullOrEmpty(name) ? null : name;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// After a batch of transactions is loaded, resolve all missing DisbursementIds
+    /// in a single bulk API call instead of one call per transaction.
+    /// </summary>
+    private async Task StampDisbursementIdsAsync(PayrixService service, IEnumerable<Transaction> txns, string envLabel)
+    {
+        var needsLookup = txns.Where(t => t.DisbursementId is null && t.Id is not null).ToList();
+        if (needsLookup.Count == 0) return;
+
+        SetStatus($"[{envLabel}] Resolving disbursement IDs for {needsLookup.Count} transaction(s)…");
+
+        var map = await service.GetDisbursementIdMapAsync(needsLookup.Select(t => t.Id!).ToList());
+
+        foreach (var txn in needsLookup)
+        {
+            if (txn.Id is not null && map.TryGetValue(txn.Id, out var disbId))
+                txn.DisbursementId = disbId;
+        }
+    }
+
+    private void ShowItemsPlaceholder(bool show)
+    {
+        ItemsPlaceholder.Visibility   = show ? Visibility.Visible   : Visibility.Collapsed;
+        ItemsGrid.Visibility          = show ? Visibility.Collapsed : Visibility.Visible;
+        DisbEntryGrid.Visibility      = Visibility.Collapsed;
+        ItemsGrandTotalRow.Visibility = show ? Visibility.Collapsed : Visibility.Visible;
+        ItemsSummaryBar.Visibility    = show ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void ShowDisbursementEntries(List<DisbursementEntry> entries)
+    {
+        _disbEntries.Clear();
+        foreach (var e in entries)
+            _disbEntries.Add(e);
+
+        ItemsPlaceholder.Visibility   = Visibility.Collapsed;
+        ItemsGrid.Visibility          = Visibility.Collapsed;
+        DisbEntryGrid.Visibility      = entries.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        ItemsGrandTotalRow.Visibility = Visibility.Collapsed;
+        ItemsSummaryBar.Visibility    = Visibility.Collapsed;
+
+        if (entries.Count == 0)
+            ItemsPlaceholder.Visibility = Visibility.Visible;
+    }
+
+    private void TxnGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (TxnGrid.SelectedCells.Count == 0) return;
+
+        var cell = TxnGrid.SelectedCells[0];
+        if (cell.Item is not Transaction txn) return;
+
+        var header = cell.Column?.Header?.ToString()?.Trim();
+
+        // Always open portal on any double-click (unless it's a special column handled separately)
+        if (!string.IsNullOrEmpty(txn.Id))
+        {
+            TxnIdsBox.Text = txn.Id;
+            OpenTransactionInPortal(txn.Id);
+            SetStatus($"Opening ePayments portal for {txn.Id}…");
+        }
+
+        // Additional per-column convenience actions
+        switch (header)
+        {
+            case "Email":
+                if (!string.IsNullOrEmpty(txn.Email))
+                {
+                    UserEmailBox.Text = txn.Email;
+                    SetStatus($"Email set to: {txn.Email}  |  Opening portal for {txn.Id}…");
+                }
+                break;
+        }
+    }
+
+    // ── Portal link column button ─────────────────────────────────────────────
+
+    private void PortalLinkBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Button btn) return;
+        var txnId = btn.Tag as string;
+        if (string.IsNullOrEmpty(txnId)) return;
+
+        TxnIdsBox.Text = txnId;
+        OpenTransactionInPortal(txnId);
+        SetStatus($"Opening ePayments portal for {txnId}…");
+    }
+
+    // ── JSON Tools ────────────────────────────────────────────────────────────
+
+    private void FormatJsonBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var (result, error) = PayrixLauncher.Services.JsonToolsService.Format(FmtInputBox.Text);
+        if (error is not null)
+        {
+            FmtOutputBox.Background = new WpfBrush(WpfColor.FromRgb(254, 242, 242));
+            FmtOutputBox.Text = $"❌ {error}";
+        }
+        else
+        {
+            FmtOutputBox.Background = new WpfBrush(WpfColor.FromRgb(240, 253, 244));
+            FmtOutputBox.Text = result;
+            SetStatus($"JSON formatted — {result.Length} characters.");
+        }
+    }
+
+    private void FmtClearBtn_Click(object sender, RoutedEventArgs e)
+    {
+        FmtInputBox.Clear();
+        FmtOutputBox.Clear();
+    }
+
+    private void CompareJsonBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var (diffs, error) = PayrixLauncher.Services.JsonToolsService.Compare(CmpLeftBox.Text, CmpRightBox.Text);
+        if (error is not null)
+        {
+            CmpResultBox.Background = new WpfBrush(WpfColor.FromRgb(254, 242, 242));
+            CmpResultBox.Text = $"❌ {error}";
+            return;
+        }
+
+        var summary = PayrixLauncher.Services.JsonToolsService.BuildDiffSummary(diffs);
+        CmpResultBox.Background = diffs.Count == 0
+            ? new WpfBrush(WpfColor.FromRgb(240, 253, 244))
+            : new WpfBrush(WpfColor.FromRgb(255, 251, 235));
+        CmpResultBox.Text = summary;
+        SetStatus(diffs.Count == 0 ? "JSONs are identical." : $"Found {diffs.Count} difference(s).");
+    }
+
+    private void CmpClearBtn_Click(object sender, RoutedEventArgs e)
+    {
+        CmpLeftBox.Clear();
+        CmpRightBox.Clear();
+        CmpResultBox.Clear();
+    }
+
+    // ── Export ────────────────────────────────────────────────────────────────
+
+    private async void ExportJsonBtn_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var dlg = new System.Windows.Forms.FolderBrowserDialog { Description = "Select export folder" };
+            if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+            await ExportService.SaveJsonAsync(_transactions, dlg.SelectedPath);
+            SetStatus($"JSON exported to {dlg.SelectedPath}");
+            WpfMessageBox.Show($"JSON saved to:\n{dlg.SelectedPath}", "Export Complete", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Export failed: {ex.Message}", error: true);
+        }
+    }
+
+    private async void ExportCsvBtn_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var dlg = new System.Windows.Forms.FolderBrowserDialog { Description = "Select export folder" };
+            if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+            await ExportService.SaveCsvAsync(_transactions, dlg.SelectedPath);
+            SetStatus($"CSV exported to {dlg.SelectedPath}");
+            WpfMessageBox.Show($"CSV saved to:\n{dlg.SelectedPath}", "Export Complete", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Export failed: {ex.Message}", error: true);
+        }
+    }
+
+    // ── Right-click context menu ──────────────────────────────────────────────
+
+    private System.Windows.Controls.DataGrid? _lastContextGrid;
+
+    private void Grid_ContextMenuOpening(object sender, System.Windows.Controls.ContextMenuEventArgs e)
+    {
+        _lastContextGrid = sender as System.Windows.Controls.DataGrid;
+    }
+
+    private void CtxCopyCell_Click(object sender, RoutedEventArgs e)
+    {
+        var grid = _lastContextGrid;
+        if (grid?.SelectedCells.Count > 0)
+        {
+            var cell = grid.SelectedCells[0];
+            var value = GetCellValue(cell);
+            if (value is not null)
+                System.Windows.Clipboard.SetText(value);
+        }
+    }
+
+    private void CtxCopyRow_Click(object sender, RoutedEventArgs e)
+    {
+        var grid = _lastContextGrid;
+        if (grid?.SelectedCells.Count > 0)
+        {
+            var item = grid.SelectedCells[0].Item;
+            var values = grid.Columns
+                .Where(c => c.Visibility == Visibility.Visible)
+                .Select(c => GetCellValueFromItem(c, item) ?? "")
+                .ToList();
+            System.Windows.Clipboard.SetText(string.Join("\t", values));
+        }
+    }
+
+    private void CtxCopyAll_Click(object sender, RoutedEventArgs e)
+    {
+        var grid = _lastContextGrid;
+        if (grid is null || grid.Items.Count == 0) return;
+
+        var visibleCols = grid.Columns.Where(c => c.Visibility == Visibility.Visible).ToList();
+        var sb = new System.Text.StringBuilder();
+
+        // Header row
+        sb.AppendLine(string.Join("\t", visibleCols.Select(c => c.Header?.ToString() ?? "")));
+
+        // Data rows
+        foreach (var item in grid.Items)
+        {
+            var row = visibleCols.Select(c => GetCellValueFromItem(c, item) ?? "");
+            sb.AppendLine(string.Join("\t", row));
+        }
+
+        System.Windows.Clipboard.SetText(sb.ToString());
+        SetStatus($"Copied {grid.Items.Count} rows to clipboard.");
+    }
+
+    private void CtxSearchValue_Click(object sender, RoutedEventArgs e)
+    {
+        var grid = _lastContextGrid;
+        if (grid?.SelectedCells.Count > 0)
+        {
+            var value = GetCellValue(grid.SelectedCells[0]);
+            if (!string.IsNullOrEmpty(value))
+            {
+                UserEmailBox.Text = value;
+                SetStatus($"Search email set to: {value}");
+            }
+        }
+    }
+
+    private void CtxClearTextBox_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is System.Windows.Controls.MenuItem menuItem &&
+            menuItem.Parent is System.Windows.Controls.ContextMenu cm &&
+            cm.PlacementTarget is System.Windows.Controls.TextBox tb)
+        {
+            tb.Clear();
+        }
+    }
+
+    private static string? GetCellValue(System.Windows.Controls.DataGridCellInfo cell)
+    {
+        return GetCellValueFromItem(cell.Column, cell.Item);
+    }
+
+    private static string? GetCellValueFromItem(System.Windows.Controls.DataGridColumn col, object item)
+    {
+        if (item is null) return null;
+
+        if (col is System.Windows.Controls.DataGridTextColumn textCol)
+        {
+            var binding = textCol.Binding as System.Windows.Data.Binding;
+            if (binding?.Path?.Path is string path)
+            {
+                var prop = item.GetType().GetProperty(path);
+                return prop?.GetValue(item)?.ToString();
+            }
+        }
+        else if (col is System.Windows.Controls.DataGridTemplateColumn)
+        {
+            // For template columns (Status, Discrepancy), use reflection on header name
+            var header = col.Header?.ToString()?.Trim();
+            if (header is not null)
+            {
+                var prop = item.GetType().GetProperty(header) ??
+                           item.GetType().GetProperty(header + "Label") ??
+                           item.GetType().GetProperty(header.Replace(" ", ""));
+                return prop?.GetValue(item)?.ToString();
+            }
+        }
+
+        return null;
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private static readonly System.Globalization.CultureInfo UsdCulture =
+        System.Globalization.CultureInfo.GetCultureInfo("en-US");
+
+    private void UpdateSummary()
+    {
+        var count = _transactions.Count;
+        SummaryCount.Text    = count.ToString();
+        SummaryTotal.Text    = _transactions.Sum(t => t.TotalDollars).ToString("C2", UsdCulture);
+        SummaryApproved.Text = _transactions.Sum(t => t.ApprovedDollars).ToString("C2", UsdCulture);
+        SummaryTax.Text      = _transactions.Sum(t => t.TaxDollars).ToString("C2", UsdCulture);
+        SummarySettled.Text  = _transactions.Count(t => t.Status == 3).ToString();
+        SummaryDeclined.Text = _transactions.Count(t => t.Status == 2 || t.Status == 4).ToString();
+        SummaryItems.Text    = _items.Count.ToString();
+
+        // New tiles
+        var totalFees = _transactions.Sum(t => (t.Fee ?? 0) + (t.ConvenienceFee ?? 0) + (t.Surcharge ?? 0));
+        SummaryFees.Text        = (totalFees / 100m).ToString("C2", UsdCulture);
+        SummaryPending.Text     = _transactions.Count(t => t.Status == 1).ToString();
+        SummaryRefunded.Text    = _transactions.Count(t => (t.Refunded ?? 0) != 0).ToString();
+        SummaryAvg.Text         = count > 0
+            ? (_transactions.Sum(t => t.TotalDollars) / count).ToString("C2", UsdCulture)
+            : "$0.00";
+        SummaryDiscount.Text    = (_transactions.Sum(t => t.Discount ?? 0) / 100m).ToString("C2", UsdCulture);
+        SummarySettledAmt.Text  = (_transactions.Sum(t => t.SettledTotal ?? 0) / 100m).ToString("C2", UsdCulture);
+        SummaryCard.Text        = _transactions.Count(t => !t.IsAch && t.Type >= 1 && t.Type <= 6).ToString();
+        SummaryAch.Text         = _transactions.Count(t => t.IsAch).ToString();
+        SummaryCaptured.Text    = _transactions.Count(t => t.Status == 5).ToString();
+        SummaryDisbursed.Text   = _transactions.Count(t => t.Type == 6).ToString();
+
+        var companies = _transactions
+            .Select(t => t.CoreCompanyName)
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        SummaryCompany.Text = companies.Count switch
+        {
+            0 => "—",
+            1 => companies[0]!,
+            _ => $"{companies.Count} companies"
+        };
+
+        UpdateItemsSummary();
+    }
+
+    private void UpdateItemsSummary()
+    {
+        var itemsSum  = _items.Sum(i => i.TotalDollars);
+        var priceSum  = _items.Sum(i => i.PriceDollars);
+
+        // Grand total footer row
+        GrandTotalAmount.Text = itemsSum.ToString("C2", UsdCulture);
+        GrandTotalPrice.Text  = priceSum.ToString("C2", UsdCulture);
+
+        if (_selectedTransaction is not null)
+        {
+            // Single transaction selected — compare items sum vs approved
+            var headerAmt = _selectedTransaction.ApprovedDollars;
+            ItemsSumText.Text      = itemsSum.ToString("C2", UsdCulture);
+            ItemsTxnTotalText.Text = headerAmt.ToString("C2", UsdCulture);
+            ItemsCountText.Text    = $"{_items.Count} line item(s) for transaction {_selectedTransaction.Id}";
+            var matched = itemsSum == headerAmt;
+            ItemsMatchIcon.Visibility    = matched ? Visibility.Visible   : Visibility.Collapsed;
+            ItemsMismatchIcon.Visibility = matched ? Visibility.Collapsed : Visibility.Visible;
+            if (!matched)
+                ItemsDiffText.Text = Math.Abs(itemsSum - headerAmt).ToString("C2", UsdCulture);
+        }
+        else
+        {
+            // All transactions — show aggregate totals, hide match indicator
+            var allApproved = _transactions.Sum(t => t.ApprovedDollars);
+            ItemsSumText.Text      = itemsSum.ToString("C2", UsdCulture);
+            ItemsTxnTotalText.Text = allApproved.ToString("C2", UsdCulture);
+            ItemsCountText.Text    = $"{_items.Count} line item(s) across {_transactions.Count} transaction(s)";
+            ItemsMatchIcon.Visibility    = Visibility.Collapsed;
+            ItemsMismatchIcon.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void SetExportEnabled(bool enabled)
+    {
+        ExportJsonBtn.IsEnabled = enabled;
+        ExportCsvBtn.IsEnabled  = enabled;
+    }
+
+    private void SetStatus(string msg, bool error = false)
+    {
+        FooterStatus.Text = msg;
+        FooterStatus.Foreground = error
+            ? new WpfBrush(WpfColor.FromRgb(220, 38, 38))
+            : new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+    }
+
+    private void SetConnectionStatus(bool connected)
+    {
+        StatusDot.Fill = connected
+            ? new WpfBrush(WpfColor.FromRgb(34, 197, 94))
+            : new WpfBrush(WpfColor.FromRgb(252, 165, 165));
+        StatusText.Text = connected
+            ? $"Connected ({(IsSandbox ? "Sandbox" : "Production")})"
+            : "Not connected";
+
+        // Update pill border/background to reflect connected state
+        ConnectionPill.BorderBrush = connected
+            ? new WpfBrush(WpfColor.FromRgb(187, 247, 208))   // #BBF7D0 green
+            : new WpfBrush(WpfColor.FromRgb(254, 202, 202));   // #FECACA red
+        ConnectionPill.Background = connected
+            ? new WpfBrush(WpfColor.FromRgb(240, 253, 244))    // #F0FDF4 light green
+            : new WpfBrush(WpfColor.FromRgb(255, 241, 242));   // #FFF1F2 light red
+    }
+
+    private static string PrettyPrint(string json)
+    {
+        try { return JsonSerializer.Serialize(JsonDocument.Parse(json), PrettyJson); }
+        catch { return json; }
+    }
+
+    private static readonly JsonSerializerOptions MinifyJson = new()
+    {
+        WriteIndented = false,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    private static string Minify(string json)
+    {
+        try { return JsonSerializer.Serialize(JsonDocument.Parse(json), MinifyJson); }
+        catch { return json; }
+    }
+
+    // ── Webhook Tests ─────────────────────────────────────────────────────────
+
+    private void InitWebhookTests()
+    {
+        // Pass the saved EntityCustom so onboarding test cases use the right local account/company
+        var custom = EntityCustomBox?.Text.Trim();
+        foreach (var tc in WebhookTestService.BuildTestCases(custom))
+            _testCases.Add(tc);
+
+        TestResultsGrid.ItemsSource = _testCases;
+        // Only set default URL if none was previously saved (LoadSettings may have already set it)
+        if (string.IsNullOrEmpty(WebhookUrlBox.Text))
+            WebhookUrlBox.Text = WebhookTestService.LocalEndpoint;
+    }
+
+    private void WebhookEnvBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (WebhookUrlBox is null) return;
+        var selected = (WebhookEnvBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString();
+        WebhookUrlBox.Text = selected switch
+        {
+            "Local"      => WebhookTestService.LocalEndpoint,
+            "Staging"    => WebhookTestService.StagingEndpoint,
+            "Sprint"     => WebhookTestService.SprintEndpoint,
+            "Production" => WebhookTestService.ProductionEndpoint,
+            _            => WebhookUrlBox.Text
+        };
+        if (selected != "Custom")
+            WebhookUrlBox.IsReadOnly = true;
+        else
+            WebhookUrlBox.IsReadOnly = false;
+    }
+
+    private async void RunAllTestsBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var url = WebhookUrlBox.Text.Trim();
+        if (string.IsNullOrEmpty(url))
+        {
+            WpfMessageBox.Show("Please enter an endpoint URL.", "Missing URL",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        _testCts?.Cancel();
+        _testCts = new CancellationTokenSource();
+        var ct = _testCts.Token;
+
+        RunAllTestsBtn.IsEnabled = false;
+        WebhookTestSummary.Text  = $"Running {_testCases.Count} tests against {url} …";
+        WebhookTestSummary.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+
+        int passed = 0, failed = 0;
+
+        for (int i = 0; i < _testCases.Count; i++)
+        {
+            if (ct.IsCancellationRequested) break;
+
+            var tc = _testCases[i];
+            WebhookTestProgress.Text = $"{i + 1} / {_testCases.Count}";
+
+            await WebhookTestService.RunAsync(tc, url, ct);
+
+            if (tc.Status == TestStatus.Pass) passed++;
+            else if (tc.Status == TestStatus.Fail) failed++;
+        }
+
+        WebhookTestProgress.Text = "";
+        RunAllTestsBtn.IsEnabled = true;
+
+        var allPassed = failed == 0;
+        WebhookTestSummary.Text = allPassed
+            ? $"✓  All {passed} tests passed"
+            : $"✗  {passed} passed, {failed} failed out of {_testCases.Count} tests";
+
+        WebhookTestSummary.Foreground = new WpfBrush(
+            allPassed
+                ? WpfColor.FromRgb(22, 101, 52)
+                : WpfColor.FromRgb(153, 27, 27));
+    }
+
+    private async void RunSingleTestBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Button btn) return;
+        if (btn.Tag is not WebhookTestCase tc) return;
+
+        var url = WebhookUrlBox.Text.Trim();
+        if (string.IsNullOrEmpty(url))
+        {
+            SetStatus("Please select an environment first.", error: true);
+            return;
+        }
+
+        // Only populate the box if it is currently empty — never overwrite user edits
+        if (string.IsNullOrWhiteSpace(WebhookPayloadBox.Text))
+            SetPayload(tc.Payload);
+
+        // Always use whatever is currently in the box (preserves any manual edits)
+        var livePayload = WebhookPayloadBox.Text;
+        tc.Payload = livePayload;
+
+        btn.IsEnabled = false;
+        WebhookTestSummary.Text = $"Running: {tc.Name}…";
+        WebhookTestSummary.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+
+        await WebhookTestService.RunAsync(tc, url);
+
+        var ok = tc.Status == TestStatus.Pass;
+        WebhookTestSummary.Text = ok
+            ? $"✓  {tc.Name} — HTTP {tc.HttpCode}  ({tc.DurationMs} ms)"
+            : $"✗  {tc.Name} — {tc.Detail}";
+        WebhookTestSummary.Foreground = new WpfBrush(ok
+            ? WpfColor.FromRgb(22, 101, 52)
+            : WpfColor.FromRgb(153, 27, 27));
+
+        btn.IsEnabled = true;
+    }
+
+    // ── Payload JSON toolbar ──────────────────────────────────────────────────
+    private void WebhookPayloadCopyAll_Click(object sender, RoutedEventArgs e)
+    {
+        if (!string.IsNullOrEmpty(WebhookPayloadBox.Text))
+            System.Windows.Clipboard.SetText(WebhookPayloadBox.Text);
+    }
+
+    private void WebhookPayloadPaste_Click(object sender, RoutedEventArgs e)
+    {
+        if (System.Windows.Clipboard.ContainsText())
+            SetPayload(System.Windows.Clipboard.GetText());
+    }
+
+    private void WebhookPayloadClear_Click(object sender, RoutedEventArgs e) => ClearPayload();
+
+    // ── Webhook config panel toggle ──────────────────────────────────────────
+
+    private void WebhookConfigToggle_Click(object sender, MouseButtonEventArgs e)
+    {
+        bool expand = WebhookDateFilterPanel.Visibility != Visibility.Visible;
+        if (expand)
+        {
+            // Opening config — hide result strips so they don't overlap
+            EntityInfoPanel.Visibility = Visibility.Collapsed;
+            HostDbInfoPanel.Visibility = Visibility.Collapsed;
+            WebhookDateFilterPanel.Visibility   = Visibility.Visible;
+            WebhookEntityCustomPanel.Visibility = Visibility.Visible;
+            WebhookDbConfigPanel.Visibility     = Visibility.Visible;
+            WebhookConfigToggleText.Text        = "⚙ Config ▲";
+            if (WebhookConfigToggleText2 is not null)
+                WebhookConfigToggleText2.Text   = "⚙ Config ▲";
+        }
+        else
+        {
+            CollapseConfig();
+        }
+    }
+
+    // ── Replace-field panel toggle ───────────────────────────────────────────
+
+    private void ReplaceRowToggle_Click(object sender, MouseButtonEventArgs e)
+    {
+        bool show = ReplaceFieldPanel.Visibility != Visibility.Visible;
+        ReplaceFieldPanel.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        ReplaceToggleText.Text       = show ? "🔄 Replace ▲" : "🔄 Replace ▼";
+    }
+
+    // ── JSON payload field replace ───────────────────────────────────────────
+
+    private void ReplaceFieldBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var field = ReplaceFieldNameBox.Text.Trim().Trim('"');
+        var value = ReplaceFieldValueBox.Text;
+        if (string.IsNullOrEmpty(field)) return;
+
+        var json = WebhookPayloadBox.Text;
+
+        // Build replacement value — keep null/true/false/numbers bare; quote everything else
+        string jsonValue;
+        if (value == "null" || value == "true" || value == "false")
+            jsonValue = value;
+        else if (double.TryParse(value, System.Globalization.NumberStyles.Any,
+                                  System.Globalization.CultureInfo.InvariantCulture, out _))
+            jsonValue = value;
+        else
+            jsonValue = $"\"{value.Replace("\\\"", "\\\\\\\"").Replace("\"", "\\\"")}\"";
+
+        // Match: "fieldName": <existing value — string, number, null, true, false>
+        var pattern     = $@"(""{System.Text.RegularExpressions.Regex.Escape(field)}""\s*:\s*)(?:""(?:[^""\\]|\\.)*""|null|true|false|-?\d+(?:\.\d+)?)";
+        var replacement = $"$1{jsonValue}";
+
+        var updated = System.Text.RegularExpressions.Regex.Replace(json, pattern, replacement);
+        if (updated == json)
+        {
+            ReplaceFieldStatus.Text     = "⚠ field not found";
+            ReplaceFieldStatus.Foreground = new WpfBrush(WpfColor.FromRgb(251, 191, 36));
+        }
+        else
+        {
+            SetPayload(updated);
+            ReplaceFieldStatus.Text     = "✔ replaced";
+            ReplaceFieldStatus.Foreground = new WpfBrush(WpfColor.FromRgb(74, 222, 128));
+        }
+    }
+
+    private void QuickFieldChip_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is System.Windows.Controls.Button btn && btn.Tag is string tag)
+            ReplaceFieldNameBox.Text = tag;
+        ReplaceFieldValueBox.Focus();
+    }
+
+    private void ResetTestsBtn_Click(object sender, RoutedEventArgs e)
+    {
+        _testCts?.Cancel();
+        _testCases.Clear();
+        var custom = EntityCustomBox?.Text.Trim();
+        foreach (var tc in WebhookTestService.BuildTestCases(custom))
+            _testCases.Add(tc);
+        WebhookTestSummary.Text = "Select an environment and click Run All Tests";
+        WebhookTestSummary.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+        WebhookTestProgress.Text = "";
+        ClearPayload();
+    }
+
+    private void TestResultsGrid_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (TestResultsGrid.SelectedItem is WebhookTestCase tc)
+            SetPayload(PrettyPrint(tc.Payload));
+    }
+
+    // ── Webhook type badge update ─────────────────────────────────────────────
+
+    private void WebhookTypeBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (WebhookTypeBadge is null || AchAmountBox is null) return;
+        var (label, bg, border) = WebhookTypeBox.SelectedIndex switch
+        {
+            1 => ("ACH RETURN",    WpfColor.FromRgb(234, 88,  12),  WpfColor.FromRgb(253, 186, 116)),
+            2 => ("CC REFUND",     WpfColor.FromRgb(37,  99,  235), WpfColor.FromRgb(147, 197, 253)),
+            3 => ("CC RETURN",     WpfColor.FromRgb(124, 58,  237), WpfColor.FromRgb(196, 181, 253)),
+            4 => ("DISBURSEMENT",  WpfColor.FromRgb(15,  118, 110), WpfColor.FromRgb(94,  234, 212)),
+            5 => ("WITHDRAWAL",    WpfColor.FromRgb(101, 60,  20),  WpfColor.FromRgb(217, 163, 86)),
+            6 => ("ACH REFUND",    WpfColor.FromRgb(190, 18,  60),  WpfColor.FromRgb(253, 164, 175)),
+            7 => ("WD PROCESSED",  WpfColor.FromRgb(30,  64,  175), WpfColor.FromRgb(147, 197, 253)),
+            8 => ("ENT CREATED",   WpfColor.FromRgb(4,   120, 87),  WpfColor.FromRgb(110, 231, 183)),
+            9 => ("MERCH BOARDED", WpfColor.FromRgb(109, 40,  217), WpfColor.FromRgb(196, 181, 253)),
+            _ => ("ACH FUNDED",    WpfColor.FromRgb(22,  163, 74),  WpfColor.FromRgb(134, 239, 172))
+        };
+        WebhookTypeBadgeText.Text       = label;
+        WebhookTypeBadge.Background     = new WpfBrush(bg);
+        WebhookPostBorder.BorderBrush   = new WpfBrush(border);
+        if (EntityInfoPanel   is not null) EntityInfoPanel.Visibility   = Visibility.Collapsed;
+        if (HostDbInfoPanel   is not null) HostDbInfoPanel.Visibility   = Visibility.Collapsed;
+        AchAmountBox.Text = WebhookTypeBox.SelectedIndex switch
+        {
+            0 => string.IsNullOrEmpty(AchAmountBox.Text) || AchAmountBox.Text is "74.00" or "250.00" or "6131.24" ? "898.00"  : AchAmountBox.Text,
+            4 => string.IsNullOrEmpty(AchAmountBox.Text) || AchAmountBox.Text is "898.00" or "74.00" or "6131.24" ? "250.00"  : AchAmountBox.Text,
+            5 or 7 => string.IsNullOrEmpty(AchAmountBox.Text) || AchAmountBox.Text is "898.00" or "74.00" or "250.00"  ? "6131.24" : AchAmountBox.Text,
+            _ => string.IsNullOrEmpty(AchAmountBox.Text) || AchAmountBox.Text is "898.00" or "250.00" or "6131.24"? "74.00"   : AchAmountBox.Text   // 1,2,3,6
+        };
+    }
+
+    // ── Open log file ────────────────────────────────────────────────────────
+
+    private void OpenLogBtn_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var path = WebhookLogger.EnsureAndGetPath();
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName        = path,
+                UseShellExecute = true   // opens with associated app (Notepad / VS Code etc.)
+            });
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Cannot open log: {ex.Message}", error: true);
+        }
+    }
+
+    // ── Error helpers ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Drills through the InnerException chain and returns the most specific
+    /// message — avoids the generic "An error occurred while sending the request."
+    /// wrapping message from HttpRequestException.
+    /// </summary>
+    private static string GetDeepMessage(Exception ex)
+    {
+        var inner = ex;
+        while (inner.InnerException is not null)
+            inner = inner.InnerException;
+        // If the deepest message is different from the top-level, show both
+        return inner == ex
+            ? ex.Message
+            : $"{inner.Message}  [{ex.GetType().Name}]";
+    }
+
+    // ── Entity IDs display helpers ───────────────────────────────────────────
+
+    /// <summary>Collapses the config panels (date filter, entity custom, DB config) and resets both toggle buttons.</summary>
+    private void CollapseConfig()
+    {
+        WebhookDateFilterPanel.Visibility   = Visibility.Collapsed;
+        WebhookEntityCustomPanel.Visibility = Visibility.Collapsed;
+        WebhookDbConfigPanel.Visibility     = Visibility.Collapsed;
+        WebhookConfigToggleText.Text        = "⚙ Config ▼";
+        if (WebhookConfigToggleText2 is not null)
+            WebhookConfigToggleText2.Text   = "⚙ Config ▼";
+    }
+
+    private void ShowEntityIds(string? accountId, string? companyId, string? entityId = null)
+    {
+        if (accountId is null && companyId is null)
+        {
+            EntityInfoPanel.Visibility = Visibility.Collapsed;
+            return;
+        }
+        EntityAccountIdText.Text   = accountId  ?? "—";
+        EntityCompanyIdText.Text   = companyId  ?? "—";
+        EntityIdText.Text          = entityId is { Length: > 0 } ? $"Entity: {entityId}" : "";
+        EntityInfoPanel.Visibility = Visibility.Visible;
+    }
+
+    private void ShowHostDbIds(string? companyId, string? accountId, string? note = null)
+    {
+        if (companyId is null && accountId is null)
+        {
+            HostDbInfoPanel.Visibility = Visibility.Collapsed;
+            return;
+        }
+        var isError = companyId == "ERR";
+        var blue    = new WpfBrush(WpfColor.FromRgb(29, 78, 216));
+        var red     = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+        HostDbAccountIdText.Text       = accountId  ?? "—";
+        HostDbCompanyIdText.Text       = companyId  ?? "—";
+        HostDbAccountIdText.Foreground = isError ? red : blue;
+        HostDbCompanyIdText.Foreground = isError ? red : blue;
+        HostDbSourceText.Text          = note ?? "";
+        HostDbInfoPanel.Visibility     = Visibility.Visible;
+    }
+
+    /// <summary>Returns the active payment-service DB connection string based on the selected webhook environment.</summary>
+    private string ActiveHostDbConnectionString() => WebhookEnvBox.SelectedIndex switch
+    {
+        0 => LocalHostDbBox.Text.Trim(),
+        1 => StagingHostDbBox.Text.Trim(),
+        2 => SprintHostDbBox.Text.Trim(),
+        _ => SprintHostDbBox.Text.Trim()
+    };
+
+    /// <summary>Returns the active main host DB connection string based on the selected webhook environment.</summary>
+    private string ActiveMainDbConnectionString() => WebhookEnvBox.SelectedIndex switch
+    {
+        0 => LocalMainDbBox.Text.Trim(),
+        1 => StagingMainDbBox.Text.Trim(),
+        2 => SprintMainDbBox.Text.Trim(),
+        _ => SprintMainDbBox.Text.Trim()
+    };
+
+    /// <summary>Parses Account_ID and Company_ID embedded in a BQE CORE transaction description.</summary>
+    private static (string? AccountId, string? CompanyId) ParseIdsFromDescription(string? description)
+    {
+        if (string.IsNullOrEmpty(description)) return (null, null);
+        string? accId = null, cmpId = null;
+        foreach (var part in description.Split('|'))
+        {
+            var seg = part.Trim();
+            if (seg.StartsWith("Account_ID:", StringComparison.OrdinalIgnoreCase))
+                accId = seg["Account_ID:".Length..].Trim();
+            else if (seg.StartsWith("Company_ID:", StringComparison.OrdinalIgnoreCase))
+                cmpId = seg["Company_ID:".Length..].Trim();
+        }
+        return (accId, cmpId);
+    }
+
+    /// <summary>Queries the host DB for Core AccountID + CompanyID and updates the blue strip.
+    /// Falls back to parsing Account_ID / Company_ID from the transaction description when DB has no record.</summary>
+    private async Task LookupHostDbAsync(string txnId, string? fallbackDescription = null)
+    {
+        var connStr = ActiveHostDbConnectionString();
+        var envLabel = WebhookEnvBox.SelectedIndex switch { 0 => "Local", 1 => "Staging", 2 => "Sprint", _ => "Sprint" };
+
+        if (string.IsNullOrEmpty(connStr))
+        {
+            // No DB configured — try description fallback immediately
+            var (dAcc, dCmp) = ParseIdsFromDescription(fallbackDescription);
+            if (dAcc is not null || dCmp is not null)
+                ShowHostDbIds(dCmp ?? "—", dAcc ?? "—", "📍 From transaction description (no DB configured)");
+            return;
+        }
+
+        var (companyId, _, error) = await HostDbService.GetIdsForTransactionAsync(connStr, txnId);
+
+        if (error is not null)
+        {
+            // DB error — still try description fallback
+            var (dAcc, dCmp) = ParseIdsFromDescription(fallbackDescription);
+            if (dAcc is not null || dCmp is not null)
+            {
+                ShowHostDbIds(dCmp ?? "—", dAcc ?? "—", $"📍 From transaction description (⚠ {envLabel} DB: {error})");
+                return;
+            }
+            ShowHostDbIds("ERR", error, $"⚠ check {envLabel} connection string / DB");
+            return;
+        }
+
+        if (companyId is null)
+        {
+            // No record in payment-service DB — try description fallback
+            var (dAcc, dCmp) = ParseIdsFromDescription(fallbackDescription);
+            if (dAcc is not null || dCmp is not null)
+            {
+                ShowHostDbIds(dCmp ?? "—", dAcc ?? "—", $"📍 From transaction description ({envLabel} DB: no record)");
+                return;
+            }
+            ShowHostDbIds("—", "—", $"📍 {envLabel} payment-service DB — no record for this txn");
+            return;
+        }
+
+        // Get AccountID from main host DB using the resolved CompanyID
+        var coreEmail = CoreAccountEmailBox.Text.Trim();
+        var (accountId, via, accError) = await HostDbService.GetAccountIdAsync(
+            ActiveMainDbConnectionString(), companyId, string.IsNullOrEmpty(coreEmail) ? null : coreEmail);
+        var viaNote = via is not null ? $" (via {via})" : "";
+        var sourceNote = $"📍 {envLabel} payment-service DB → {envLabel} main DB";
+        ShowHostDbIds(companyId, accountId is not null ? accountId + viaNote : "—",
+                      accError is not null ? $"⚠ {accError}" : sourceNote);
+    }
+
+    // ── Entity strip copy buttons ────────────────────────────────────────────
+    private void CopyEntityAccountIdBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var val = EntityAccountIdText.Text;
+        if (val is "—" or "") return;
+        System.Windows.Clipboard.SetText(val);
+        SetStatus($"Copied Account ID → {val}");
+    }
+
+    private void CopyEntityCompanyIdBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var val = EntityCompanyIdText.Text;
+        if (val is "—" or "") return;
+        System.Windows.Clipboard.SetText(val);
+        SetStatus($"Copied Company ID → {val}");
+    }
+
+    private void CopyEntityIdsBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var text = $"AccountID: {EntityAccountIdText.Text}  |  CompanyID: {EntityCompanyIdText.Text}";
+        System.Windows.Clipboard.SetText(text);
+        SetStatus($"Copied → {text}");
+    }
+
+    // ── Host DB strip copy buttons ───────────────────────────────────────────
+    private void CopyHostDbAccountIdBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var val = HostDbAccountIdText.Text;
+        if (val is "—" or "") return;
+        System.Windows.Clipboard.SetText(val);
+        SetStatus($"Copied Account ID → {val}");
+    }
+
+    private void CopyHostDbCompanyIdBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var val = HostDbCompanyIdText.Text;
+        if (val is "—" or "") return;
+        System.Windows.Clipboard.SetText(val);
+        SetStatus($"Copied Company ID → {val}");
+    }
+
+    private void CopyHostDbIdsBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var text = $"AccountID: {HostDbAccountIdText.Text}  |  CompanyID: {HostDbCompanyIdText.Text}";
+        System.Windows.Clipboard.SetText(text);
+        SetStatus($"Copied → {text}");
+    }
+
+    // ── Fetch AccountID + CompanyID by email ─────────────────────────────────
+
+    /// <summary>
+    /// Called once on startup — silently fills Local DB boxes from INI if they are still empty.
+    /// Does not override values the user already saved.
+    /// </summary>
+    private void AutoDetectLocalSettingsOnStartup()
+    {
+        // Always re-read from the local INI so the connection strings are never stale/hardcoded.
+        // If the INI cannot be found, fall back to whatever is already saved in settings.json.
+        var (hostConn, mainConn, sprintHostConn, sprintMainConn, _) = ReadLocalHostIniAll();
+        if (!string.IsNullOrEmpty(hostConn)) LocalHostDbBox.Text = hostConn;
+        if (!string.IsNullOrEmpty(mainConn)) LocalMainDbBox.Text = mainConn;
+        if (!string.IsNullOrEmpty(hostConn) || !string.IsNullOrEmpty(mainConn))
+            SaveSettings();
+    }
+
+    /// <summary>
+    /// Reads the local BQE_CORE_HOSTAPI_Settings.ini and auto-populates the Local
+    /// connection string boxes, then fetches AccountID + CompanyID for the email.
+    /// </summary>
+    private async void AutoDetectLocalSettingsBtn_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        AutoDetectStatusText.Text = "Detecting…";
+        try
+        {
+            var (hostConn, mainConn, sprintHostConn, sprintMainConn, err) = ReadLocalHostIniAll();
+            if (err is not null)
+            {
+                AutoDetectStatusText.Text = $"⚠ {err}";
+                return;
+            }
+            if (!string.IsNullOrEmpty(hostConn)) LocalHostDbBox.Text = hostConn;
+            if (!string.IsNullOrEmpty(mainConn)) LocalMainDbBox.Text = mainConn;
+            var iniFound = FindLocalHostIniPath() ?? "?";
+            AutoDetectStatusText.Text = $"✔ Detected from {iniFound}";
+            AutoDetectStatusText.ToolTip = iniFound;
+            SaveSettings();
+
+            // Auto-fetch IDs if email is already set
+            var email = CoreAccountEmailBox.Text.Trim();
+            if (!string.IsNullOrEmpty(email) && !string.IsNullOrEmpty(mainConn))
+                await FetchAndShowIdsByEmailAsync(mainConn, email);
+        }
+        catch (Exception ex)
+        {
+            AutoDetectStatusText.Text = $"⚠ {ex.Message}";
+        }
+    }
+
+    private async void FetchIdsByEmailBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var email   = CoreAccountEmailBox.Text.Trim();
+        var connStr = LocalMainDbBox.Text.Trim();
+
+        if (string.IsNullOrEmpty(email))
+        {
+            SetStatus("Enter an email address first.");
+            return;
+        }
+        if (string.IsNullOrEmpty(connStr))
+        {
+            SetStatus("Local Main DB connection string is empty. Use ⚡ Auto-detect or enter it manually.");
+            return;
+        }
+
+        FetchIdsByEmailBtn.IsEnabled = false;
+        SetStatus($"Looking up AccountID + CompanyID for {email}…");
+        await FetchAndShowIdsByEmailAsync(connStr, email);
+        FetchIdsByEmailBtn.IsEnabled = true;
+    }
+
+    private async Task FetchAndShowIdsByEmailAsync(string mainConn, string email)
+    {
+        var (accountId, companyId, error) = await HostDbService.GetAccountAndCompanyByEmailAsync(mainConn, email);
+        if (error is not null)
+        {
+            ShowHostDbIds("ERR", error, $"⚠ lookup by email failed");
+            SetStatus($"Lookup failed: {error}");
+            return;
+        }
+
+        ShowHostDbIds(
+            companyId  ?? "—",
+            accountId  ?? "—",
+            $"📧 Looked up from Account.Email ({email})");
+
+        // Make sure the result panel is visible (config may still be collapsed)
+        HostDbInfoPanel.Visibility = Visibility.Visible;
+        SetStatus($"Found → AccountID: {accountId ?? "—"}  |  CompanyID: {companyId ?? "—"}");
+    }
+
+    /// <summary>
+    /// Parses BQE_CORE_HOSTAPI_Settings.ini from its known local path.
+    /// Returns (paymentServiceConnStr, mainDbConnStr, errorMessage).
+    /// </summary>
+    /// <summary>
+    /// Discovers the BQE_CORE_HOSTAPI_Settings.ini on any machine using multiple strategies:
+    /// 1. IIS applicationHost.config — finds the actual deployed site root
+    /// 2. Common IIS wwwroot paths
+    /// 3. Any drive's Projects folder (handles different dev setups)
+    /// 4. Environment variable BQECOREHOST_ROOT
+    /// </summary>
+    private static string? FindLocalHostIniPath()
+    {
+        var candidates = new List<string>();
+
+        // ── Strategy 1: read IIS applicationHost.config to find actual site physical path ──
+        try
+        {
+            var iisConfig = @"C:\Windows\System32\inetsrv\config\applicationHost.config";
+            if (File.Exists(iisConfig))
+            {
+                var xml = File.ReadAllText(iisConfig);
+                // Find physicalPath attributes for sites whose name contains BQECoreHost or BQECoreHostApi
+                var matches = System.Text.RegularExpressions.Regex.Matches(
+                    xml,
+                    @"physicalPath=""([^""]+)""",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                foreach (System.Text.RegularExpressions.Match m in matches)
+                {
+                    var phys = m.Groups[1].Value.TrimEnd('\\');
+                    candidates.Add(Path.Combine(phys, "Setting", "BQE_CORE_HOSTAPI_Settings.ini"));
+                }
+            }
+        }
+        catch { /* IIS config unreadable — continue */ }
+
+        // ── Strategy 2: environment variable override ──
+        var envRoot = Environment.GetEnvironmentVariable("BQECOREHOST_ROOT");
+        if (!string.IsNullOrEmpty(envRoot))
+            candidates.Add(Path.Combine(envRoot, "Setting", "BQE_CORE_HOSTAPI_Settings.ini"));
+
+        // ── Strategy 3: IIS default wwwroot paths ──
+        foreach (var wwwroot in new[] { @"C:\inetpub\wwwroot", @"D:\inetpub\wwwroot", @"E:\inetpub\wwwroot" })
+        {
+            candidates.Add(Path.Combine(wwwroot, "BQECoreHostApi",  "Setting", "BQE_CORE_HOSTAPI_Settings.ini"));
+            candidates.Add(Path.Combine(wwwroot, "BQECoreHostAPI",  "Setting", "BQE_CORE_HOSTAPI_Settings.ini"));
+            candidates.Add(Path.Combine(wwwroot, "BQECoreHost",     "Setting", "BQE_CORE_HOSTAPI_Settings.ini"));
+            candidates.Add(Path.Combine(wwwroot,                     "Setting", "BQE_CORE_HOSTAPI_Settings.ini"));
+        }
+
+        // ── Strategy 4: common project folder patterns on any drive ──
+        var projectSubPath = Path.Combine("BQECoreHost", "Applications", "BQECoreHostAPI", "Setting", "BQE_CORE_HOSTAPI_Settings.ini");
+        foreach (var drive in DriveInfo.GetDrives().Where(d => d.DriveType == DriveType.Fixed && d.IsReady))
+        {
+            foreach (var projectRoot in new[] { "Projects", "Dev", "Source", "Work", "Repos", "Code" })
+            {
+                foreach (var subFolder in new[] { "Core", "BQE", "BQECore", "" })
+                {
+                    var root = string.IsNullOrEmpty(subFolder)
+                        ? Path.Combine(drive.RootDirectory.FullName, projectRoot)
+                        : Path.Combine(drive.RootDirectory.FullName, projectRoot, subFolder);
+                    candidates.Add(Path.Combine(root, projectSubPath));
+                }
+            }
+        }
+
+        return candidates.FirstOrDefault(File.Exists);
+    }
+
+    private static (string? hostConn, string? mainConn, string? error) ReadLocalHostIni()
+    {
+        string? iniPath = FindLocalHostIniPath();
+        if (iniPath is null)
+            return (null, null,
+                "BQE_CORE_HOSTAPI_Settings.ini not found.\n" +
+                "Set environment variable BQECOREHOST_ROOT to the BQECoreHostAPI folder, " +
+                "or ensure IIS is configured with the site.");
+
+        var sections = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        string? currentSection = null;
+
+        foreach (var raw in File.ReadAllLines(iniPath))
+        {
+            var line = raw.Trim();
+            if (line.StartsWith(';') || line.Length == 0) continue;
+            if (line.StartsWith('[') && line.EndsWith(']'))
+            {
+                currentSection = line[1..^1].Trim();
+                sections[currentSection] = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            }
+            else if (currentSection is not null)
+            {
+                var eq = line.IndexOf('=');
+                if (eq > 0)
+                {
+                    var key = line[..eq].Trim();
+                    var val = line[(eq + 1)..].Trim().Trim('\'').Trim('"');
+                    sections[currentSection][key] = val;
+                }
+            }
+        }
+
+        // Payment service DB — use the full connection string directly
+        string? hostConn = null;
+        if (sections.TryGetValue("PAYMENTSERVICEDBCONNECTION", out var psSection) &&
+            psSection.TryGetValue("ConnectionString", out var ps))
+            hostConn = ps;
+
+        // Main DB — build from [CONNECTION] + [COREHOSTDB]
+        string? mainConn = null;
+        if (sections.TryGetValue("CONNECTION", out var connSection) &&
+            sections.TryGetValue("COREHOSTDB",  out var coreSection))
+        {
+            connSection.TryGetValue("ServerName", out var server);
+            connSection.TryGetValue("UserName",   out var user);
+            connSection.TryGetValue("Password",   out var pass);
+            connSection.TryGetValue("UseWinAuth", out var winAuth);
+            coreSection.TryGetValue("DatabaseName", out var dbName);
+
+            if (!string.IsNullOrEmpty(server) && !string.IsNullOrEmpty(dbName))
+            {
+                if (winAuth == "1")
+                    mainConn = $"Data Source={server};Initial Catalog={dbName};Integrated Security=True;MultipleActiveResultSets=true";
+                else
+                    mainConn = $"Data Source={server};Initial Catalog={dbName};User Id={user};Password={pass};MultipleActiveResultSets=true";
+            }
+        }
+
+        if (hostConn is null && mainConn is null)
+            return (null, null, "Could not parse connection strings from INI file.");
+
+        // Sprint uses the same local server — same connection strings as Local
+        return (hostConn, mainConn, null);
+    }
+
+    // Convenience: returns (hostConn, mainConn, sprintHostConn, sprintMainConn, error)
+    private static (string? hostConn, string? mainConn, string? sprintHostConn, string? sprintMainConn, string? error)
+        ReadLocalHostIniAll()
+    {
+        var (hostConn, mainConn, error) = ReadLocalHostIni();
+        // Sprint points to the same local server (BQECoreHost / BQECorePaymentService on the dev machine)
+        return (hostConn, mainConn, hostConn, mainConn, error);
+    }
+
+    // ── Connection string copy buttons ───────────────────────────────────────
+    private void CopyLocalHostDbBtn_Click(object sender, RoutedEventArgs e)   => CopyConnStr(LocalHostDbBox.Text,    "Local Payment Service DB");
+    private void CopyStagingHostDbBtn_Click(object sender, RoutedEventArgs e) => CopyConnStr(StagingHostDbBox.Text,  "Staging Payment Service DB");
+    private void CopySprintHostDbBtn_Click(object sender, RoutedEventArgs e)  => CopyConnStr(SprintHostDbBox.Text,   "Sprint Payment Service DB");
+    private void CopyLocalMainDbBtn_Click(object sender, RoutedEventArgs e)   => CopyConnStr(LocalMainDbBox.Text,    "Local Main DB");
+    private void CopyStagingMainDbBtn_Click(object sender, RoutedEventArgs e) => CopyConnStr(StagingMainDbBox.Text,  "Staging Main DB");
+    private void CopySprintMainDbBtn_Click(object sender, RoutedEventArgs e)  => CopyConnStr(SprintMainDbBox.Text,   "Sprint Main DB");
+
+    private void CopyConnStr(string value, string label)
+    {
+        if (string.IsNullOrWhiteSpace(value)) { SetStatus($"{label} connection string is empty"); return; }
+        System.Windows.Clipboard.SetText(value);
+        SetStatus($"Copied {label} connection string");
+    }
+
+    // ── Crypto tab ──────────────────────────────────────────────────────────
+
+    private string GetCryptoAlgo() =>
+        CryptoAlgoBox.SelectedIndex == 1 ? "3DES" : "DES";
+
+    private void DecryptBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var input = CryptoInputBox.Text.Trim();
+        if (string.IsNullOrEmpty(input)) { CryptoStatusText.Text = "Enter cipher text to decrypt."; return; }
+
+        var key  = (CryptoKeyBox.Text ?? CryptoKeyBox.SelectedItem?.ToString() ?? "").Trim();
+        var mode = CryptoModeBox.SelectedIndex == 1
+            ? System.Security.Cryptography.CipherMode.CBC
+            : System.Security.Cryptography.CipherMode.ECB;
+        var algo = GetCryptoAlgo();
+
+        var (plain, error) = Services.CryptoService.Decrypt(input, key, mode, algo: algo);
+        if (error is not null && plain is null)
+        {
+            CryptoOutputBox.Text  = "";
+            CryptoStatusText.Text = $"❌ {error}";
+            CryptoStatusText.Foreground = System.Windows.Media.Brushes.Red;
+        }
+        else
+        {
+            CryptoOutputBox.Text  = plain;
+            // Show note if a fallback algo/padding was used
+            var note = error is not null ? $"  ⚠ {error}" : "";
+            CryptoStatusText.Text = $"✅ Decrypted  (Key={key}  Algo={algo}  Mode={mode}){note}";
+            CryptoStatusText.Foreground = error is not null
+                ? System.Windows.Media.Brushes.DarkOrange
+                : System.Windows.Media.Brushes.Green;
+        }
+    }
+
+    private void EncryptBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var input = CryptoInputBox.Text.Trim();
+        if (string.IsNullOrEmpty(input)) { CryptoStatusText.Text = "Enter plain text to encrypt."; return; }
+
+        var key    = (CryptoKeyBox.Text ?? CryptoKeyBox.SelectedItem?.ToString() ?? "").Trim();
+        var mode   = CryptoModeBox.SelectedIndex == 1
+            ? System.Security.Cryptography.CipherMode.CBC
+            : System.Security.Cryptography.CipherMode.ECB;
+        var outFmt = CryptoOutFmtBox.SelectedIndex == 1
+            ? Services.CryptoService.OutputFormat.Base64
+            : Services.CryptoService.OutputFormat.Hex;
+        var algo   = GetCryptoAlgo();
+
+        var (cipher, error) = Services.CryptoService.Encrypt(input, key, mode, outFmt, algo);
+        if (error is not null)
+        {
+            CryptoOutputBox.Text  = "";
+            CryptoStatusText.Text = $"❌ {error}";
+            CryptoStatusText.Foreground = System.Windows.Media.Brushes.Red;
+        }
+        else
+        {
+            CryptoOutputBox.Text  = cipher;
+            CryptoStatusText.Text = $"✅ Encrypted  (Key={key}  Algo={algo}  Mode={mode}  Fmt={outFmt})";
+            CryptoStatusText.Foreground = System.Windows.Media.Brushes.Green;
+        }
+    }
+
+    private void TryAllKeysBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var input = CryptoInputBox.Text.Trim();
+        if (string.IsNullOrEmpty(input)) { CryptoStatusText.Text = "Enter cipher text to try."; return; }
+
+        var results = Services.CryptoService.TryAllPresets(input);
+        if (results.Count == 0)
+        {
+            CryptoOutputBox.Text  = "(no readable result with any preset key/mode combination)";
+            CryptoStatusText.Text = "❌ Could not decrypt with any preset.";
+            CryptoStatusText.Foreground = System.Windows.Media.Brushes.Red;
+        }
+        else
+        {
+            CryptoOutputBox.Text = string.Join("\n\n", results.Select(r => $"[{r.label}]\n{r.plain}"));
+            CryptoStatusText.Text = $"✅ {results.Count} result(s) found";
+            CryptoStatusText.Foreground = System.Windows.Media.Brushes.Green;
+        }
+    }
+
+    private void BqeDecryptBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var input = CryptoInputBox.Text.Trim();
+        if (string.IsNullOrEmpty(input)) { CryptoStatusText.Text = "Enter BQE cipher (Base64) to decrypt."; return; }
+
+        var (plain, error) = Services.CryptoService.BqeDecrypt(input);
+        if (plain is null)
+        {
+            CryptoOutputBox.Text  = "";
+            CryptoStatusText.Text = $"❌ {error}";
+            CryptoStatusText.Foreground = System.Windows.Media.Brushes.Red;
+        }
+        else
+        {
+            CryptoOutputBox.Text  = plain;
+            CryptoStatusText.Text = "✅ BQE Decrypted  (DES-CBC · Key=C#E1b@$0 / IV=E@a2b#$0 · length-header stripped)";
+            CryptoStatusText.Foreground = System.Windows.Media.Brushes.Green;
+        }
+    }
+
+    private void BqeEncryptBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var input = CryptoInputBox.Text.Trim();
+        if (string.IsNullOrEmpty(input)) { CryptoStatusText.Text = "Enter plain text to BQE-encrypt."; return; }
+
+        var (cipher, error) = Services.CryptoService.BqeEncrypt(input);
+        if (cipher is null)
+        {
+            CryptoOutputBox.Text  = "";
+            CryptoStatusText.Text = $"❌ {error}";
+            CryptoStatusText.Foreground = System.Windows.Media.Brushes.Red;
+        }
+        else
+        {
+            CryptoOutputBox.Text  = cipher;
+            CryptoStatusText.Text = "✅ BQE Encrypted  (DES-CBC · Key=C#E1b@$0 / IV=E@a2b#$0 · 5-char header · Base64)";
+            CryptoStatusText.Foreground = System.Windows.Media.Brushes.Green;
+        }
+    }
+
+    private void BqePasswordEncryptBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var input = CryptoInputBox.Text.Trim();
+        if (string.IsNullOrEmpty(input)) { CryptoStatusText.Text = "Enter password to BQE-encrypt."; return; }
+
+        var (cipher, error) = Services.CryptoService.BqePasswordEncrypt(input);
+        if (cipher is null)
+        {
+            CryptoOutputBox.Text  = "";
+            CryptoStatusText.Text = $"❌ {error}";
+            CryptoStatusText.Foreground = System.Windows.Media.Brushes.Red;
+        }
+        else
+        {
+            CryptoOutputBox.Text  = cipher;
+            CryptoStatusText.Text = "✅ BQE Password Encrypted  (DES-CBC · Key=BQES2011 / IV=BQES2011 · V1 legacy key · Base64)";
+            CryptoStatusText.Foreground = System.Windows.Media.Brushes.Green;
+        }
+    }
+
+    private void Sha256HashBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var input = CryptoInputBox.Text.Trim();
+        if (string.IsNullOrEmpty(input)) { CryptoStatusText.Text = "Enter plain text to hash."; return; }
+
+        var hash = Services.CryptoService.Sha256Hash(input);
+        CryptoOutputBox.Text  = hash;
+        CryptoStatusText.Text = "✅ SHA-256 hash computed  (Hashing.ComputeSha256Hash)";
+        CryptoStatusText.Foreground = System.Windows.Media.Brushes.Green;
+    }
+
+    private void Sha256VerifyBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var plain = CryptoInputBox.Text.Trim();
+        var hash  = CryptoOutputBox.Text.Trim();
+
+        if (string.IsNullOrEmpty(plain)) { CryptoStatusText.Text = "Enter plain text in the Input box."; return; }
+        if (string.IsNullOrEmpty(hash))  { CryptoStatusText.Text = "Paste the SHA-256 hash into the Output box first."; return; }
+
+        var (matched, computed) = Services.CryptoService.Sha256Verify(plain, hash);
+        if (matched)
+        {
+            CryptoStatusText.Text = "✅ Hash MATCHES — SHA-256(input) == output hash";
+            CryptoStatusText.Foreground = System.Windows.Media.Brushes.Green;
+        }
+        else
+        {
+            CryptoOutputBox.Text  = computed;
+            CryptoStatusText.Text = $"❌ No match — computed hash shown in output";
+            CryptoStatusText.Foreground = System.Windows.Media.Brushes.Red;
+        }
+    }
+
+    private void CryptoPasteBtn_Click(object sender, RoutedEventArgs e)
+    {
+        try { CryptoInputBox.Text = System.Windows.Clipboard.GetText(); } catch { }
+    }
+
+    private void CryptoClearBtn_Click(object sender, RoutedEventArgs e)
+    {
+        CryptoInputBox.Text   = "";
+        CryptoOutputBox.Text  = "";
+        CryptoStatusText.Text = "";
+    }
+
+    private void CryptoCopyOutputBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrEmpty(CryptoOutputBox.Text)) return;
+        System.Windows.Clipboard.SetText(CryptoOutputBox.Text);
+        CryptoStatusText.Text = "Copied to clipboard.";
+    }
+
+    private void CryptoSwapBtn_Click(object sender, RoutedEventArgs e)
+    {
+        CryptoInputBox.Text  = CryptoOutputBox.Text;
+        CryptoOutputBox.Text = "";
+    }
+
+    // ── Clear date filter ────────────────────────────────────────────────────
+
+    private void FetchClearDatesBtn_Click(object sender, RoutedEventArgs e)
+    {
+        FetchFromDatePicker.SelectedDate = null;
+        FetchToDatePicker.SelectedDate   = null;
+        DateFilterHintText.Text          = "(optional — narrows Fetch results by created date)";
+        DateFilterHintText.Foreground    = new WpfBrush(WpfColor.FromRgb(156, 163, 175));
+    }
+
+    // ── Post Txn (Level 2/3 lineItemDetailIndicator) ────────────────────────
+
+    private async void PostTxnFetchTokensBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var merchantId = PostTxnMerchantBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(merchantId))
+        {
+            PostTxnStatus.Text       = "❌  Enter a Merchant ID first, then click 🔍 to fetch tokens.";
+            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        var apiKey = (IsSandbox ? SandboxApiKeyBox.Password : ProductionApiKeyBox.Password).Trim();
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            PostTxnStatus.Text       = "❌  Enter an API key in Settings first.";
+            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        PostTxnFetchTokensBtn.IsEnabled = false;
+        PostTxnStatus.Text       = $"⏳  Fetching vault tokens for merchant {merchantId}…";
+        PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+
+        try
+        {
+            var env     = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service = new PayrixService(apiKey, env);
+            var (tokens, _, error) = await service.GetTokensByMerchantAsync(merchantId);
+
+            if (error != null)
+            {
+                PostTxnStatus.Text       = $"❌  Token fetch failed: {error}";
+                PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+                return;
+            }
+
+            if (tokens.Count == 0)
+            {
+                PostTxnStatus.Text       = "⚠  No vault tokens found for this merchant.";
+                PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(180, 130, 0));
+                return;
+            }
+
+            PostTxnTokenBox.Items.Clear();
+            foreach (var tok in tokens)
+            {
+                // Flag tokens whose merchant field doesn't match (fallback case — shouldn't happen after filter)
+                var mismatch = !string.IsNullOrEmpty(tok.Merchant) &&
+                               !string.Equals(tok.Merchant, merchantId, StringComparison.OrdinalIgnoreCase);
+                PostTxnTokenBox.Items.Add(new System.Windows.Controls.ComboBoxItem
+                {
+                    Content    = mismatch ? $"⚠ {tok.DropdownLabel}  [merchant mismatch]" : tok.DropdownLabel,
+                    Tag        = tok.Id,
+                    Foreground = mismatch
+                        ? new WpfBrush(WpfColor.FromRgb(220, 38, 38))
+                        : System.Windows.Media.Brushes.Transparent   // inherits
+                });
+            }
+            PostTxnTokenBox.SelectedIndex = 0;
+            PostTxnTokenBox.Text          = tokens[0].Id ?? "";
+
+            // Only count tokens that exactly match this merchant
+            int exactCount = tokens.Count(t =>
+                string.IsNullOrEmpty(t.Merchant) ||
+                string.Equals(t.Merchant, merchantId, StringComparison.OrdinalIgnoreCase));
+
+            PostTxnStatus.Text = exactCount == tokens.Count
+                ? $"✅  {tokens.Count} token(s) for merchant {merchantId} — auto-selected first token."
+                : $"⚠  {exactCount} of {tokens.Count} token(s) match this merchant — mismatched tokens are marked ⚠.";
+            PostTxnStatus.Foreground = exactCount == tokens.Count
+                ? new WpfBrush(WpfColor.FromRgb(22, 101, 52))
+                : new WpfBrush(WpfColor.FromRgb(180, 83, 9));
+        }
+        finally
+        {
+            PostTxnFetchTokensBtn.IsEnabled = true;
+        }
+    }
+
+    private void PostTxnTokenBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (PostTxnTokenBox.SelectedItem is System.Windows.Controls.ComboBoxItem item)
+            PostTxnTokenBox.Text = item.Tag?.ToString() ?? item.Content?.ToString() ?? "";
+    }
+
+    private async void PostTxnCreateTokenBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var merchantId = PostTxnMerchantBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(merchantId))
+        {
+            PostTxnStatus.Text       = "❌  Enter a Merchant ID first — the token will be created under that merchant.";
+            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        var apiKey = (IsSandbox ? SandboxApiKeyBox.Password : ProductionApiKeyBox.Password).Trim();
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            PostTxnStatus.Text       = "❌  Enter an API key in Settings first.";
+            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        PostTxnCreateTokenBtn.IsEnabled = false;
+        PostTxnStatus.Text       = "⏳  Creating test customer + vault token (Visa 4111…1111, exp 12/25)…";
+        PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+
+        try
+        {
+            var env     = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service = new PayrixService(apiKey, env);
+
+            // Step 1: POST /customers  Step 2: POST /tokens with that customer
+            var (tokenId, rawJson, error) = await service.CreateTestTokenAsync(
+                merchantId,
+                cardNumber:  "4111111111111111",
+                expiration:  "1225",
+                cvv:         "999",
+                cardHolder:  "Test Cardholder");
+
+            // Show raw response regardless
+            PostTxnResponseBox.Text        = rawJson;
+            PostTxnResponseCard.Visibility = System.Windows.Visibility.Visible;
+
+            if (error != null)
+            {
+                PostTxnStatus.Text       = $"❌  Token creation failed: {error}";
+                PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+                return;
+            }
+
+            // Populate the token box with the fresh token — set Text directly;
+            // adding a ComboBoxItem and selecting it causes WPF editable ComboBox to
+            // display the Content label instead of the token ID string.
+            PostTxnTokenBox.Items.Clear();
+            PostTxnTokenBox.SelectedIndex = -1;
+            PostTxnTokenBox.Text          = tokenId ?? "";
+
+            PostTxnStatus.Text       = $"✅  Token created: {tokenId}";
+            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+        }
+        finally
+        {
+            PostTxnCreateTokenBtn.IsEnabled = true;
+        }
+    }
+
+    private void PostTxnUseSelectedTxnBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var txn = TxnGrid.SelectedItem as Transaction;
+        if (txn is null)
+        {
+            PostTxnStatus.Text       = "❌  No transaction selected — pick a row in the Transactions tab first.";
+            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(txn.Token))
+        {
+            PostTxnStatus.Text       = $"⚠  Selected transaction ({txn.Id}) has no Token field — it may have been posted without a vault token.";
+            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(180, 83, 9));
+            return;
+        }
+
+        // Set Token
+        PostTxnTokenBox.Items.Clear();
+        PostTxnTokenBox.Text = txn.Token;
+
+        // Also fill Merchant if blank or different
+        if (!string.IsNullOrWhiteSpace(txn.Merchant))
+            PostTxnMerchantBox.Text = txn.Merchant;
+
+        PostTxnStatus.Text       = $"✅  Token + Merchant copied from transaction {txn.Id}.";
+        PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+    }
+
+    private void PostTxnAddItemBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var seq = _postTxnItems.Count + 1;
+        _postTxnItems.Add(new TransactionItem { ItemSequenceNumber = seq, Quantity = 1 });
+    }
+
+    private void PostTxnRemoveItemBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (PostTxnItemsGrid.SelectedItem is TransactionItem selected)
+            _postTxnItems.Remove(selected);
+        else if (_postTxnItems.Count > 0)
+            _postTxnItems.RemoveAt(_postTxnItems.Count - 1);
+
+        // Re-sequence
+        for (int i = 0; i < _postTxnItems.Count; i++)
+            _postTxnItems[i].ItemSequenceNumber = i + 1;
+    }
+
+    private async void PostTxnBtn_Click(object sender, RoutedEventArgs e)
+    {
+        // Clear any stale status (e.g. from a previous ← txn click)
+        PostTxnStatus.Text       = "";
+        PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+
+        var apiKey = IsSandbox
+            ? SandboxApiKeyBox.Password.Trim()
+            : ProductionApiKeyBox.Password.Trim();
+
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            PostTxnStatus.Text       = "❌  Enter an API key in Settings first.";
+            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        var merchantId = PostTxnMerchantBox.Text.Trim();
+        var token      = PostTxnTokenBox.Text.Trim();
+
+        if (string.IsNullOrWhiteSpace(merchantId) || string.IsNullOrWhiteSpace(token))
+        {
+            PostTxnStatus.Text       = "❌  Merchant ID and Token are required.";
+            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        if (!decimal.TryParse(PostTxnTotalBox.Text.Trim(), out var totalCents) || totalCents <= 0)
+        {
+            PostTxnStatus.Text       = "❌  Total must be a positive number of cents.";
+            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        decimal.TryParse(PostTxnTaxBox.Text.Trim(), out var taxCents);
+
+        // Type: SelectedIndex 0=Sale(1), 1=Auth(2), 2=Capture(3)
+        var txnType = PostTxnTypeBox.SelectedIndex + 1;
+
+        // Origin: read Tag from selected ComboBoxItem (default 1 = API)
+        var originTag = (PostTxnOriginBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Tag?.ToString();
+        int txnOrigin = int.TryParse(originTag, out var o) ? o : 1;
+
+        var description = PostTxnDescBox.Text.Trim();
+        var order       = PostTxnOrderBox.Text.Trim();
+
+        var items = (IReadOnlyList<TransactionItem>)_postTxnItems;
+
+        // lineItemDetailIndicator is per-item — need at least one row
+        if (_postTxnItems.Count == 0)
+        {
+            PostTxnStatus.Text       = "❌  Add at least one line item (lineItemDetailIndicator is set per item).";
+            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        PostTxnBtn.IsEnabled     = false;
+        PostTxnStatus.Text       = "⏳  Posting transaction…";
+        PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+        PostTxnResponseCard.Visibility = System.Windows.Visibility.Collapsed;
+
+        try
+        {
+            var env     = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service = new PayrixService(apiKey, env);
+
+            var (txn, rawJson, error) = await service.CreateTransactionWithLineItemsAsync(
+                merchantId, token, totalCents, taxCents, txnType, txnOrigin,
+                string.IsNullOrEmpty(description) ? null : description,
+                string.IsNullOrEmpty(order)       ? null : order,
+                items);
+
+            // Show raw response
+            PostTxnResponseBox.Text            = rawJson;
+            PostTxnResponseCard.Visibility     = System.Windows.Visibility.Visible;
+
+            if (error != null)
+            {
+                PostTxnStatus.Text       = $"❌  {error}";
+                PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            }
+            else
+            {
+                var envLabel = IsSandbox ? "SANDBOX" : "PROD";
+                var indicators = string.Join(", ", items.Select((it, i) =>
+                    $"item{i + 1}:{it.LineItemDetailIndicator?.ToString() ?? "auto"}"));
+                PostTxnStatus.Text = $"✅  [{envLabel}] Transaction created — ID: {txn?.Id ?? "(none)"}  |  {items.Count} line item(s)  |  indicators: [{indicators}]";
+                PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+            }
+        }
+        catch (Exception ex)
+        {
+            PostTxnStatus.Text       = $"❌  Exception: {ex.Message}";
+            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+        }
+        finally
+        {
+            PostTxnBtn.IsEnabled = true;
+        }
+    }
+
+    // ── Unified Webhook POST (dispatches by type dropdown) ───────────────────
+
+    private async void AchPostBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var url = WebhookUrlBox.Text.Trim();
+        if (string.IsNullOrEmpty(url))
+        {
+            AchPostStatus.Text       = "❌ Select an environment first.";
+            AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        var typeIdx = WebhookTypeBox.SelectedIndex;
+        var txnId   = AchTxnIdBox.Text.Trim();
+        var amount  = AchAmountBox.Text.Trim();
+
+        if (string.IsNullOrEmpty(txnId))
+            txnId = typeIdx switch
+            {
+                1 => $"t1_txn_achreturn_{DateTime.UtcNow:yyyyMMddHHmmss}",
+                2 => $"t1_txn_ccrefund_{DateTime.UtcNow:yyyyMMddHHmmss}",
+                3 => $"t1_txn_ccreturn_{DateTime.UtcNow:yyyyMMddHHmmss}",
+                4 => $"t1_txn_disbursement_{DateTime.UtcNow:yyyyMMddHHmmss}",
+                5 => $"p1_dbm_{DateTime.UtcNow:yyyyMMddHHmmss}",
+                6 => $"t1_txn_achrefund_{DateTime.UtcNow:yyyyMMddHHmmss}",
+                7 => $"p1_dbm_{DateTime.UtcNow:yyyyMMddHHmmss}",
+                _ => $"t1_txn_ach_{DateTime.UtcNow:yyyyMMddHHmmss}"
+            };
+        if (string.IsNullOrEmpty(amount)) amount = typeIdx == 0 ? "898.00" : typeIdx == 4 ? "250.00" : typeIdx is 5 or 7 ? "6131.24" : "74.00"; // 1,2,3,6 → 74.00
+
+        var payload = string.IsNullOrWhiteSpace(WebhookPayloadBox.Text)
+            ? typeIdx switch
+            {
+                1 => WebhookTestService.BuildECheckReturnPayload(txnId: txnId, txnAmount: amount),
+                2 => WebhookTestService.BuildCcRefundPayload(txnId: txnId, fortxnId: txnId, txnAmount: amount),
+                3 => WebhookTestService.BuildCcReturnPayload(txnId: txnId, fortxnId: txnId, txnAmount: amount),
+                4 => WebhookTestService.BuildDisbursementPayload(txnId: txnId, txnAmount: amount),
+                5 => WebhookTestService.BuildWithdrawalPayload(disbId: txnId, amount: amount),
+                6 => WebhookTestService.BuildAchRefundPayload(txnId: txnId, fortxnId: txnId, txnAmount: amount),
+                7 => WebhookTestService.BuildWithdrawalProcessedPayload(disbId: txnId, amount: amount),
+                8 => WebhookTestService.BuildOnboardingPayload("Entities created successfully.", txnId,
+                         string.IsNullOrWhiteSpace(EntityCustomBox.Text) ? WebhookTestService.StdCustom : EntityCustomBox.Text.Trim()),
+                9 => WebhookTestService.BuildOnboardingPayload("Merchant has been boarded", txnId,
+                         string.IsNullOrWhiteSpace(EntityCustomBox.Text) ? WebhookTestService.StdCustom : EntityCustomBox.Text.Trim()),
+                _ => WebhookTestService.BuildAchFundedPayload(txnId: txnId, txnAmount: amount)
+            }
+            : WebhookPayloadBox.Text;
+
+        AchPostBtn.IsEnabled     = false;
+        AchPostStatus.Text       = "⏳ Sending POST…";
+        AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+
+        var typeLabel = typeIdx switch
+        {
+            1 => "ACH Return", 2 => "CC Refund", 3 => "CC Return",
+            4 => "Disbursement", 5 => "Withdrawal", 6 => "ACH Refund",
+            7 => "Withdrawal Processed", 8 => "Entities Created", 9 => "Merchant Boarded",
+            _ => "ACH Funded"
+        };
+
+        int?      logCode     = null;
+        string    logBody     = "";
+        Exception? logEx      = null;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            using var handler = new System.Net.Http.HttpClientHandler
+            {
+                // Accept any SSL cert — internal Sprint/Staging endpoints use self-signed certs
+                ServerCertificateCustomValidationCallback =
+                    System.Net.Http.HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+            };
+            using var client  = new System.Net.Http.HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
+            using var content = new System.Net.Http.StringContent(
+                payload, System.Text.Encoding.UTF8, "application/json");
+
+            var response = await client.PostAsync(url, content);
+            sw.Stop();
+
+            logBody = await response.Content.ReadAsStringAsync();
+            logCode = (int)response.StatusCode;
+
+            if (response.IsSuccessStatusCode)
+            {
+                AchPostStatus.Text = $"✅  HTTP {logCode}  —  {sw.ElapsedMilliseconds} ms";
+                AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+            }
+            else
+            {
+                AchPostStatus.Text = $"❌  HTTP {logCode}  —  {logBody.Trim()}";
+                AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            }
+        }
+        catch (TaskCanceledException tex)
+        {
+            sw.Stop();
+            logEx = tex;
+            AchPostStatus.Text = $"❌  Timed out after 30 s — is the endpoint reachable?";
+            AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+        }
+        catch (System.Net.Http.HttpRequestException hrex)
+        {
+            sw.Stop();
+            logEx = hrex;
+            var detail = GetDeepMessage(hrex);
+            AchPostStatus.Text = $"❌  Connection failed: {detail}";
+            AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            logEx = ex;
+            AchPostStatus.Text = $"❌  {GetDeepMessage(ex)}";
+            AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+        }
+        finally
+        {
+            AchPostBtn.IsEnabled = true;
+            WebhookLogger.LogPost(
+                webhookType:  typeLabel,
+                url:          url,
+                payload:      payload,
+                httpCode:     logCode,
+                responseBody: logBody,
+                durationMs:   sw.ElapsedMilliseconds,
+                exception:    logEx);
+        }
+    }
+
+    // ── Unified Fetch from Payrix (dispatches by type dropdown) ─────────────
+
+    private async void AchFetchBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            AchPostStatus.Text       = "❌ Enter an API key first.";
+            AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        var typeIdx    = WebhookTypeBox.SelectedIndex;
+        var txnIdInput = AchTxnIdBox.Text.Trim();
+        var email      = UserEmailBox.Text.Trim();
+        var envLabel   = IsSandbox ? "Sandbox" : "Production";
+        var fromDate   = FetchFromDatePicker.SelectedDate;
+        var toDate     = FetchToDatePicker.SelectedDate;
+
+        var typeLabel = typeIdx switch
+        {
+            1 => "ACH Return",
+            2 => "CC Refund",
+            3 => "CC Return",
+            4 => "Disbursement",
+            5 => "Withdrawal",
+            6 => "ACH Refund",
+            7 => "Withdrawal Processed",
+            8 => "Entities Created",
+            9 => "Merchant Boarded",
+            _ => "ACH Funded"
+        };
+
+        AchFetchBtn.IsEnabled = false;
+        var dateRangeHint = (fromDate, toDate) switch
+        {
+            ({ } f, { } t) => $" [{f:MM/dd/yyyy} – {t:MM/dd/yyyy}]",
+            ({ } f, null)  => $" [from {f:MM/dd/yyyy}]",
+            (null, { } t)  => $" [until {t:MM/dd/yyyy}]",
+            _              => ""
+        };
+        AchPostStatus.Text       = $"⏳ Fetching {typeLabel} from Payrix{dateRangeHint}…";
+        AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+        if (fromDate.HasValue || toDate.HasValue)
+            DateFilterHintText.Text = $"🔍 Active filter: {dateRangeHint.Trim()}";
+
+
+        try
+        {
+            var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service     = new PayrixService(apiKey, environment);
+
+            // ── Entities Created / Merchant Boarded — fetch real entity from Payrix ─────
+            if (typeIdx == 8 || typeIdx == 9)
+            {
+                var custom = EntityCustomBox.Text.Trim();
+                if (string.IsNullOrEmpty(custom))
+                {
+                    AchPostStatus.Text       = "⚠  Enter EntityCustom field (AccountID,CompanyID) first.";
+                    AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(217, 119, 6));
+                    return;
+                }
+
+                AchPostStatus.Text       = "⏳  Fetching entity from Payrix…";
+                AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+
+                var (fetchedId, _, _, _, rawEntityJson, entityErr) =
+                    await service.GetEntityAsync(string.IsNullOrEmpty(txnIdInput) ? null : txnIdInput);
+
+                SetRawJson(PrettyPrint(rawEntityJson));
+
+                if (string.IsNullOrEmpty(txnIdInput) && fetchedId is not null)
+                    AchTxnIdBox.Text = fetchedId;
+
+                var subject = typeIdx == 8 ? "Entities created successfully." : "Merchant has been boarded";
+
+                // Build payload from real entity JSON (replaces only the custom field)
+                var payload = WebhookTestService.BuildOnboardingPayloadFromEntityJson(
+                    rawEntityJson, subject, custom);
+                SetPayload(PrettyPrint(payload));
+
+                var fetchNote = entityErr is not null
+                    ? $" (fetch error: {entityErr} — template used)"
+                    : fetchedId is not null ? $" · {fetchedId}" : "";
+                AchPostStatus.Text       = $"✅  {typeLabel} payload ready{fetchNote}";
+                AchPostStatus.Foreground = entityErr is null
+                    ? new WpfBrush(WpfColor.FromRgb(22, 101, 52))
+                    : new WpfBrush(WpfColor.FromRgb(217, 119, 6));
+                AchFetchBtn.IsEnabled = true;
+                return;
+            }
+
+            // ── Disbursement / Withdrawal / Withdrawal Processed: fetch from /disbursements ──
+            if (typeIdx == 4 || typeIdx == 5 || typeIdx == 7)
+            {
+                // If the user typed a transaction ID (t1_txn_ / p1_txn_), resolve it to
+                // the containing disbursement ID first via disbursementEntries.eventId lookup.
+                var resolvedDisbId = txnIdInput;
+                if (!string.IsNullOrEmpty(txnIdInput) &&
+                    (txnIdInput.Contains("_txn_") || txnIdInput.Contains("_ref_") || txnIdInput.Contains("_chb_")))
+                {
+                    AchPostStatus.Text       = $"⏳ Looking up disbursement for transaction {txnIdInput}…";
+                    AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+
+                    var foundDisbId = await service.GetDisbursementIdByTxnIdAsync(txnIdInput);
+                    if (foundDisbId is not null)
+                    {
+                        resolvedDisbId = foundDisbId;
+                        SetStatus($"Transaction {txnIdInput} → disbursement {foundDisbId}");
+                    }
+                    else
+                    {
+                        AchPostStatus.Text       = $"⚠  No disbursement found containing transaction {txnIdInput}";
+                        AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(217, 119, 6));
+                        AchFetchBtn.IsEnabled = true;
+                        return;
+                    }
+                }
+
+                var (wp, wJson, rec, wEntries, wErr) = await service.GetWithdrawalWebhookAsync(
+                    disbId:    string.IsNullOrEmpty(resolvedDisbId) ? null : resolvedDisbId,
+                    limit:     20,
+                    fromDate:  fromDate,
+                    toDate:    toDate);
+
+                SetRawJson(PrettyPrint(wJson));
+
+                if (wErr is not null || wp is null)
+                {
+                    AchPostStatus.Text       = $"⚠  {wErr ?? "No withdrawal/disbursement found."}";
+                    AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(217, 119, 6));
+                    WebhookLogger.LogFetch(typeLabel, envLabel, wJson, null, wErr ?? "No withdrawal/disbursement found.");
+                    return;
+                }
+
+                SetPayload(PrettyPrint(wp));
+
+                if (rec is not null)
+                {
+                    // Always update the box with the resolved disbursement ID
+                    AchTxnIdBox.Text  = rec.Id ?? "";
+                    AchAmountBox.Text = rec.AmountFormatted;
+                }
+
+                // ── Fetch CompanyID + AccountID: try Payrix entity custom field first ──
+                string? accountId  = null;
+                string? companyId  = null;
+                string  entityInfo  = "";
+                string? entityName  = null;
+                if (rec?.Entity is { Length: > 0 } entityId)
+                {
+                    var (eid_acc, eid_cmp, eid_name, _, _) = await service.GetEntityCustomAsync(entityId);
+                    accountId  = eid_acc;
+                    companyId  = eid_cmp;
+                    entityName = eid_name;
+                }
+
+                // ── Fallback: Host DB ────────────────────────────────────────────────────
+                if ((accountId is null || companyId is null) && rec?.Id is not null)
+                {
+                    var connStr = ActiveHostDbConnectionString();
+                    if (!string.IsNullOrEmpty(connStr))
+                    {
+                        var (dbCmp, dbAcc, _) = await HostDbService.GetIdsForTransactionAsync(connStr, rec.Id);
+                        if (dbAcc is not null) accountId = dbAcc;
+                        if (dbCmp is not null) companyId = dbCmp;
+                    }
+                }
+
+                var wMerchant = entityName ?? "BQE Core";
+
+                // ── Rebuild payload with resolved IDs ───────────────────────────────────
+                if (accountId is not null && companyId is not null && rec is not null)
+                {
+                    var realCustom = $"{accountId},{companyId}";
+                    wp = (typeIdx == 4 || typeIdx == 7)
+                        ? WebhookTestService.BuildWithdrawalProcessedPayloadFromRecord(rec, realCustom, wMerchant, entries: wEntries)
+                        : WebhookTestService.BuildWithdrawalPayloadFromRecord(rec, realCustom, wMerchant, entries: wEntries);
+                    SetPayload(PrettyPrint(wp));
+                    entityInfo = $"  |  AccountID: {accountId}  CompanyID: {companyId}  |  {wEntries.Count} line item(s)";
+                }
+                else if ((typeIdx == 4 || typeIdx == 7) && rec is not null)
+                {
+                    wp = WebhookTestService.BuildWithdrawalProcessedPayloadFromRecord(rec, merchantName: wMerchant, entries: wEntries);
+                    SetPayload(PrettyPrint(wp));
+                }
+                else if (rec is not null)
+                {
+                    wp = WebhookTestService.BuildWithdrawalPayloadFromRecord(rec, merchantName: wMerchant, entries: wEntries);
+                    SetPayload(PrettyPrint(wp));
+                }
+
+                var wCaseName = (typeIdx == 4 || typeIdx == 7) ? "Withdrawal Processed" : "Withdrawal";
+                var wCase = _testCases.FirstOrDefault(tc =>
+                    tc.Name.Equals(wCaseName, StringComparison.OrdinalIgnoreCase));
+                if (wCase is not null) wCase.Payload = wp;
+
+                ShowEntityIds(accountId, companyId, rec?.Entity);
+                if (rec?.Id is not null) await LookupHostDbAsync(rec.Id);
+
+                AchPostStatus.Text       = $"✅  Built from {rec?.Id} — ready to POST{entityInfo}";
+                AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+                SetStatus($"[{envLabel}] {typeLabel} webhook built from {rec?.Id}.{(accountId is not null ? $" AccountID={accountId}, CompanyID={companyId}" : "")}");
+                WebhookLogger.LogFetch(typeLabel, envLabel, wJson, wp, null);
+                return;
+            }
+
+            Transaction? txn        = null;
+            string       rawJson    = "{}";
+            string?      error      = null;
+            string?      webhookPayload = null;
+
+            if (!string.IsNullOrEmpty(txnIdInput))
+            {
+                AchPostStatus.Text = $"⏳ Fetching transaction {txnIdInput}…";
+                var (ft, fj, fe) = await service.GetTransactionAsync(txnIdInput);
+                rawJson = fj; txn = ft;
+                error   = fe ?? (ft is null ? "Transaction not found." : null);
+
+                // Warn if type mismatch but still continue
+                if (txn is not null)
+                {
+                    var expectedType = typeIdx switch { 1 => 7, 6 => 8, 2 => 5, 3 => 4, 4 => 6, _ => 7 };
+                    if (txn.Type != expectedType)
+                        AchPostStatus.Text = $"⚠  type={txn.Type} ({txn.TypeLabel}), expected {typeLabel} — building anyway…";
+                }
+            }
+            else if (typeIdx == 0)
+            {
+                // ACH Funded — use dedicated helper
+                string? wp;
+                (wp, rawJson, txn, error) = await service.GetAchFundedWebhookAsync(
+                    email: string.IsNullOrEmpty(email) ? null : email, limit: 20,
+                    fromDate: fromDate, toDate: toDate);
+                webhookPayload = wp;
+            }
+            else
+            {
+                var category = typeIdx switch
+                {
+                    1 => "achreturn",    // ACH Return  — type 7, status 5 (Returned)
+                    6 => "achrefund",    // ACH Refund  — type 8 (eCheck Refund)
+                    2 => "ccrefund",     // CC Refund   — type 5 (Credit_Card_Refund_Transaction)
+                    3 => "ccreturn",     // CC Return   — type 4, returned date set
+                    4 => "disbursement", // Disbursement — type 6
+                    _ => "ccrefund"
+                };
+                var (txns, rj, err) = await service.SearchByPaymentCategoryAsync(
+                    string.IsNullOrEmpty(email) ? null : email, category, 20,
+                    fromDate: fromDate, toDate: toDate);
+                rawJson = rj; txn = txns.FirstOrDefault();
+                error   = txns.Count == 0 ? (err ?? $"No {typeLabel} transactions found.") : null;
+            }
+
+            // Enrich payment details for CC / Disbursement types (not ACH)
+            if (txn is not null && (typeIdx == 2 || typeIdx == 3 || typeIdx == 4) &&
+                txn.Payment is not null && txn.PaymentDetails is null)
+                txn.PaymentDetails = await service.GetPaymentAsync(txn.Payment);
+
+            SetRawJson(PrettyPrint(rawJson));
+
+            if (error is not null && txn is null && webhookPayload is null)
+            {
+                AchPostStatus.Text       = $"⚠  {error}";
+                AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(217, 119, 6));
+                WebhookLogger.LogFetch(typeLabel, envLabel, rawJson, null, error);
+                return;
+            }
+
+            // Build payload from transaction if not already built
+            if (webhookPayload is null && txn is not null)
+            {
+                webhookPayload = typeIdx switch
+                {
+                    1 => WebhookTestService.BuildECheckReturnPayloadFromTransaction(txn),
+                    6 => WebhookTestService.BuildAchRefundPayloadFromTransaction(txn),
+                    2 => WebhookTestService.BuildCcRefundPayloadFromTransaction(txn),
+                    3 => WebhookTestService.BuildCcReturnPayloadFromTransaction(txn),
+                    4 => WebhookTestService.BuildDisbursementPayloadFromTransaction(txn),
+                    _ => WebhookTestService.BuildAchFundedPayloadFromTransaction(txn)
+                };
+            }
+
+            if (webhookPayload is null)
+            {
+                AchPostStatus.Text       = $"⚠  No {typeLabel} transaction found.";
+                AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(217, 119, 6));
+                WebhookLogger.LogFetch(typeLabel, envLabel, rawJson, null, $"No {typeLabel} transaction found.");
+                return;
+            }
+
+            SetPayload(PrettyPrint(webhookPayload));
+
+            if (txn is not null)
+            {
+                if (string.IsNullOrEmpty(txnIdInput))
+                    AchTxnIdBox.Text = txn.Id ?? "";
+                AchAmountBox.Text = ((txn.Total ?? txn.Approved ?? 0) / 100m)
+                    .ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+                PopulateTxnCard(txn, typeIdx);
+            }
+
+            WebhookLogger.LogFetch(typeLabel, envLabel, rawJson, webhookPayload, null);
+
+            // Update matching test case payload
+            var testName = typeIdx switch
+            {
+                1 => "ACH eCheck Return",
+                2 => "CC Refund",
+                3 => "CC Return",
+                4 => "Disbursement",
+                6 => "ACH Refund",
+                _ => "ACH eCheck Funded"   // 5 (Withdrawal) is handled above
+            };
+            var tc = _testCases.FirstOrDefault(c =>
+                c.Name.Equals(testName, StringComparison.OrdinalIgnoreCase));
+            if (tc is not null) tc.Payload = webhookPayload;
+
+            // ── Entity lookup: show AccountID / CompanyID ────────────────────
+            string? fetchAccId = null, fetchCmpId = null;
+            if (txn?.Merchant is { Length: > 0 } merchantId)
+            {
+                var (mAcc, mCmp, mName, _, _) = await service.GetEntityCustomAsync(merchantId);
+                fetchAccId = mAcc; fetchCmpId = mCmp;
+            }
+            ShowEntityIds(fetchAccId, fetchCmpId, txn?.Merchant);
+            if (txn?.Id is not null) await LookupHostDbAsync(txn.Id, txn.Description);
+
+            var entitySuffix = fetchAccId is not null ? $"  |  AccountID: {fetchAccId}  CompanyID: {fetchCmpId}" : "";
+            AchPostStatus.Text       = $"✅  Built from txn {txn?.Id} — ready to POST{entitySuffix}";
+            AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+            SetStatus($"[{envLabel}] {typeLabel} webhook payload built from {txn?.Id} ({txn?.TotalFormatted}).{(fetchAccId is not null ? $" AccountID={fetchAccId}, CompanyID={fetchCmpId}" : "")}");
+        }
+        catch (Exception ex)
+        {
+            var msg = GetDeepMessage(ex);
+            WebhookLogger.LogFetch(typeLabel, envLabel, "{}", null, msg);
+            AchPostStatus.Text       = $"❌  {msg}";
+            AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+        }
+        finally
+        {
+            AchFetchBtn.IsEnabled = true;
+        }
+    }
+
+    // ── Search All Webhooks from a single transaction / disbursement ID ─────
+
+    private async void SearchAllWebhooksBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            SearchAllStatusText.Text       = "❌ Enter an API key first.";
+            SearchAllStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        var inputId  = AchTxnIdBox.Text.Trim();
+        var email    = UserEmailBox.Text.Trim();
+        var envLabel = IsSandbox ? "Sandbox" : "Production";
+
+        SearchAllWebhooksBtn.IsEnabled = false;
+        SearchAllStatusText.Text       = "⏳ Fetching…";
+        SearchAllStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+
+        try
+        {
+            var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service     = new PayrixService(apiKey, environment);
+
+            // ── Disbursement ID → build Withdrawal + Withdrawal Processed ──
+            if (inputId.StartsWith("p1_dbm_", StringComparison.OrdinalIgnoreCase) ||
+                inputId.StartsWith("t1_dbm_", StringComparison.OrdinalIgnoreCase))
+            {
+                var (_, wJson, rec, saEntries, wErr) = await service.GetWithdrawalWebhookAsync(disbId: inputId, limit: 1);
+                SetRawJson(PrettyPrint(wJson));
+
+                if (wErr is not null || rec is null)
+                {
+                    SearchAllStatusText.Text       = $"⚠  {wErr ?? "Disbursement not found."}";
+                    SearchAllStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(217, 119, 6));
+                    return;
+                }
+
+                // Entity lookup for AccountID / CompanyID — try Payrix entity first
+                string? saAccId2 = null, saCmpId2 = null, saEntityName = null;
+                if (rec.Entity is { Length: > 0 } entId)
+                {
+                    var (eAcc, eCmp, eName, _, _) = await service.GetEntityCustomAsync(entId);
+                    saAccId2 = eAcc; saCmpId2 = eCmp; saEntityName = eName;
+                }
+                // Fallback to Host DB
+                if ((saAccId2 is null || saCmpId2 is null) && rec.Id is not null)
+                {
+                    var connStr = ActiveHostDbConnectionString();
+                    if (!string.IsNullOrEmpty(connStr))
+                    {
+                        var (dbCmp, dbAcc, _) = await HostDbService.GetIdsForTransactionAsync(connStr, rec.Id);
+                        if (dbAcc is not null) saAccId2 = dbAcc;
+                        if (dbCmp is not null) saCmpId2 = dbCmp;
+                    }
+                }
+                string? customField  = (saAccId2 is not null && saCmpId2 is not null)
+                    ? $"{saAccId2},{saCmpId2}" : null;
+                var saMerchantName   = saEntityName ?? "BQE Core";
+
+                var wpWithdrawal  = WebhookTestService.BuildWithdrawalPayloadFromRecord(rec, customField, saMerchantName, entries: saEntries);
+                var wpProcessed   = WebhookTestService.BuildWithdrawalProcessedPayloadFromRecord(rec, customField, saMerchantName, entries: saEntries);
+
+                // Update matching test cases
+                UpdateTestCase("Withdrawal",           wpWithdrawal);
+                UpdateTestCase("Withdrawal Processed", wpProcessed);
+
+                // Show first in payload box, set fields
+                SetPayload(PrettyPrint(wpWithdrawal));
+                AchTxnIdBox.Text        = rec.Id ?? inputId;
+                AchAmountBox.Text       = rec.AmountFormatted;
+                WebhookTypeBox.SelectedIndex = 5;
+
+                // Show AccountID / CompanyID from the custom field
+                if (customField is not null)
+                {
+                    var parts = customField.Split(',');
+                    ShowEntityIds(parts.ElementAtOrDefault(0), parts.ElementAtOrDefault(1), rec.Entity);
+                }
+                if (rec.Id is not null) await LookupHostDbAsync(rec.Id);
+
+                var entityNote = customField is not null ? $"  |  Custom={customField}" : "";
+                SearchAllStatusText.Text       = $"✅  Built Withdrawal + Withdrawal Processed from {rec.Id}{entityNote}";
+                SearchAllStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+                SetStatus($"[{envLabel}] Search All: 2 webhook payloads built from disbursement {rec.Id}.");
+                return;
+            }
+
+            // ── Transaction ID or email → fetch txn and build all applicable types ──
+            Transaction? txn = null;
+            string       rawJson = "{}";
+
+            if (!string.IsNullOrEmpty(inputId))
+            {
+                var (ft, fj, fe) = await service.GetTransactionAsync(inputId);
+                rawJson = fj; txn = ft;
+                if (txn is null)
+                {
+                    SearchAllStatusText.Text       = $"⚠  {fe ?? "Transaction not found."}";
+                    SearchAllStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(217, 119, 6));
+                    SetRawJson(PrettyPrint(rawJson));
+                    return;
+                }
+            }
+            else if (!string.IsNullOrEmpty(email))
+            {
+                // fallback: fetch latest ACH for that email
+                var (_, rawJson2, ft2, _) = await service.GetAchFundedWebhookAsync(email: email, limit: 1);
+                rawJson = rawJson2; txn = ft2;
+            }
+
+            SetRawJson(PrettyPrint(rawJson));
+
+            if (txn is null)
+            {
+                SearchAllStatusText.Text       = "⚠  No transaction found. Enter a txn ID or email.";
+                SearchAllStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(217, 119, 6));
+                return;
+            }
+
+            // Enrich payment details if needed
+            if (txn.Payment is not null && txn.PaymentDetails is null)
+                txn.PaymentDetails = await service.GetPaymentAsync(txn.Payment);
+
+            // Determine which webhooks apply based on txn.Type
+            // type 7 = ACH, type 8 = ACH return, type 4 = CC, type 6 = disbursement
+            var builtNames = new List<string>();
+
+            string? firstPayload = null;
+
+            void BuildAndStore(string name, string payload)
+            {
+                UpdateTestCase(name, payload);
+                builtNames.Add(name);
+                firstPayload ??= payload;
+            }
+
+            switch (txn.Type)
+            {
+                case 7: // ACH
+                    BuildAndStore("ACH eCheck Funded",  WebhookTestService.BuildAchFundedPayloadFromTransaction(txn));
+                    BuildAndStore("ACH eCheck Return",  WebhookTestService.BuildECheckReturnPayloadFromTransaction(txn));
+                    BuildAndStore("ACH Refund",         WebhookTestService.BuildAchRefundPayloadFromTransaction(txn));
+                    break;
+                case 8: // ACH Return
+                    BuildAndStore("ACH eCheck Return",  WebhookTestService.BuildECheckReturnPayloadFromTransaction(txn));
+                    BuildAndStore("ACH Refund",         WebhookTestService.BuildAchRefundPayloadFromTransaction(txn));
+                    break;
+                case 4: // CC
+                    BuildAndStore("CC Refund",  WebhookTestService.BuildCcRefundPayloadFromTransaction(txn));
+                    BuildAndStore("CC Return",  WebhookTestService.BuildCcReturnPayloadFromTransaction(txn));
+                    break;
+                case 6: // Disbursement
+                    BuildAndStore("Disbursement", WebhookTestService.BuildDisbursementPayloadFromTransaction(txn));
+                    break;
+                default: // unknown — build ACH Funded as best guess
+                    BuildAndStore("ACH eCheck Funded", WebhookTestService.BuildAchFundedPayloadFromTransaction(txn));
+                    break;
+            }
+
+            if (firstPayload is not null)
+                SetPayload(PrettyPrint(firstPayload));
+
+            AchTxnIdBox.Text  = txn.Id ?? inputId;
+            AchAmountBox.Text = ((txn.Total ?? txn.Approved ?? 0) / 100m)
+                .ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+
+            // ── Entity lookup: show AccountID / CompanyID ────────────────────
+            string? saAccId = null, saCmpId = null;
+            if (txn.Merchant is { Length: > 0 } saMerchantId)
+            {
+                var (mAcc, mCmp, mName, _, _) = await service.GetEntityCustomAsync(saMerchantId);
+                saAccId = mAcc; saCmpId = mCmp;
+            }
+            ShowEntityIds(saAccId, saCmpId, txn.Merchant);
+            await LookupHostDbAsync(txn.Id ?? "", txn.Description);
+
+            var typeNote   = $" (type={txn.Type} {txn.TypeLabel})";
+            var entityNote2 = saAccId is not null ? $"  |  AccountID: {saAccId}  CompanyID: {saCmpId}" : "";
+            SearchAllStatusText.Text       = $"✅  Built {builtNames.Count} webhook(s){typeNote}: {string.Join(", ", builtNames)}{entityNote2}";
+            SearchAllStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+            SetStatus($"[{envLabel}] Search All: {builtNames.Count} payload(s) from {txn.Id}.{(saAccId is not null ? $" AccountID={saAccId}, CompanyID={saCmpId}" : "")}");
+        }
+        catch (Exception ex)
+        {
+            SearchAllStatusText.Text       = $"❌  {ex.Message}";
+            SearchAllStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+        }
+        finally
+        {
+            SearchAllWebhooksBtn.IsEnabled = true;
+        }
+    }
+
+    private void UpdateTestCase(string name, string payload)
+    {
+        var tc = _testCases.FirstOrDefault(c =>
+            c.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (tc is not null) tc.Payload = payload;
+    }
+
+    // ── Build ACH Webhook from transaction row ───────────────────────────────
+
+    private void BuildAchWebhookBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Button btn) return;
+        if (btn.Tag is not Transaction txn) return;
+
+        var payload = WebhookTestService.BuildAchFundedPayloadFromTransaction(txn);
+
+        SetPayload(PrettyPrint(payload));
+
+        // Set dropdown to ACH Funded and pre-fill fields
+        WebhookTypeBox.SelectedIndex = 0;
+        AchTxnIdBox.Text  = txn.Id ?? "";
+        AchAmountBox.Text = ((txn.Total ?? txn.Approved ?? 0) / 100m)
+                                .ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+        PopulateTxnCard(txn, 0);
+
+        // Update the ACH test case so ▶ Run uses real data
+        var achCase = _testCases.FirstOrDefault(tc =>
+            tc.Name.Contains("ACH", StringComparison.OrdinalIgnoreCase) ||
+            tc.Name.Contains("eCheck", StringComparison.OrdinalIgnoreCase));
+        if (achCase is not null)
+            achCase.Payload = payload;
+
+        // Navigate to Webhook Tests tab
+        var tabCtrl = FindTabControl();
+        if (tabCtrl != null)
+        {
+            foreach (var item in tabCtrl.Items)
+            {
+                if (item is System.Windows.Controls.TabItem ti &&
+                    ti.Header?.ToString()?.Contains("Webhook", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    tabCtrl.SelectedItem = ti;
+                    break;
+                }
+            }
+        }
+
+        var typeNote = txn.IsAch ? "" : $" (forced from {txn.TypeLabel})";
+        AchPostStatus.Text       = $"✅  Built from txn {txn.Id}{typeNote} — ready to POST";
+        AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+        SetStatus($"Funded webhook payload built from {txn.Id} ({txn.TotalFormatted}){typeNote}.");
+    }
+
+    // ── Transaction detail card ──────────────────────────────────────────────
+
+    private void PopulateTxnCard(Transaction txn, int typeIdx = 0)
+    {
+        // Left panel accent colour + icon/title per webhook type
+        var (bg, icon, title) = typeIdx switch
+        {
+            1 => ("#DC2626", "🔄", "ACH RETURN"),
+            2 => ("#7C3AED", "💳", "CC REFUND"),
+            3 => ("#7C3AED", "↩️", "CC RETURN"),
+            4 => ("#0284C7", "📤", "DISBURSEMENT"),
+            6 => ("#D97706", "🔄", "ACH REFUND"),
+            _ => ("#4F46E5", "🏦", "ACH FUNDED")
+        };
+
+        TxnCardLeftPanel.Background = new System.Windows.Media.SolidColorBrush(
+            (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(bg));
+
+        TxnCardIcon.Text      = icon;
+        TxnCardTypeLabel.Text = title;
+
+        // Status badge
+        bool settled  = txn.Status == 3 || txn.Status == 4;
+        TxnCardStatusBadgeText.Text    = settled ? "Settled" : "Processed";
+        TxnCardStatusBadge.Background  = new System.Windows.Media.SolidColorBrush(
+            settled
+                ? (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#16A34A")
+                : (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#0284C7"));
+
+        TxnCardSubType.Text   = $"Type: {txn.TypeLabel}";
+        TxnCardStatusText.Text = $"✓ {txn.StatusLabel}";
+
+        // Info tiles
+        TxnCardId.Text          = txn.Id ?? "—";
+        TxnCardAmount.Text      = txn.TotalFormatted;
+        TxnCardTimestamp.Text   = txn.Created ?? "—";
+        TxnCardDescriptor.Text  = txn.MerchantDisplayName;
+        TxnCardPaymentType.Text = txn.PaymentTypeLabel;
+
+        TxnDetailCard.Visibility = System.Windows.Visibility.Visible;
+    }
+
+    private void CopyTxnCardIdBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (!string.IsNullOrEmpty(TxnCardId.Text) && TxnCardId.Text != "—")
+            System.Windows.Clipboard.SetText(TxnCardId.Text);
+    }
+
+    // ── Raw JSON toolbar ─────────────────────────────────────────────────────
+    private void RawJsonCopyAll_Click(object sender, RoutedEventArgs e)
+    {
+        if (!string.IsNullOrEmpty(RawJsonBox.Text))
+            System.Windows.Clipboard.SetText(RawJsonBox.Text);
+    }
+
+    private void RawJsonPaste_Click(object sender, RoutedEventArgs e)
+    {
+        if (System.Windows.Clipboard.ContainsText())
+            SetRawJson(System.Windows.Clipboard.GetText());
+    }
+
+    private void RawJsonClear_Click(object sender, RoutedEventArgs e) => ClearRawJson();
+
+    // ── Undo stacks ──────────────────────────────────────────────────────────
+
+    private readonly Stack<string> _rawJsonUndoStack = new();
+    private readonly Stack<string> _payloadUndoStack = new();
+
+    private void SetRawJson(string? text)
+    {
+        if (RawJsonBox.Text.Length > 0) _rawJsonUndoStack.Push(RawJsonBox.Text);
+        RawJsonBox.Text = text ?? string.Empty;
+    }
+    private void ClearRawJson()
+    {
+        if (RawJsonBox.Text.Length > 0) _rawJsonUndoStack.Push(RawJsonBox.Text);
+        RawJsonBox.Clear();
+        RawFindStatus.Text = "";
+        _rawFindIndex = -1;
+    }
+    private void SetPayload(string? text)
+    {
+        if (WebhookPayloadBox.Text.Length > 0) _payloadUndoStack.Push(WebhookPayloadBox.Text);
+        WebhookPayloadBox.Text = text ?? string.Empty;
+    }
+    private void ClearPayload()
+    {
+        if (WebhookPayloadBox.Text.Length > 0) _payloadUndoStack.Push(WebhookPayloadBox.Text);
+        WebhookPayloadBox.Clear();
+    }
+    private void RawJsonUndoBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (_rawJsonUndoStack.Count > 0) RawJsonBox.Text = _rawJsonUndoStack.Pop();
+        else RawJsonBox.Undo();
+    }
+    private void PayloadUndoBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (_payloadUndoStack.Count > 0) WebhookPayloadBox.Text = _payloadUndoStack.Pop();
+        else WebhookPayloadBox.Undo();
+    }
+
+    // ── Raw JSON Find & Replace ───────────────────────────────────────────────
+
+    private int _rawFindIndex = -1;
+
+    private void RawJsonFindReplaceToggle_Click(object sender, RoutedEventArgs e)
+    {
+        var bar = RawJsonFindReplaceBar;
+        if (bar.Visibility == Visibility.Visible)
+        {
+            bar.Visibility = Visibility.Collapsed;
+            _rawFindIndex  = -1;
+            RawFindStatus.Text = "";
+        }
+        else
+        {
+            bar.Visibility = Visibility.Visible;
+            RawFindBox.Focus();
+            RawFindBox.SelectAll();
+        }
+    }
+
+    private void RawJsonFindReplaceClose_Click(object sender, RoutedEventArgs e)
+    {
+        RawJsonFindReplaceBar.Visibility = Visibility.Collapsed;
+        _rawFindIndex      = -1;
+        RawFindStatus.Text = "";
+        RawJsonBox.Focus();
+    }
+
+    // Enter in the Find box triggers Find Next
+    private void RawFindBox_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == Key.Return || e.Key == Key.Enter)
+        {
+            e.Handled = true;
+            RawJsonFindNext_Click(sender, e);
+        }
+        else if (e.Key == Key.Escape)
+        {
+            RawJsonFindReplaceClose_Click(sender, e);
+        }
+    }
+
+    // Ctrl+H in the JSON box opens Find/Replace; Escape closes it
+    private void RawJsonBox_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == Key.H && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
+        {
+            e.Handled = true;
+            RawJsonFindReplaceToggle_Click(sender, e);
+        }
+        else if (e.Key == Key.Escape && RawJsonFindReplaceBar.Visibility == Visibility.Visible)
+        {
+            e.Handled = true;
+            RawJsonFindReplaceClose_Click(sender, e);
+        }
+    }
+
+    private void RawJsonFindNext_Click(object sender, RoutedEventArgs e)
+    {
+        var text  = RawJsonBox.Text;
+        var find  = RawFindBox.Text;
+        if (string.IsNullOrEmpty(find)) { RawFindStatus.Text = ""; return; }
+
+        // Start just after the previous match (wrap around at end)
+        int startFrom = _rawFindIndex >= 0 ? _rawFindIndex + 1 : 0;
+        int idx = text.IndexOf(find, startFrom, StringComparison.OrdinalIgnoreCase);
+        if (idx < 0 && startFrom > 0)                      // wrap
+            idx = text.IndexOf(find, 0, StringComparison.OrdinalIgnoreCase);
+
+        if (idx < 0)
+        {
+            RawFindStatus.Text       = "Not found";
+            RawFindStatus.Foreground = new WpfBrush(WpfColor.FromRgb(239, 68, 68));
+            _rawFindIndex = -1;
+            return;
+        }
+
+        _rawFindIndex = idx;
+        RawJsonBox.Focus();
+        RawJsonBox.Select(idx, find.Length);
+        try { RawJsonBox.ScrollToLine(RawJsonBox.GetLineIndexFromCharacterIndex(idx)); } catch { }
+
+        // Count total occurrences and which one this is
+        int total = 0, current = 0, pos = 0;
+        while ((pos = text.IndexOf(find, pos, StringComparison.OrdinalIgnoreCase)) >= 0)
+        {
+            total++;
+            if (pos == idx) current = total;
+            pos++;
+        }
+        RawFindStatus.Text       = $"{current} of {total}";
+        RawFindStatus.Foreground = new WpfBrush(WpfColor.FromRgb(148, 163, 184));
+    }
+
+    private void RawJsonReplace_Click(object sender, RoutedEventArgs e)
+    {
+        var find    = RawFindBox.Text;
+        var replace = RawReplaceBox.Text;
+        if (string.IsNullOrEmpty(find)) return;
+
+        // If the current selection matches the find term, replace it first
+        if (!string.IsNullOrEmpty(RawJsonBox.SelectedText) &&
+            RawJsonBox.SelectedText.Equals(find, StringComparison.OrdinalIgnoreCase))
+        {
+            int selStart = RawJsonBox.SelectionStart;
+            SetRawJson(RawJsonBox.Text.Remove(selStart, find.Length).Insert(selStart, replace));
+            // Move caret past the replacement so Find Next advances correctly
+            _rawFindIndex   = selStart + replace.Length - 1;
+            RawFindStatus.Text       = "Replaced.";
+            RawFindStatus.Foreground = new WpfBrush(WpfColor.FromRgb(74, 222, 128));
+        }
+        else
+        {
+            // Nothing selected / selection mismatch — find next occurrence first
+            RawJsonFindNext_Click(sender, e);
+        }
+    }
+
+    private void RawJsonReplaceAll_Click(object sender, RoutedEventArgs e)
+    {
+        var find    = RawFindBox.Text;
+        var replace = RawReplaceBox.Text;
+        if (string.IsNullOrEmpty(find)) return;
+
+        var text = RawJsonBox.Text;
+        var sb   = new System.Text.StringBuilder(text.Length);
+        int count = 0, pos = 0;
+
+        while (pos < text.Length)
+        {
+            int idx = text.IndexOf(find, pos, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) { sb.Append(text, pos, text.Length - pos); break; }
+            sb.Append(text, pos, idx - pos);
+            sb.Append(replace);
+            count++;
+            pos = idx + find.Length;
+        }
+
+        if (count > 0)
+        {
+            SetRawJson(sb.ToString());
+            _rawFindIndex   = -1;
+        }
+
+        RawFindStatus.Text = count > 0
+            ? $"Replaced {count} occurrence{(count == 1 ? "" : "s")}."
+            : "Not found.";
+        RawFindStatus.Foreground = count > 0
+            ? new WpfBrush(WpfColor.FromRgb(74, 222, 128))
+            : new WpfBrush(WpfColor.FromRgb(239, 68, 68));
+    }
+
+    // ── Payrix Portal (WebView2) ──────────────────────────────────────────────
+
+    private const string PortalSandboxUrl    = "https://test-portal.payrix.com";
+    private const string PortalProductionUrl = "https://epayments.bqecore.com";
+    private const string PortalUser          = "Shaheenv";
+    private const string PortalPass          = "Core@123";
+
+    private bool _portalInitialised = false;
+    private string? _pendingPortalUrl = null;   // URL to open after auto-login
+
+    private string ActivePortalUrl => IsSandbox ? PortalSandboxUrl : PortalProductionUrl;
+
+    // Called when the Portal tab is focused
+    private async void PortalTab_GotFocus(object sender, RoutedEventArgs e)
+    {
+        if (!_portalInitialised)
+        {
+            _portalInitialised = true;
+            await PortalBrowser.EnsureCoreWebView2Async();
+            PortalBrowser.CoreWebView2.NewWindowRequested += (s, ev) =>
+            {
+                ev.Handled = true;
+                PortalBrowser.CoreWebView2.Navigate(ev.Uri);
+            };
+            NavigatePortal(ActivePortalUrl);
+        }
+    }
+
+    private void NavigatePortal(string url)
+    {
+        PortalAddressBar.Text = url;
+        PortalBrowser.CoreWebView2?.Navigate(url);
+    }
+
+    // Auto-fill and submit the login form via JavaScript
+    private async void PortalLoginBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_portalInitialised)
+        {
+            _portalInitialised = true;
+            await PortalBrowser.EnsureCoreWebView2Async();
+        }
+
+        // Navigate to login page first, then inject credentials
+        var loginUrl = $"{ActivePortalUrl}/login";
+        PortalAddressBar.Text = loginUrl;
+        PortalBrowser.CoreWebView2.Navigate(loginUrl);
+        // Credentials are injected in NavigationCompleted once the page loads
+        _pendingPortalUrl = null;
+    }
+
+    private async void PortalBrowser_NavigationCompleted(
+        object sender,
+        Microsoft.Web.WebView2.Core.CoreWebView2NavigationCompletedEventArgs e)
+    {
+        var url = PortalBrowser.CoreWebView2.Source;
+        PortalAddressBar.Text = url;
+
+        if (url.Contains("/login", StringComparison.OrdinalIgnoreCase))
+        {
+            // Inject a polling auto-filler — retries every 300 ms for up to 15 s
+            // so it works regardless of how long the SPA takes to render the form
+            await StartLoginPollerAsync();
+        }
+        else if (_pendingPortalUrl != null)
+        {
+            var target = _pendingPortalUrl;
+            _pendingPortalUrl = null;
+            PortalBrowser.CoreWebView2.Navigate(target);
+        }
+    }
+
+    /// <summary>
+    /// Injects a self-retrying script that polls every 300 ms until it finds the
+    /// login fields, fills them in, and clicks Submit.  Works with React / Angular
+    /// / Vue SPAs that render the form asynchronously.
+    /// </summary>
+    private async Task StartLoginPollerAsync()
+    {
+        // Build a script that polls for the form, fills it, and stops when done.
+        var js = $$"""
+            (function() {
+                if (window.__payrixAutoLoginRunning) return 'already-running';
+                window.__payrixAutoLoginRunning = true;
+
+                function setNative(el, val) {
+                    try {
+                        var setter = Object.getOwnPropertyDescriptor(
+                                        window.HTMLInputElement.prototype, 'value').set;
+                        setter.call(el, val);
+                    } catch(e) { el.value = val; }
+                    ['input','change','blur'].forEach(function(ev) {
+                        el.dispatchEvent(new Event(ev, { bubbles: true }));
+                    });
+                }
+
+                function tryLogin() {
+                    // Find ALL inputs on the page and inspect them
+                    var inputs = Array.from(document.querySelectorAll('input'));
+                    var user = null, pass = null;
+
+                    inputs.forEach(function(inp) {
+                        var t = (inp.type || '').toLowerCase();
+                        var n = (inp.name || '').toLowerCase();
+                        var p = (inp.placeholder || '').toLowerCase();
+                        var id = (inp.id || '').toLowerCase();
+                        if (!pass && t === 'password') pass = inp;
+                        if (!user && (t === 'email' || t === 'text' &&
+                            (n.includes('user') || n.includes('login') || n.includes('email') ||
+                             p.includes('user') || p.includes('login') || p.includes('email') ||
+                             id.includes('user') || id.includes('login') || id.includes('email')))) {
+                            user = inp;
+                        }
+                    });
+
+                    // Fallback: first text/email input before the password field
+                    if (!user && pass) {
+                        inputs.forEach(function(inp) {
+                            if (!user && inp !== pass &&
+                                (inp.type === 'text' || inp.type === 'email' || inp.type === '')) {
+                                user = inp;
+                            }
+                        });
+                    }
+
+                    if (!user || !pass) return false;
+
+                    setNative(user, '{{PortalUser}}');
+                    setNative(pass, '{{PortalPass}}');
+
+                    // Slight delay so React state settles before we submit
+                    setTimeout(function() {
+                        var btn = document.querySelector('button[type="submit"]')
+                               || document.querySelector('input[type="submit"]')
+                               || (user && user.closest('form') &&
+                                   user.closest('form').querySelector('button'));
+                        if (btn) { btn.click(); return; }
+                        var form = user.closest('form');
+                        if (form) form.submit();
+                    }, 300);
+
+                    return true;
+                }
+
+                var attempts = 0;
+                var timer = setInterval(function() {
+                    attempts++;
+                    if (tryLogin() || attempts > 50) {
+                        clearInterval(timer);
+                        window.__payrixAutoLoginRunning = false;
+                    }
+                }, 300);
+
+                return 'poller-started';
+            })();
+            """;
+
+        try
+        {
+            var result = await PortalBrowser.CoreWebView2.ExecuteScriptAsync(js);
+            SetStatus($"Portal: auto-login poller {result?.Trim('"')}");
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Portal login error: {ex.Message}", error: true);
+        }
+    }
+
+    // Open a specific transaction in the portal (called from double-click)
+    private void OpenTransactionInPortal(string txnId)
+    {
+        var url = IsSandbox
+            ? $"{PortalSandboxUrl}/search/{txnId}#txns"
+            : $"{PortalProductionUrl}/search/{txnId}#txns";
+
+        // Switch to Portal tab
+        var tabCtrl = FindTabControl();
+        if (tabCtrl != null) tabCtrl.SelectedItem = PortalTab;
+
+        if (!_portalInitialised)
+        {
+            _pendingPortalUrl = url;
+            // Init will happen via PortalTab_GotFocus → then NavigationCompleted will redirect
+            var loginUrl = $"{ActivePortalUrl}/login";
+            PortalAddressBar.Text = loginUrl;
+            _ = InitAndNavigateAsync(loginUrl, url);
+        }
+        else
+        {
+            _pendingPortalUrl = url;
+            NavigatePortal($"{ActivePortalUrl}/login");
+        }
+    }
+
+    private async Task InitAndNavigateAsync(string loginUrl, string afterUrl)
+    {
+        _portalInitialised = true;
+        await PortalBrowser.EnsureCoreWebView2Async();
+        PortalBrowser.CoreWebView2.NewWindowRequested += (s, ev) =>
+        {
+            ev.Handled = true;
+            PortalBrowser.CoreWebView2.Navigate(ev.Uri);
+        };
+        _pendingPortalUrl = afterUrl;
+        PortalBrowser.CoreWebView2.Navigate(loginUrl);
+    }
+
+    private System.Windows.Controls.TabControl? FindTabControl()
+    {
+        DependencyObject parent = PortalBrowser;
+        while (parent != null)
+        {
+            parent = System.Windows.Media.VisualTreeHelper.GetParent(parent);
+            if (parent is System.Windows.Controls.TabControl tc) return tc;
+        }
+        return null;
+    }
+
+    private void PortalGoBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var url = PortalAddressBar.Text.Trim();
+        if (!string.IsNullOrEmpty(url))
+            PortalBrowser.CoreWebView2?.Navigate(url);
+    }
+
+    private void PortalAddressBar_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter) PortalGoBtn_Click(sender, e);
+    }
+
+    private void PortalReloadBtn_Click(object sender, RoutedEventArgs e)
+        => PortalBrowser.CoreWebView2?.Reload();
+
+    // ── KPI visibility toggle ────────────────────────────────────────────────
+
+    private void KpiToggle_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        var visible = KpiGrid.Visibility == Visibility.Visible;
+        KpiGrid.Visibility  = visible ? Visibility.Collapsed : Visibility.Visible;
+        KpiToggleText.Text  = visible ? "KPIs ▼" : "KPIs ▲";
+        KpiToggleBorder.Background = visible
+            ? new WpfBrush(WpfColor.FromRgb(241, 245, 249))
+            : new WpfBrush(WpfColor.FromRgb(224, 231, 255));
+    }
+
+    // ── Dark / Light mode toggle ─────────────────────────────────────────────
+    private bool _isDarkMode = true;   // matches App.xaml loading DarkTheme by default
+
+    private void HelpBtn_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        const string help = """
+            ╔══════════════════════════════════════════════════════════════╗
+            ║              Payrix Tools — Quick Reference                  ║
+            ╠══════════════════════════════════════════════════════════════╣
+            ║  ENVIRONMENTS                                                ║
+            ║  • Sandbox    – test.api.payrix.com  (non-production data)   ║
+            ║  • Production – api.payrix.com  (live merchant data)         ║
+            ╠══════════════════════════════════════════════════════════════╣
+            ║  SEARCH OPTIONS                                              ║
+            ║  • Search by Email   – fetches transactions for a user       ║
+            ║    email. Results are strictly filtered — if no transactions  ║
+            ║    match, none are shown.                                    ║
+            ║  • By Transaction ID – paste one or more Payrix txn IDs      ║
+            ║    (comma-separated) to load specific transactions.          ║
+            ║  • By Disbursement ID – loads all transactions belonging      ║
+            ║    to a Payrix disbursement batch.                           ║
+            ║  • Fetch ACH / Fetch Credit Card – quick-fetch by type,      ║
+            ║    optionally filtered by email and limit.                   ║
+            ╠══════════════════════════════════════════════════════════════╣
+            ║  KPI BAR                                                     ║
+            ║  TXN=count  TOTAL=sum(total)  APPROVED=sum(approved)         ║
+            ║  SETTLED=count(settled≠null)  DECLINED=count(status=2)       ║
+            ║  FEES=sum(fee)  PENDING=count(status=1)                      ║
+            ║  REFUNDED=count(refunded≠0)  AVG=approved÷count             ║
+            ║  CARD=types 1-6  ACH=types 7-8  CAPTURED=status=3           ║
+            ║  DISBURSED=type=6  SETTLED $=sum(settledTotal)               ║
+            ╠══════════════════════════════════════════════════════════════╣
+            ║  TRANSACTION GRID                                            ║
+            ║  • 🔗 button  – opens transaction in ePayments portal        ║
+            ║  • Double-click any row – opens in portal                    ║
+            ║  • Double-click Email cell – copies email to search box      ║
+            ║  • Right-click – Copy cell / Copy row / Search value         ║
+            ║  • Discrepancy column – flags amount mismatches              ║
+            ║    (approved ≠ total, line items ≠ approved, etc.)           ║
+            ╠══════════════════════════════════════════════════════════════╣
+            ║  WEBHOOK TESTS TAB                                           ║
+            ║  • Select Type + Environment, then Fetch (builds payload     ║
+            ║    from real Payrix data) or Send POST directly.             ║
+            ║  • ⚙ Config – shows date filter, entity custom field,        ║
+            ║    and DB connection strings for AccountID lookup.           ║
+            ║  • AccountID strip (blue) – fetched from Payrix entity       ║
+            ║    custom field (Core writes AccountID,CompanyID there).     ║
+            ║  • Core DB strip – fetched from BQECoreHost payment-service  ║
+            ║    DB then resolved to AccountID via main DB.                ║
+            ╠══════════════════════════════════════════════════════════════╣
+            ║  ID SOURCES                                                  ║
+            ║  • Payrix entity custom field: AccountID,CompanyID stored    ║
+            ║    by BQE Core when merchant is onboarded in Payrix.         ║
+            ║  • Host DB (payment-service): ServiceEntity.RequestID →      ║
+            ║    Company.CoreCompany_ID                                    ║
+            ║  • Main DB: Company.ID → AccountCompany → Account.ID         ║
+            ╚══════════════════════════════════════════════════════════════╝
+            """;
+        System.Windows.MessageBox.Show(help, "Payrix Tools — Help",
+            System.Windows.MessageBoxButton.OK,
+            System.Windows.MessageBoxImage.Information);
+    }
+
+    private void ThemeToggle_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        _isDarkMode = !_isDarkMode;
+        ApplyTheme(_isDarkMode);
+    }
+
+    private void ApplyTheme(bool dark)
+    {
+        var dict = new ResourceDictionary
+        {
+            Source = new Uri(
+                dark ? "Themes/DarkTheme.xaml" : "Themes/LightTheme.xaml",
+                UriKind.Relative)
+        };
+
+        var merged = System.Windows.Application.Current.Resources.MergedDictionaries;
+        // Replace in-place to avoid a momentary empty-dict state that can break
+        // StaticResource BasedOn chains resolved at parse time.
+        if (merged.Count > 0)
+            merged[0] = dict;
+        else
+            merged.Add(dict);
+
+        // Update toggle icon and thumb position
+        ThemeToggleIcon.Text = dark ? "🌙" : "☀️";
+        ThemeToggleThumb.HorizontalAlignment = dark
+            ? System.Windows.HorizontalAlignment.Right
+            : System.Windows.HorizontalAlignment.Left;
+
+        // Update toggle track colour, border and thumb fill
+        ThemeToggleBorder.Background = dark
+            ? new System.Windows.Media.SolidColorBrush(WpfColor.FromRgb(55, 48, 90))   // #37305A muted dark purple
+            : new System.Windows.Media.SolidColorBrush(WpfColor.FromRgb(232, 234, 246)); // #E8EAF6 light lavender
+        ThemeToggleBorder.BorderBrush = dark
+            ? new System.Windows.Media.SolidColorBrush(WpfColor.FromRgb(109, 40, 217))  // #6D28D9
+            : new System.Windows.Media.SolidColorBrush(WpfColor.FromRgb(197, 202, 233)); // #C5CAE9
+        ThemeToggleThumb.Fill = dark
+            ? new System.Windows.Media.SolidColorBrush(WpfColor.FromRgb(167, 139, 250)) // #A78BFA light purple thumb
+            : new System.Windows.Media.SolidColorBrush(WpfColor.FromRgb(79, 70, 229));  // #4F46E5 indigo thumb
+
+        // Update Settings tab theme badge
+        if (ThemeActiveBadgeText != null)
+            ThemeActiveBadgeText.Text = dark ? "● Dark Mode Active" : "● Light Mode Active";
+        if (ThemeActiveBadge != null)
+        {
+            ThemeActiveBadge.Background = dark
+                ? new System.Windows.Media.SolidColorBrush(
+                    System.Windows.Media.Color.FromArgb(32, 79, 70, 229))   // indigo tint
+                : new System.Windows.Media.SolidColorBrush(
+                    System.Windows.Media.Color.FromArgb(32, 245, 158, 11));  // amber tint
+            ThemeActiveBadge.BorderBrush = dark
+                ? new WpfBrush(WpfColor.FromRgb(79, 70, 229))
+                : new WpfBrush(WpfColor.FromRgb(245, 158, 11));
+            if (ThemeActiveBadgeText != null)
+                ThemeActiveBadgeText.Foreground = dark
+                    ? new WpfBrush(WpfColor.FromRgb(165, 180, 252))
+                    : new WpfBrush(WpfColor.FromRgb(251, 191, 36));
+        }
+        // Highlight the active button in Settings tab
+        if (SettingsDarkBtn != null)
+            SettingsDarkBtn.Background = dark
+                ? new WpfBrush(WpfColor.FromRgb(79, 70, 229))   // indigo = active
+                : new WpfBrush(WpfColor.FromRgb(55, 65, 81));    // gray = inactive
+        if (SettingsLightBtn != null)
+            SettingsLightBtn.Background = dark
+                ? new WpfBrush(WpfColor.FromRgb(55, 65, 81))     // gray = inactive
+                : new WpfBrush(WpfColor.FromRgb(245, 158, 11));   // amber = active
+    }
+
+    // ── Section Collapse / Expand ─────────────────────────────────────────────
+
+    private static void ToggleSection(UIElement content, System.Windows.Controls.TextBlock arrow,
+                                       System.Windows.Controls.TextBlock? pinBtn = null)
+    {
+        // If pinned, clicking header does NOT collapse
+        if (pinBtn?.Tag?.ToString() == "pinned" && content.Visibility == Visibility.Visible)
+            return;
+        bool collapse = content.Visibility == Visibility.Visible;
+        content.Visibility = collapse ? Visibility.Collapsed : Visibility.Visible;
+        arrow.Text = collapse ? "▶" : "▼";
+    }
+
+    private void ControlsCardToggle_Click(object sender, MouseButtonEventArgs e)
+    {
+        bool collapse = SearchSectionsPanel.Visibility == Visibility.Visible;
+        SearchSectionsPanel.Visibility = collapse ? Visibility.Collapsed : Visibility.Visible;
+        ControlsCardArrow.Text = collapse ? "Expand" : "Collapse";
+        // Also update emoji prefix
+        var border = sender as System.Windows.Controls.Border;
+        if (border?.Child is System.Windows.Controls.StackPanel sp && sp.Children[0] is System.Windows.Controls.TextBlock icon)
+            icon.Text = collapse ? "⊞  " : "⊟  ";
+    }
+
+    private void UseDbIdsForCustomBtn_Click(object sender, RoutedEventArgs e)
+    {
+        // Pull AccountID + CompanyID from the Core DB strip (strip the "(via ...)" suffix)
+        var rawAccount = HostDbAccountIdText?.Text?.Trim() ?? "";
+        var rawCompany = HostDbCompanyIdText?.Text?.Trim() ?? "";
+        var accountId  = rawAccount.Contains('(') ? rawAccount[..rawAccount.IndexOf('(')].Trim() : rawAccount;
+        var companyId  = rawCompany.Contains('(') ? rawCompany[..rawCompany.IndexOf('(')].Trim() : rawCompany;
+
+        if (string.IsNullOrEmpty(accountId) || accountId == "—" ||
+            string.IsNullOrEmpty(companyId) || companyId == "—")
+        {
+            SetStatus("Fetch a transaction first to populate AccountID + CompanyID.", error: true);
+            return;
+        }
+
+        EntityCustomBox.Text = $"{accountId},{companyId}";
+        SetStatus($"Entity custom set: {EntityCustomBox.Text}");
+    }
+
+    private async void FetchEntityCustomFromDbBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var email   = CoreAccountEmailBox.Text.Trim();
+        var connStr = LocalMainDbBox.Text.Trim();
+
+        // Auto-detect connection string if still empty
+        if (string.IsNullOrEmpty(connStr))
+        {
+            var (_, mainConn, _) = ReadLocalHostIni();
+            if (!string.IsNullOrEmpty(mainConn))
+            {
+                LocalMainDbBox.Text = mainConn;
+                connStr = mainConn;
+                SaveSettings();
+            }
+        }
+
+        if (string.IsNullOrEmpty(email))
+        {
+            SetStatus("Enter an email in the DB config panel Email box first.", error: true);
+            // Expand the config panel so the user can see the email box
+            if (WebhookDbConfigPanel.Visibility != Visibility.Visible)
+            {
+                WebhookDbConfigPanel.Visibility     = Visibility.Visible;
+                WebhookEntityCustomPanel.Visibility = Visibility.Visible;
+                WebhookDateFilterPanel.Visibility   = Visibility.Visible;
+                WebhookConfigToggleText.Text        = "⚙ Config ▲";
+                if (WebhookConfigToggleText2 is not null)
+                    WebhookConfigToggleText2.Text   = "⚙ Config ▲";
+            }
+            return;
+        }
+
+        if (string.IsNullOrEmpty(connStr))
+        {
+            SetStatus("Local Main DB connection string is empty — could not auto-detect from INI.", error: true);
+            return;
+        }
+
+        FetchEntityCustomFromDbBtn.IsEnabled = false;
+        SetStatus($"Fetching AccountID + CompanyID for {email} from Local host DB…");
+
+        var (results, error) = await HostDbService.GetAllAccountCompaniesByEmailAsync(connStr, email);
+
+        FetchEntityCustomFromDbBtn.IsEnabled = true;
+
+        if (error is not null)
+        {
+            SetStatus($"DB lookup failed: {error}", error: true);
+            return;
+        }
+
+        if (results.Count == 0)
+        {
+            SetStatus($"Could not find AccountID or CompanyID for {email} in the host DB.", error: true);
+            return;
+        }
+
+        // Populate the ComboBox with all found companies
+        EntityCustomBox.Items.Clear();
+        foreach (var (aid, cid, cname) in results)
+        {
+            var value = $"{aid},{cid}";
+            var label = string.IsNullOrWhiteSpace(cname) ? value : $"{cname}  —  {value}";
+            EntityCustomBox.Items.Add(new System.Windows.Controls.ComboBoxItem
+            {
+                Content = label,
+                Tag     = value
+            });
+        }
+
+        // Select first item and set Text to the raw AccountID,CompanyID value.
+        // Defer Text assignment — WPF editable ComboBox sets Text to Content after SelectedIndex is applied.
+        var first = results[0];
+        EntityCustomBox.SelectedIndex = 0;
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input, () =>
+        {
+            EntityCustomBox.Text = $"{first.accountId},{first.companyId}";
+        });
+
+        // Wire up selection-changed so switching in the dropdown updates Text + the blue strip
+        EntityCustomBox.SelectionChanged -= EntityCustomBox_SelectionChanged;
+        EntityCustomBox.SelectionChanged += EntityCustomBox_SelectionChanged;
+
+        // Also update the blue result strip
+        ShowHostDbIds(first.companyId, first.accountId,
+            results.Count > 1
+                ? $"📧 {results.Count} companies found for {email} — use dropdown to switch"
+                : $"📧 Fetched from Local host DB by email ({email})");
+        HostDbInfoPanel.Visibility = Visibility.Visible;
+
+        SetStatus(results.Count > 1
+            ? $"Found {results.Count} companies for {email} — use the Entity Custom dropdown to select one."
+            : $"Entity custom set → AccountID: {first.accountId}  |  CompanyID: {first.companyId}");
+    }
+
+    private void EntityCustomBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (EntityCustomBox.SelectedItem is not System.Windows.Controls.ComboBoxItem item) return;
+        var value = item.Tag?.ToString() ?? item.Content?.ToString() ?? "";
+        // Tag is already "accountId,companyId" — no label strip needed
+        var raw = value.Trim();
+
+        var parts = raw.Split(',');
+        if (parts.Length == 2)
+            ShowHostDbIds(parts[1].Trim(), parts[0].Trim(), "📧 Selected from dropdown");
+
+        // WPF editable ComboBox overwrites Text with the Content string AFTER SelectionChanged,
+        // so we defer our assignment to run after that internal update completes.
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input, () =>
+        {
+            EntityCustomBox.Text = raw;
+        });
+    }
+
+    private void EmailSectionHeader_Click(object sender, MouseButtonEventArgs e)
+        => ToggleSection(EmailSectionContent, EmailSectionArrow, EmailPinBtn);
+
+    private void TxnSectionHeader_Click(object sender, MouseButtonEventArgs e)
+        => ToggleSection(TxnSectionContent, TxnSectionArrow, TxnPinBtn);
+
+    private void DisbSectionHeader_Click(object sender, MouseButtonEventArgs e)
+        => ToggleSection(DisbSectionContent, DisbSectionArrow, DisbPinBtn);
+
+    private void EmailPinBtn_Click(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        TogglePin(EmailPinBtn, EmailSectionContent, EmailSectionArrow);
+    }
+
+    private void TxnPinBtn_Click(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        TogglePin(TxnPinBtn, TxnSectionContent, TxnSectionArrow);
+    }
+
+    private void DisbPinBtn_Click(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        TogglePin(DisbPinBtn, DisbSectionContent, DisbSectionArrow);
+    }
+
+    private static void TogglePin(System.Windows.Controls.TextBlock pinBtn,
+                                   UIElement content,
+                                   System.Windows.Controls.TextBlock arrow)
+    {
+        bool pinned = pinBtn.Tag?.ToString() == "pinned";
+        if (pinned)
+        {
+            pinBtn.Tag     = "unpinned";
+            pinBtn.Text    = "📍";
+            pinBtn.ToolTip = "Pin to keep section expanded";
+        }
+        else
+        {
+            pinBtn.Tag     = "pinned";
+            pinBtn.Text    = "📌";
+            pinBtn.ToolTip = "Unpin section";
+            content.Visibility = Visibility.Visible;
+            arrow.Text = "▼";
+        }
+    }
+
+    // ── Share helpers ─────────────────────────────────────────────────────────
+
+    private void ShowShareMenu(System.Windows.FrameworkElement anchor, string value, string label)
+    {
+        if (string.IsNullOrWhiteSpace(value)) { SetStatus($"Nothing to share — {label} is empty."); return; }
+
+        var menu = new System.Windows.Controls.ContextMenu();
+
+        var copyRaw = new System.Windows.Controls.MenuItem { Header = "📋  Copy to Clipboard" };
+        copyRaw.Click += (_, _) => { System.Windows.Clipboard.SetText(value); SetStatus($"Copied {label}"); };
+
+        var copyMd = new System.Windows.Controls.MenuItem { Header = "📝  Copy as Markdown" };
+        copyMd.Click += (_, _) => { System.Windows.Clipboard.SetText($"**{label}**: `{value}`"); SetStatus($"Copied {label} as Markdown"); };
+
+        var emailItem = new System.Windows.Controls.MenuItem { Header = "📧  Share via Email" };
+        emailItem.Click += (_, _) =>
+        {
+            var subject = Uri.EscapeDataString($"[Payrix Tools] {label}");
+            var body    = Uri.EscapeDataString($"{label}:\n{value}\n\n— Shared from Payrix Tools");
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                $"mailto:?subject={subject}&body={body}") { UseShellExecute = true });
+        };
+
+        var teamsItem = new System.Windows.Controls.MenuItem { Header = "💬  Copy for Teams / Slack" };
+        teamsItem.Click += (_, _) => { System.Windows.Clipboard.SetText($"**{label}:** `{value}`"); SetStatus($"Copied {label} for Teams/Slack"); };
+
+        menu.Items.Add(copyRaw);
+        menu.Items.Add(copyMd);
+        menu.Items.Add(new System.Windows.Controls.Separator());
+        menu.Items.Add(emailItem);
+        menu.Items.Add(teamsItem);
+        menu.PlacementTarget = anchor;
+        menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+        menu.IsOpen = true;
+    }
+
+    private void ShareTxnIdBtn_Click(object sender, RoutedEventArgs e)
+        => ShowShareMenu((System.Windows.FrameworkElement)sender, TxnIdsBox.Text.Trim(), "Transaction ID(s)");
+
+    private void ShareDisbIdBtn_Click(object sender, RoutedEventArgs e)
+        => ShowShareMenu((System.Windows.FrameworkElement)sender, DisbursementIdBox.Text.Trim(), "Disbursement ID");
+
+    private void ShareRawJsonBtn_Click(object sender, RoutedEventArgs e)
+        => ShowShareMenu((System.Windows.FrameworkElement)sender, RawJsonBox.Text.Trim(), "Raw JSON");
+
+    // ── Disbursement Search ───────────────────────────────────────────────────
+
+    private async void FetchDisbursementBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var disbId   = DisbursementIdBox.Text.Trim();
+        var limit    = int.TryParse(DisbLimitBox.Text.Trim(), out var l) && l > 0 ? l : 20;
+        var specific = !string.IsNullOrEmpty(disbId);
+
+        var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            SetStatus("No API key set.", error: true);
+            return;
+        }
+
+        FetchDisbursementBtn.IsEnabled = false;
+        SetStatus(specific ? $"Fetching disbursement {disbId}…" : $"Fetching latest {limit} disbursement(s)…");
+
+        try
+        {
+            var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service     = new PayrixService(apiKey, environment);
+            var envLabel    = IsSandbox ? "Sandbox" : "Production";
+
+            if (specific)
+            {
+                // ── Fetch one specific disbursement by ID ─────────────────────────
+                var (wp, wJson, rec, disbEntries, wErr) = await service.GetWithdrawalWebhookAsync(disbId: disbId);
+
+                if (wErr is null && wp is not null && rec is not null)
+                {
+                    SetPayload(PrettyPrint(wp));
+                    AchTxnIdBox.Text             = rec.Id ?? disbId;
+                    AchAmountBox.Text            = rec.AmountFormatted;
+                    WebhookTypeBox.SelectedIndex = 5;
+                    SetRawJson(PrettyPrint(wJson));
+
+                    if (rec.Id is not null)
+                        await LookupHostDbAsync(rec.Id);
+
+                    var lineItemsInfo = disbEntries.Count > 0 ? $"  |  {disbEntries.Count} line item(s) embedded" : "  |  no line items found";
+                    AchPostStatus.Text       = $"✅  Payload ready for disbursement {disbId}{lineItemsInfo}";
+                    AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+                    SetStatus($"[{envLabel}] Disbursement {disbId} loaded{lineItemsInfo}.");
+
+                    ShowDisbursementEntries(disbEntries);
+                }
+                else
+                {
+                    AchPostStatus.Text       = $"⚠  {wErr ?? "Disbursement not found."}";
+                    AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(217, 119, 6));
+                }
+
+                // Load transactions for the specific disbursement,
+                // filtered to only those whose IDs appear in the disbursement entries.
+                SetStatus($"[{envLabel}] Loading transactions for disbursement {disbId}…");
+                var validTxnIds = disbEntries
+                    .Select(e => e.EventId)
+                    .Where(id => !string.IsNullOrEmpty(id))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                var (txns, _, txnError) = await service.GetTransactionsByDisbursementAsync(disbId);
+
+                // If entries are available use them to filter; otherwise trust the API result
+                var filteredTxns = validTxnIds.Count > 0
+                    ? txns.Where(t => t.Id is not null && validTxnIds.Contains(t.Id)).ToList()
+                    : txns;
+
+                if (txnError is null && filteredTxns.Count > 0)
+                {
+                    _transactions.Clear();
+                    _items.Clear();
+                    _selectedTransaction = null;
+
+                    foreach (var txn in filteredTxns)
+                        txn.DisbursementId = disbId;
+                    await Task.WhenAll(filteredTxns.Select(txn => EnrichTransactionAsync(service, txn, envLabel, bulkMode: true)));
+                    _suppressKpiRefresh = true;
+                    try   { foreach (var txn in filteredTxns) _transactions.Add(txn); }
+                    finally { _suppressKpiRefresh = false; RefreshOverviewKpis(); }
+
+                    UpdateSummary();
+                    ShowItemsPlaceholder(true);
+                }
+
+                var txnNote = filteredTxns.Count > 0 ? $"  +  {filteredTxns.Count} transaction(s) loaded." : "";
+                SetStatus($"[{envLabel}] Disbursement {disbId} ready.{txnNote}");
+            }
+            else
+            {
+                // ── Fetch latest N disbursements ──────────────────────────────────
+                var records = await service.GetLatestDisbursementsAsync(limit);
+
+                if (records.Count == 0)
+                {
+                    SetStatus($"[{envLabel}] No disbursements found.", error: true);
+                    return;
+                }
+
+                _transactions.Clear();
+                _items.Clear();
+                _disbEntries.Clear();
+                _selectedTransaction = null;
+                ShowDisbursementEntries([]);
+
+                int totalTxns = 0;
+                var disbLock  = new object();
+
+                await Task.WhenAll(records.Where(rec => rec.Id is not null).Select(async rec =>
+                {
+                    // Fetch entries + transactions for this disbursement concurrently
+                    var entriesTask = service.GetDisbursementEntriesAsync(rec.Id!);
+                    var txnsTask    = service.GetTransactionsByDisbursementAsync(rec.Id!);
+                    await Task.WhenAll(entriesTask, txnsTask);
+
+                    var validIds = entriesTask.Result
+                        .Select(e => e.EventId)
+                        .Where(id => !string.IsNullOrEmpty(id))
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                    var (txns, _, _) = txnsTask.Result;
+                    var filtered = validIds.Count > 0
+                        ? txns.Where(t => t.Id is not null && validIds.Contains(t.Id)).ToList()
+                        : txns;
+
+                    // Enrich all transactions for this disbursement in parallel
+                    foreach (var txn in filtered)
+                        txn.DisbursementId = rec.Id;
+                    await Task.WhenAll(filtered.Select(txn => EnrichTransactionAsync(service, txn, envLabel, bulkMode: true)));
+
+                    lock (disbLock)
+                    {
+                        _suppressKpiRefresh = true;
+                        try   { foreach (var txn in filtered) _transactions.Add(txn); }
+                        finally { _suppressKpiRefresh = false; RefreshOverviewKpis(); }
+                        totalTxns += filtered.Count;
+                    }
+                }));
+
+                UpdateSummary();
+                ShowItemsPlaceholder(true);
+                SetStatus($"[{envLabel}] Loaded {records.Count} disbursement(s)  |  {totalTxns} transaction(s).");
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Disbursement fetch failed: {ex.Message}", error: true);
+        }
+        finally
+        {
+            FetchDisbursementBtn.IsEnabled = true;
+        }
+    }
+
+    private void ClearDisbursementBtn_Click(object sender, RoutedEventArgs e)
+    {
+        DisbursementIdBox.Clear();
+        SetStatus("Disbursement ID cleared.");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // HTTP CLIENT  (Tab 15)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private static readonly System.Net.Http.HttpClient _httpClient = CreateHttpClient();
+
+    private static System.Net.Http.HttpClient CreateHttpClient()
+    {
+        // Mirror Postman behaviour:
+        //   • Bypass SSL certificate errors (self-signed / expired certs on dev/staging)
+        //   • Auto-decompress gzip / deflate / brotli responses
+        //   • No timeout — user can cancel manually
+        var handler = new System.Net.Http.HttpClientHandler
+        {
+            AutomaticDecompression =
+                System.Net.DecompressionMethods.GZip |
+                System.Net.DecompressionMethods.Deflate |
+                System.Net.DecompressionMethods.Brotli,
+            ServerCertificateCustomValidationCallback =
+                System.Net.Http.HttpClientHandler.DangerousAcceptAnyServerCertificateValidator,
+            AllowAutoRedirect = true,
+            MaxAutomaticRedirections = 10,
+            UseCookies = false   // let caller manage cookies explicitly like Postman
+        };
+        var client = new System.Net.Http.HttpClient(handler)
+        {
+            Timeout = System.Threading.Timeout.InfiniteTimeSpan
+        };
+        // Match Postman's default headers exactly (from PostmanRuntime/7.54.0)
+        client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "PostmanRuntime/7.54.0");
+        client.DefaultRequestHeaders.Accept.ParseAdd("*/*");
+        client.DefaultRequestHeaders.AcceptEncoding.ParseAdd("gzip, deflate, br");
+        client.DefaultRequestHeaders.ConnectionClose = false; // keep-alive
+        return client;
+    }
+    private CancellationTokenSource? _httpCts;
+    private string _lastRawResponse    = "";
+    private string _lastPrettyResponse = "";
+    private string _lastContentType    = "";
+    private bool   _prettyViewReady    = false;
+    private bool   _previewViewReady   = false;
+
+    private readonly System.Collections.ObjectModel.ObservableCollection<Models.HttpKeyValueRow> _httpParams  = [];
+    private readonly System.Collections.ObjectModel.ObservableCollection<Models.HttpKeyValueRow> _httpHeaders = [];
+    private readonly System.Collections.ObjectModel.ObservableCollection<Models.HttpKeyValueRow> _httpForm     = [];
+    private readonly System.Collections.ObjectModel.ObservableCollection<Models.HttpKeyValueRow> _httpFormData = [];
+    private readonly System.Collections.ObjectModel.ObservableCollection<Models.HttpHeaderEntry>  _respHeaders = [];
+
+    // Collections store
+    private readonly System.Collections.ObjectModel.ObservableCollection<Models.HttpCollection> _collections = [];
+    private Models.HttpCollection? _activeCollection;
+
+    private void InitHttpClient()
+    {
+        HttpParamsGrid.ItemsSource      = _httpParams;
+        HttpHeadersGrid.ItemsSource     = _httpHeaders;
+        HttpFormGrid.ItemsSource         = _httpForm;
+        HttpFormDataGrid.ItemsSource     = _httpFormData;
+        HttpRespHeadersGrid.ItemsSource = _respHeaders;
+        CollectionsPanel.ItemsSource    = _collections;
+
+        // Pre-populate a default APIKEY header
+        _httpHeaders.Add(new Models.HttpKeyValueRow { Key = "APIKEY", Value = "", Description = "Payrix API key" });
+        _httpHeaders.Add(new Models.HttpKeyValueRow { Key = "Content-Type", Value = "application/json", Description = "" });
+
+        // Load persisted collections
+        var store = Services.HttpCollectionService.Load();
+        foreach (var c in store.Collections)
+            _collections.Add(c);
+
+        // Seed built-in API collections (only if not already present)
+        SeedBuiltInCollections();
+
+        // Silently merge duplicate collections and remove duplicate requests on every load
+        var (cleanedCols, cleanedReqs) = DeduplicateAllCollections();
+        if (cleanedCols > 0 || cleanedReqs > 0) PersistCollections();
+    }
+
+    // ── Built-in API collection seeding ──────────────────────────────────────
+    // Always replaces built-in collections so URL corrections take effect on update.
+
+    private static readonly HashSet<string> _builtInCollectionNames =
+    [
+        "Budget APIs", "List APIs", "Fee Schedule APIs", "Template APIs", "Global Settings APIs",
+        "BQE Core APIs"   // unified collection (replaces the 5 above)
+    ];
+
+    private void SeedBuiltInCollections()
+    {
+        // Remove ALL copies of every built-in collection name so URL corrections always take effect.
+        // (Previously used FirstOrDefault which left duplicates when more than one copy existed.)
+        foreach (var name in _builtInCollectionNames)
+        {
+            var stale = _collections
+                .Where(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            foreach (var old in stale) _collections.Remove(old);
+        }
+
+        // Auth is driven by the environment's auth panel — only Content-Type needed here
+        static List<Models.HttpKeyValueRow> H() =>
+        [
+            new() { Enabled = true, Key = "Content-Type", Value = "application/json", Description = "" }
+        ];
+
+        // Standard BQEParameters body for POST list/search endpoints
+        // BQEParameters correct format: PageInfo is a nested object, FilterList/SortList are lists
+        // PageNumber=0 means OFFSET 0 (first page). PageNumber=-1 is "all records" but ProjectList returns null on -1.
+        const string P = """{"PageInfo":{"PageNumber":0,"PageSize":500},"FilterList":[],"SortList":[]}""";
+
+        static Models.SavedHttpRequest Req(string method, string name, string url, string body = "") =>
+            new() { Method = method, Name = name, Url = url, Body = body, Headers = H() };
+
+        // ── Single unified collection, grouped by API type via name prefix ──────
+        _collections.Add(new Models.HttpCollection
+        {
+            Name = "BQE Core APIs",
+            Requests =
+            [
+                // ════════════════════════════════════════════════════════════
+                // BUDGET
+                // ════════════════════════════════════════════════════════════
+                Req("POST",   "Budget | Budget List",                   "{{baseUrl}}/api/Budget/BudgetList",                               P),
+                Req("POST",   "Budget | Budget Compact",                "{{baseUrl}}/api/Budget/BudgetCompact",                            P),
+                Req("GET",    "Budget | Get Budget",                    "{{baseUrl}}/api/Budget/GetBudget/{{budgetId}}"),
+                Req("GET",    "Budget | Get Budget Summary",            "{{baseUrl}}/api/Budget/GetBudgetSummary/{{budgetId}}"),
+                Req("POST",   "Budget | Budget Service Details",        "{{baseUrl}}/api/Budget/BudgetServiceDetails",                     P),
+                Req("POST",   "Budget | Budget Expense Details",        "{{baseUrl}}/api/Budget/BudgetExpenseDetails",                     P),
+                Req("POST",   "Budget | Create Budget",                 "{{baseUrl}}/api/Budget/PostBudget?id={{projectId}}",
+                    """{"projectId":"{{projectId}}","name":"","budgetAmount":0}"""),
+                Req("PATCH",  "Budget | Update Budget",                 "{{baseUrl}}/api/Budget/PatchBudget/{{budgetId}}",
+                    """{"operations":[{"op":"replace","path":"/name","value":""},{"op":"replace","path":"/budgetAmount","value":0}]}"""),
+                Req("DELETE", "Budget | Delete Budget",                 "{{baseUrl}}/api/Budget/DeleteBudget/{{budgetId}}?model=budget"),
+                Req("POST",   "Budget | Financial Budget List",         "{{baseUrl}}/api/FinancialBudget/FinancialBudgetList",             P),
+                Req("GET",    "Budget | Get Financial Budget",          "{{baseUrl}}/api/FinancialBudget/GetFinancialBudget/{{budgetId}}"),
+                Req("POST",   "Budget | Clone Financial Budget",        "{{baseUrl}}/api/FinancialBudget/CloneFinancialBudget",
+                    """{"sourceId":"{{budgetId}}","targetId":"{{projectId}}"}"""),
+
+                // ════════════════════════════════════════════════════════════
+                // DROPDOWNS / LOOKUPS
+                // ════════════════════════════════════════════════════════════
+                Req("POST",   "Dropdown | Activity Compact",            "{{baseUrl}}/api/Activity/ActivityCompact",                        P),
+                Req("POST",   "Dropdown | Class List (Departments)",    "{{baseUrl}}/api/Class/ClassList",                                 P),
+                Req("POST",   "Dropdown | Client Compact",              "{{baseUrl}}/api/Client/ClientCompact",                            P),
+                Req("POST",   "Dropdown | Compensation Codes",          "{{baseUrl}}/api/CompensationCode/CompensationCodes",              P),
+                Req("POST",   "Dropdown | Currency Multiplier Compact", "{{baseUrl}}/api/CurrencyMultiplier/CurrencyMultiplierCompact",    P),
+                Req("POST",   "Dropdown | Custom Lists",                "{{baseUrl}}/api/CustomList/CustomLists",                          P),
+                Req("GET",    "Dropdown | Get Custom List",             "{{baseUrl}}/api/CustomList/GetCustomList/{{listId}}"),
+                Req("POST",   "Dropdown | Employee Compact",            "{{baseUrl}}/api/Employee/EmployeeCompact",                        P),
+                Req("GET",    "Dropdown | Expense Types",               "{{baseUrl}}/api/Expense/GetExpenseTypes"),
+                Req("POST",   "Dropdown | Note Categories",             "{{baseUrl}}/api/NoteCategory/NoteCategories",                     P),
+                Req("POST",   "Dropdown | Pay Code Compact",            "{{baseUrl}}/api/PayCode/PayCodeCompact",                          P),
+                Req("POST",   "Dropdown | Pay Code List",               "{{baseUrl}}/api/PayCode/PayCodeList",                             P),
+                Req("GET",    "Dropdown | Project Status List",         "{{baseUrl}}/api/Project/GetProjectStatusList"),
+                Req("GET",    "Dropdown | Project Types",               "{{baseUrl}}/api/Project/GetProjectTypes"),
+                Req("GET",    "Dropdown | Project Frequency List",      "{{baseUrl}}/api/Project/GetProjectFrequencyList"),
+                Req("POST",   "Dropdown | Tax Codes",                   "{{baseUrl}}/api/TaxCode/TaxCodes",                                P),
+                Req("POST",   "Dropdown | Tax Types",                   "{{baseUrl}}/api/TaxCode/TaxTypes",                                P),
+                Req("POST",   "Dropdown | Tax Bases",                   "{{baseUrl}}/api/TaxCode/TaxBases",                                P),
+                Req("POST",   "Dropdown | States",                      "{{baseUrl}}/api/TaxCode/States",                                  P),
+
+                // ════════════════════════════════════════════════════════════
+                // EXPENSE ENTRY
+                // ════════════════════════════════════════════════════════════
+                Req("POST",   "Expense | Expense List",                 "{{baseUrl}}/api/Expense/ExpenseList",                             P),
+                Req("POST",   "Expense | Expense Compact",              "{{baseUrl}}/api/Expense/ExpenseCompact",                          P),
+                Req("GET",    "Expense | Get Expense",                  "{{baseUrl}}/api/Expense/GetExpense/{{expenseId}}"),
+                Req("POST",   "Expense | Expense Summary Info",         "{{baseUrl}}/api/Expense/GetExpenseSummaryInfo",                   P),
+                Req("POST",   "Expense | Create Expense",               "{{baseUrl}}/api/Expense/PostExpense",
+                    """{"projectId":"{{projectId}}","employeeId":"{{employeeId}}","expenseDate":"{{date}}","expenseCodeId":"{{expenseCodeId}}","amount":0,"isBillable":true,"notes":""}"""),
+                Req("PUT",    "Expense | Update Expense",               "{{baseUrl}}/api/Expense/PutExpense",
+                    """{"id":"{{expenseId}}","amount":0,"isBillable":true,"notes":""}"""),
+                Req("DELETE", "Expense | Delete Expense",               "{{baseUrl}}/api/Expense/DeleteExpense/{{expenseId}}"),
+                Req("PUT",    "Expense | Batch Change",                 "{{baseUrl}}/api/Expense/BatchChange",                             P),
+
+                // ════════════════════════════════════════════════════════════
+                // FEE SCHEDULE
+                // ════════════════════════════════════════════════════════════
+                Req("POST",   "FeeSchedule | Fee Schedules",            "{{baseUrl}}/api/FeeSchedule/FeeSchedules",                        P),
+                Req("POST",   "FeeSchedule | Fee Schedule Compact",     "{{baseUrl}}/api/FeeSchedule/FeeScheduleCompact",                  P),
+                Req("GET",    "FeeSchedule | Get Fee Schedule",         "{{baseUrl}}/api/FeeSchedule/GetFeeSchedule/{{feeScheduleId}}"),
+                Req("POST",   "FeeSchedule | Service Items",            "{{baseUrl}}/api/FeeSchedule/FeeScheduleServiceItems",             P),
+                Req("POST",   "FeeSchedule | Expense Items",            "{{baseUrl}}/api/FeeSchedule/FeeScheduleExpenseItems",             P),
+                Req("POST",   "FeeSchedule | Create",                   "{{baseUrl}}/api/FeeSchedule/PostFeeSchedule",
+                    """{"name":"","description":"","type":1}"""),
+                Req("PUT",    "FeeSchedule | Update",                   "{{baseUrl}}/api/FeeSchedule/PutFeeSchedule",
+                    """{"id":"{{feeScheduleId}}","name":"","description":""}"""),
+                Req("DELETE", "FeeSchedule | Delete",                   "{{baseUrl}}/api/FeeSchedule/DeleteFeeSchedule/{{feeScheduleId}}"),
+
+                // ════════════════════════════════════════════════════════════
+                // GLOBAL SETTINGS
+                // ════════════════════════════════════════════════════════════
+                Req("POST",   "GlobalSettings | All Settings",          "{{baseUrl}}/api/GlobalSettings/Settings",                         P),
+                Req("GET",    "GlobalSettings | Get Settings",          "{{baseUrl}}/api/GlobalSettings/GetSettings/{{id}}"),
+                Req("GET",    "GlobalSettings | Get Setting",           "{{baseUrl}}/api/GlobalSettings/GetSetting/{{id}}/{{id1}}"),
+                Req("GET",    "GlobalSettings | Master Information",    "{{baseUrl}}/api/GlobalSettings/GetMasterInformationSetting"),
+                Req("PUT",    "GlobalSettings | Save Master Info",      "{{baseUrl}}/api/GlobalSettings/PutMasterInformationSetting",
+                    """{"companyName":"","address":"","phone":"","email":""}"""),
+                Req("GET",    "GlobalSettings | Billing Setting",       "{{baseUrl}}/api/GlobalSettings/GetBillingSetting"),
+                Req("PUT",    "GlobalSettings | Save Billing",          "{{baseUrl}}/api/GlobalSettings/PutBillingSetting",
+                    """{"invoiceDueDay":30,"billingCycle":1}"""),
+                Req("GET",    "GlobalSettings | Work Time",             "{{baseUrl}}/api/GlobalSettings/GetWorkTimeSetting"),
+                Req("GET",    "GlobalSettings | Project General",       "{{baseUrl}}/api/GlobalSettings/GetProjectGeneralSetting"),
+                Req("GET",    "GlobalSettings | Template Setting",      "{{baseUrl}}/api/GlobalSettings/GetTemplateSetting"),
+                Req("GET",    "GlobalSettings | Accounting",            "{{baseUrl}}/api/GlobalSettings/GetAccountingSetting"),
+                Req("GET",    "GlobalSettings | Tax Setting",           "{{baseUrl}}/api/GlobalSettings/GetTaxSetting"),
+                Req("POST",   "GlobalSettings | Save Setting",          "{{baseUrl}}/api/GlobalSettings/SaveSetting",
+                    """[{"key":"{{settingKey}}","value":"{{settingValue}}"}]"""),
+                Req("PUT",    "GlobalSettings | Reset Setting",         "{{baseUrl}}/api/GlobalSettings/ResetSetting"),
+
+                // ════════════════════════════════════════════════════════════
+                // PROJECT
+                // ════════════════════════════════════════════════════════════
+                Req("POST",   "Project | Project List",                 "{{baseUrl}}/api/Project/ProjectList",                             P),
+                Req("POST",   "Project | Project Compact",              "{{baseUrl}}/api/Project/ProjectCompact",                          P),
+                Req("POST",   "Project | Project Compact Base",         "{{baseUrl}}/api/Project/ProjectCompactBase",                      P),
+                Req("POST",   "Project | Project Compact Base Plus",    "{{baseUrl}}/api/Project/ProjectCompactBasePlus",                  P),
+                Req("GET",    "Project | Get Project",                  "{{baseUrl}}/api/Project/GetProject/{{projectId}}"),
+                Req("GET",    "Project | Get Project Phases",           "{{baseUrl}}/api/Project/GetProjectPhases/{{projectId}}"),
+                Req("GET",    "Project | Percent Complete",             "{{baseUrl}}/api/Project/GetProjectPercentComplete/{{projectId}}"),
+                Req("POST",   "Project | Create Project",               "{{baseUrl}}/api/Project/PostProject",
+                    """{"name":"","number":"","clientId":"{{clientId}}","projectStatusId":"{{statusId}}","startDate":"{{date}}","endDate":""}"""),
+                Req("PUT",    "Project | Update Project",               "{{baseUrl}}/api/Project/PutProject",
+                    """{"id":"{{projectId}}","name":"","number":""}"""),
+                Req("DELETE", "Project | Delete Project",               "{{baseUrl}}/api/Project/DeleteProject/{{projectId}}"),
+
+                // ════════════════════════════════════════════════════════════
+                // TEMPLATE
+                // ════════════════════════════════════════════════════════════
+                Req("GET",    "Template | Get Email Template",          "{{baseUrl}}/api/EmailTemplate/GetItem/{{templateId}}"),
+                Req("POST",   "Template | Create Email Template",       "{{baseUrl}}/api/EmailTemplate/PostEmailTemplate",
+                    """{"name":"","subject":"","body":""}"""),
+                Req("PUT",    "Template | Update Email Template",       "{{baseUrl}}/api/EmailTemplate/PutEmailTemplate",
+                    """{"id":"{{templateId}}","name":"","subject":"","body":""}"""),
+                Req("DELETE", "Template | Delete Email Template",       "{{baseUrl}}/api/EmailTemplate/Delete/{{templateId}}"),
+                Req("POST",   "Template | Invoice Templates",           "{{baseUrl}}/api/InvoiceTemplate/Templates",                       P),
+                Req("GET",    "Template | Templates by Type",           "{{baseUrl}}/api/InvoiceTemplate/TemplatesByType/{{type}}"),
+                Req("GET",    "Template | Get Invoice Template",        "{{baseUrl}}/api/InvoiceTemplate/GetTemplate/{{templateId}}"),
+                Req("POST",   "Template | Create Invoice Template",     "{{baseUrl}}/api/InvoiceTemplate/PostTemplate",
+                    """{"name":"","templateType":1,"isDefault":false}"""),
+                Req("PUT",    "Template | Update Invoice Template",     "{{baseUrl}}/api/InvoiceTemplate/PutTemplate",
+                    """{"id":"{{templateId}}","name":"","isDefault":false}"""),
+                Req("DELETE", "Template | Delete Invoice Template",     "{{baseUrl}}/api/InvoiceTemplate/DeleteTemplate/{{templateId}}"),
+                Req("POST",   "Template | Clone Invoice Template",      "{{baseUrl}}/api/InvoiceTemplate/CloneInvoiceTemplate/{{templateId}}"),
+                Req("POST",   "Template | Project Template List",       "{{baseUrl}}/api/ProjectTemplate/ProjectTemplateList",             P),
+                Req("GET",    "Template | Get Project Template",        "{{baseUrl}}/api/ProjectTemplate/GetProjectTemplate/{{templateId}}"),
+                Req("GET",    "Template | Get Proposal Template",       "{{baseUrl}}/api/ProposalTemplate/GetItem/{{templateId}}"),
+                Req("POST",   "Template | Create Proposal Template",    "{{baseUrl}}/api/ProposalTemplate/PostProposalTemplate",
+                    """{"name":"","content":""}"""),
+                Req("DELETE", "Template | Delete Proposal Template",    "{{baseUrl}}/api/ProposalTemplate/Delete/{{templateId}}"),
+
+                // ════════════════════════════════════════════════════════════
+                // TIME ENTRY
+                // ════════════════════════════════════════════════════════════
+                Req("POST",   "TimeEntry | Time Entry List",            "{{baseUrl}}/api/TimeEntry/TimeEntryList",                         P),
+                Req("POST",   "TimeEntry | Time Entry Compact",         "{{baseUrl}}/api/TimeEntry/TimeEntryCompact",                      P),
+                Req("GET",    "TimeEntry | Get Time Entry",             "{{baseUrl}}/api/TimeEntry/GetTimeEntry/{{timeEntryId}}"),
+                Req("POST",   "TimeEntry | Time Entry Totals",          "{{baseUrl}}/api/TimeEntry/TimeEntryTotals",                       P),
+                Req("POST",   "TimeEntry | STC Defaults",               "{{baseUrl}}/api/TimeEntry/GetSTCDefaults",
+                    """{"PageInfo":{"PageNumber":1,"PageSize":500},"FilterList":[{"Field":"Employee_ID","Operator":0,"StartValue":"{{employeeId}}"},{"Field":"ProjectControl_ID","Operator":0,"StartValue":"{{projectId}}"},{"Field":"Activity_ID","Operator":0,"StartValue":"{{activityId}}"}],"SortList":[]}"""),
+                Req("POST",   "TimeEntry | Create Time Entry",          "{{baseUrl}}/api/TimeEntry/PostTimeEntry",
+                    """{"projectId":"{{projectId}}","employeeId":"{{employeeId}}","timeDate":"{{date}}","activityId":"{{activityId}}","hours":0,"isBillable":true,"notes":""}"""),
+                Req("POST",   "TimeEntry | Create Multiple",            "{{baseUrl}}/api/TimeEntry/PostTimeEntries",
+                    """[{"projectId":"{{projectId}}","employeeId":"{{employeeId}}","timeDate":"{{date}}","hours":0}]"""),
+                Req("PUT",    "TimeEntry | Update Time Entry",          "{{baseUrl}}/api/TimeEntry/PutTimeEntry",
+                    """{"id":"{{timeEntryId}}","hours":0,"isBillable":true,"notes":""}"""),
+                Req("DELETE", "TimeEntry | Delete Time Entry",          "{{baseUrl}}/api/TimeEntry/DeleteTimeEntry/{{timeEntryId}}"),
+                Req("POST",   "TimeEntry | TE Amount",                  "{{baseUrl}}/api/TimeEntry/TeAmount",                              P),
+
+                // ════════════════════════════════════════════════════════════
+                // EMPLOYEE
+                // ════════════════════════════════════════════════════════════
+                Req("POST",   "Employee | Employee List",              "{{baseUrl}}/api/Employee/EmployeeList",                           P),
+                Req("POST",   "Employee | Employee Compact",           "{{baseUrl}}/api/Employee/EmployeeCompact",                        P),
+                Req("GET",    "Employee | Get Employee",               "{{baseUrl}}/api/Employee/GetEmployee/{{employeeId}}"),
+                Req("POST",   "Employee | Create Employee",            "{{baseUrl}}/api/Employee/PostEmployee",
+                    """{"firstName":"","lastName":"","email":"","isActive":true}"""),
+                Req("PUT",    "Employee | Update Employee",            "{{baseUrl}}/api/Employee/PutEmployee",
+                    """{"id":"{{employeeId}}","firstName":"","lastName":"","email":"","isActive":true}"""),
+                Req("DELETE", "Employee | Delete Employee",            "{{baseUrl}}/api/Employee/DeleteEmployee/{{employeeId}}"),
+                Req("GET",    "Employee | Employee Roles",             "{{baseUrl}}/api/Employee/GetEmployeeRoles/{{employeeId}}"),
+                Req("GET",    "Employee | Employee Rates",             "{{baseUrl}}/api/Employee/GetEmployeeRates/{{employeeId}}"),
+                Req("POST",   "Employee | Employee Cost Rate",         "{{baseUrl}}/api/Employee/EmployeeCostRate",                       P),
+
+                // ════════════════════════════════════════════════════════════
+                // CONTACT
+                // ════════════════════════════════════════════════════════════
+                Req("POST",   "Contact | Contact List",                "{{baseUrl}}/api/Contact/ContactList",                             P),
+                Req("POST",   "Contact | Contact Compact",             "{{baseUrl}}/api/Contact/ContactCompact",                          P),
+                Req("GET",    "Contact | Get Contact",                 "{{baseUrl}}/api/Contact/GetContact/{{contactId}}"),
+                Req("POST",   "Contact | Create Contact",              "{{baseUrl}}/api/Contact/PostContact",
+                    """{"firstName":"","lastName":"","email":"","phone":"","isActive":true}"""),
+                Req("PUT",    "Contact | Update Contact",              "{{baseUrl}}/api/Contact/PutContact",
+                    """{"id":"{{contactId}}","firstName":"","lastName":"","email":"","isActive":true}"""),
+                Req("DELETE", "Contact | Delete Contact",              "{{baseUrl}}/api/Contact/DeleteContact/{{contactId}}"),
+
+                // ════════════════════════════════════════════════════════════
+                // CLIENT
+                // ════════════════════════════════════════════════════════════
+                Req("POST",   "Client | Client List",                  "{{baseUrl}}/api/Client/ClientList",                               P),
+                Req("POST",   "Client | Client Compact",               "{{baseUrl}}/api/Client/ClientCompact",                            P),
+                Req("GET",    "Client | Get Client",                   "{{baseUrl}}/api/Client/GetClient/{{clientId}}"),
+                Req("POST",   "Client | Create Client",                "{{baseUrl}}/api/Client/PostClient",
+                    """{"clientName":"","email":"","phone":"","isActive":true}"""),
+                Req("PUT",    "Client | Update Client",                "{{baseUrl}}/api/Client/PutClient",
+                    """{"id":"{{clientId}}","clientName":"","email":"","isActive":true}"""),
+                Req("DELETE", "Client | Delete Client",                "{{baseUrl}}/api/Client/DeleteClient/{{clientId}}"),
+                Req("GET",    "Client | Client Contacts",              "{{baseUrl}}/api/Client/GetClientContacts/{{clientId}}"),
+                Req("GET",    "Client | Client Projects",              "{{baseUrl}}/api/Client/GetClientProjects/{{clientId}}"),
+                Req("POST",   "Client | Client Balance",               "{{baseUrl}}/api/Client/ClientBalance",                            P),
+
+                // ════════════════════════════════════════════════════════════
+                // VENDOR
+                // ════════════════════════════════════════════════════════════
+                Req("POST",   "Vendor | Vendor List",                  "{{baseUrl}}/api/Vendor/VendorList",                               P),
+                Req("POST",   "Vendor | Vendor Compact",               "{{baseUrl}}/api/Vendor/VendorCompact",                            P),
+                Req("GET",    "Vendor | Get Vendor",                   "{{baseUrl}}/api/Vendor/GetVendor/{{vendorId}}"),
+                Req("POST",   "Vendor | Create Vendor",                "{{baseUrl}}/api/Vendor/PostVendor",
+                    """{"vendorName":"","email":"","phone":"","isActive":true}"""),
+                Req("PUT",    "Vendor | Update Vendor",                "{{baseUrl}}/api/Vendor/PutVendor",
+                    """{"id":"{{vendorId}}","vendorName":"","email":"","isActive":true}"""),
+                Req("DELETE", "Vendor | Delete Vendor",                "{{baseUrl}}/api/Vendor/DeleteVendor/{{vendorId}}"),
+                Req("GET",    "Vendor | Vendor Contacts",              "{{baseUrl}}/api/Vendor/GetVendorContacts/{{vendorId}}"),
+
+                // ════════════════════════════════════════════════════════════
+                // CLASS
+                // ════════════════════════════════════════════════════════════
+                Req("POST",   "Class | Class List",                    "{{baseUrl}}/api/Class/ClassList",                                 P),
+                Req("GET",    "Class | Get Class",                     "{{baseUrl}}/api/Class/GetClass/{{classId}}"),
+                Req("POST",   "Class | Create Class",                  "{{baseUrl}}/api/Class/PostClass",
+                    """{"className":"","description":"","isActive":true}"""),
+                Req("PUT",    "Class | Update Class",                  "{{baseUrl}}/api/Class/PutClass",
+                    """{"id":"{{classId}}","className":"","description":"","isActive":true}"""),
+                Req("DELETE", "Class | Delete Class",                  "{{baseUrl}}/api/Class/DeleteClass/{{classId}}"),
+
+                // ── Security ──────────────────────────────────────────────────
+                Req("POST",   "Security | Profile List",               "{{baseUrl}}/api/Security/ProfileList",                            P),
+                Req("POST",   "Security | Profile List With Custom",   "{{baseUrl}}/api/Security/ProfileListWithCustom",                  P),
+                Req("GET",    "Security | Get Profile",                "{{baseUrl}}/api/Security/GetProfile/{{profileId}}"),
+                Req("GET",    "Security | Get New Profile",            "{{baseUrl}}/api/Security/GetNewProfile"),
+                Req("GET",    "Security | Get User Profile",           "{{baseUrl}}/api/Security/GetUserProfile/{{employeeId}}"),
+                Req("GET",    "Security | Get User Security Summary",  "{{baseUrl}}/api/Security/GetUserSecuritySummary/{{employeeId}}"),
+                Req("GET",    "Security | User Has Full Access",       "{{baseUrl}}/api/Security/UserHasFullAccess/{{employeeId}}"),
+                Req("POST",   "Security | Employees Assigned to Profile", "{{baseUrl}}/api/Security/EmployeesAssignedToProfile",          P),
+                Req("POST",   "Security | Employee Security Profile List", "{{baseUrl}}/api/Security/EmployeeSecurityProfileList",        P),
+                Req("POST",   "Security | Vendor Security Profile List",   "{{baseUrl}}/api/Security/VendorSecurityProfileList",          P),
+                Req("GET",    "Security | Get Module Security",        "{{baseUrl}}/api/Security/GetModuleSecurity"),
+                Req("POST",   "Security | Get Module Security List",   "{{baseUrl}}/api/Security/GetModuleSecurityList",
+                    """{"moduleNames":[]}"""),
+                Req("GET",    "Security | Is Profile In Use",          "{{baseUrl}}/api/Security/IsSecurityProfileInUse/{{profileId}}"),
+                Req("POST",   "Security | Create Profile",             "{{baseUrl}}/api/Security/PostProfile"),
+                Req("POST",   "Security | Create User Profile",        "{{baseUrl}}/api/Security/PostUserProfile"),
+                Req("PUT",    "Security | Update Profile",             "{{baseUrl}}/api/Security/PutProfile"),
+                Req("PUT",    "Security | Update User Profile",        "{{baseUrl}}/api/Security/PutUserProfile"),
+                Req("PUT",    "Security | Assign Security",            "{{baseUrl}}/api/Security/AssignSecurity",
+                    """{"employee_ID":"{{employeeId}}","modules":[]}"""),
+                Req("POST",   "Security | Assign Security Profile",    "{{baseUrl}}/api/Security/AssignSecurityProfile",
+                    """{"userIDs":["{{employeeId}}"],"profile_ID":"{{profileId}}"}"""),
+                Req("POST",   "Security | Rename Security Profile",    "{{baseUrl}}/api/Security/RenameSecurityProfile",
+                    """{"profile_ID":"{{profileId}}","name":""}"""),
+                Req("DELETE", "Security | Delete Profile",             "{{baseUrl}}/api/Security/DeleteProfile/{{profileId}}"),
+
+                // ── Group ────────────────────────────────────────────────────
+                Req("POST",   "Group | Groups List",                   "{{baseUrl}}/api/Group/Groups",                                    P),
+                Req("GET",    "Group | Get Group Item",                "{{baseUrl}}/api/Group/GetGroupItem/{{groupId}}"),
+                Req("POST",   "Group | Get Group Detail",              "{{baseUrl}}/api/Group/GetGroupDetail/{{groupId}}",                P),
+                Req("POST",   "Group | Get Group Detail Items",        "{{baseUrl}}/api/Group/GetGroupDetailItems",                       P),
+                Req("GET",    "Group | Get Group Detail Item",         "{{baseUrl}}/api/Group/GetGroupDetailItem/{{groupDetailId}}"),
+                Req("POST",   "Group | Get Assigned Groups",           "{{baseUrl}}/api/Group/GetAssignedGroups",                        P),
+                Req("POST",   "Group | Get Unassigned Groups",         "{{baseUrl}}/api/Group/GetUnAssignedGroups",                      P),
+                Req("POST",   "Group | Employee Group Members",        "{{baseUrl}}/api/Group/GetEmployeeGroupDetail/{{groupId}}",        P),
+                Req("POST",   "Group | Project Group Members",         "{{baseUrl}}/api/Group/GetProjectGroupDetail/{{groupId}}",         P),
+                Req("POST",   "Group | Client Group Members",          "{{baseUrl}}/api/Group/GetClientGroupDetail/{{groupId}}",          P),
+                Req("POST",   "Group | Create Group",                  "{{baseUrl}}/api/Group/PostGroup",
+                    """{"group_ID":"00000000-0000-0000-0000-000000000000","groupName":"","description":"","entityType":1,"isActive":true}"""),
+                Req("PUT",    "Group | Update Group",                  "{{baseUrl}}/api/Group/PutGroup",
+                    """{"group_ID":"{{groupId}}","groupName":"","description":"","entityType":1,"isActive":true}"""),
+                Req("POST",   "Group | Bulk Assignment",               "{{baseUrl}}/api/Group/PostBulkAssignment",
+                    """{"group_ID":"{{groupId}}","entityIDs":["{{employeeId}}"],"isAssigned":true}"""),
+                Req("POST",   "Group | Bulk Group Assignment",         "{{baseUrl}}/api/Group/BulkGroupAssignment",
+                    """{"entityID":"{{employeeId}}","groupIDs":["{{groupId}}"],"isAssigned":true}"""),
+                Req("DELETE", "Group | Delete Group",                  "{{baseUrl}}/api/Group/DeleteGroup/{{groupId}}"),
+                Req("DELETE", "Group | Unassign Group",                "{{baseUrl}}/api/Group/UnassignGroup?group_Id={{groupId}}&entity_Id={{employeeId}}"),
+                Req("GET",    "Group | Filter Groups For Security",    "{{baseUrl}}/api/Group/FilterGroupsForSecurityProfile"),
+                Req("GET",    "Group | Get All Group ID",              "{{baseUrl}}/api/Group/GetEntityALLGroupID?entityType=4"),
+
+                // ── Estimate ─────────────────────────────────────────────────
+                Req("POST",   "Estimate | Estimate List",              "{{baseUrl}}/api/Estimate/EstimateList",                           P),
+                Req("POST",   "Estimate | Estimates",                  "{{baseUrl}}/api/Estimate/Estimates",                              P),
+                Req("GET",    "Estimate | Get Estimate",               "{{baseUrl}}/api/Estimate/GetEstimate/{{estimateId}}"),
+                Req("GET",    "Estimate | Get Cumulative Estimate",    "{{baseUrl}}/api/Estimate/GetCummulativeEstimate/{{projectId}}"),
+                Req("POST",   "Estimate | Estimate Service Details",   "{{baseUrl}}/api/Estimate/EstimateServiceDetails",                 P),
+                Req("POST",   "Estimate | Estimate Expense Details",   "{{baseUrl}}/api/Estimate/EstimateExpenseDetails",                 P),
+                Req("GET",    "Estimate | Get Estimate Summary",       "{{baseUrl}}/api/Estimate/GetEstimateSummary/{{estimateId}}"),
+                Req("POST",   "Estimate | Create Estimate",            "{{baseUrl}}/api/Estimate/PostEstimate?id={{projectId}}",
+                    """{"project_ID":"{{projectId}}","name":"","description":"","isActive":true}"""),
+                Req("PUT",    "Estimate | Update Estimate",            "{{baseUrl}}/api/Estimate/PutEstimate",
+                    """{"estimate_ID":"{{estimateId}}","name":"","description":""}"""),
+                Req("DELETE", "Estimate | Delete Estimate",            "{{baseUrl}}/api/Estimate/DeleteEstimate/{{estimateId}}?model=estimate"),
+                Req("GET",    "Estimate | Get Service Item",           "{{baseUrl}}/api/Estimate/GetEstimateServiceItem/{{itemId}}"),
+                Req("POST",   "Estimate | Create Service Item",        "{{baseUrl}}/api/Estimate/PostEstimateServiceItem",
+                    """{"estimate_ID":"{{estimateId}}","activity_ID":"{{activityId}}","hours":0,"amount":0}"""),
+                Req("PUT",    "Estimate | Update Service Item",        "{{baseUrl}}/api/Estimate/PutEstimateServiceItem",
+                    """{"estimateActivity_ID":"{{itemId}}","hours":0,"amount":0}"""),
+                Req("DELETE", "Estimate | Delete Service Item",        "{{baseUrl}}/api/Estimate/DeleteEstimateServiceItem/{{itemId}}"),
+                Req("GET",    "Estimate | Get Expense Item",           "{{baseUrl}}/api/Estimate/GetEstimateExpenseItem/{{itemId}}"),
+                Req("POST",   "Estimate | Create Expense Item",        "{{baseUrl}}/api/Estimate/PostEstimateExpenseItem",
+                    """{"estimate_ID":"{{estimateId}}","expenseType_ID":"{{expenseTypeId}}","units":0,"amount":0}"""),
+                Req("PUT",    "Estimate | Update Expense Item",        "{{baseUrl}}/api/Estimate/PutEstimateExpenseItem",
+                    """{"estimateExpense_ID":"{{itemId}}","units":0,"amount":0}"""),
+                Req("DELETE", "Estimate | Delete Expense Item",        "{{baseUrl}}/api/Estimate/DeleteEstimateExpenseItem/{{itemId}}"),
+
+                // ── ToDo / Task ───────────────────────────────────────────────
+                // SortList needs 2 items — server auto-injects EndDate sort when list is empty,
+                // making Count=1 which triggers MakeSortUnique → GetPrimaryKey → .First() crash.
+                // Two explicit sorts bypasses MakeSortUnique entirely.
+                Req("POST",   "ToDo | ToDo Task List",                 "{{baseUrl}}/api/ToDoTasks/ToDoTaskList",
+                    """{"PageInfo":{"PageNumber":0,"PageSize":500},"FilterList":[],"SortList":[{"OrderBy":"EndDate","OrderType":1},{"OrderBy":"Subject","OrderType":1}]}"""),
+                Req("POST",   "ToDo | ToDo Tasks",                     "{{baseUrl}}/api/ToDoTasks/ToDoTasks",
+                    """{"PageInfo":{"PageNumber":0,"PageSize":500},"FilterList":[],"SortList":[{"OrderBy":"EndDate","OrderType":1},{"OrderBy":"Subject","OrderType":1}]}"""),
+                Req("GET",    "ToDo | Get ToDo Task",                  "{{baseUrl}}/api/ToDoTasks/GetToDoTask/{{todoId}}"),
+                Req("POST",   "ToDo | Create ToDo Task",               "{{baseUrl}}/api/ToDoTasks/PostToDoTask",
+                    """{"subject":"","dueDate":null,"priority":1,"status":1,"isActive":true}"""),
+                Req("PUT",    "ToDo | Update ToDo Task",               "{{baseUrl}}/api/ToDoTasks/PutToDoTask",
+                    """{"toDoTask_ID":"{{todoId}}","subject":"","priority":1,"status":1}"""),
+                Req("DELETE", "ToDo | Delete ToDo Task",               "{{baseUrl}}/api/ToDoTasks/DeleteToDoTask/{{todoId}}"),
+                Req("POST",   "ToDo | Clone ToDo Task",                "{{baseUrl}}/api/ToDoTasks/CloneToDoTask/{{todoId}}"),
+
+                // ── Notes ─────────────────────────────────────────────────────
+                Req("POST",   "Note | Notes List",                     "{{baseUrl}}/api/Note/Notes",                                      P),
+                Req("GET",    "Note | Get Note",                       "{{baseUrl}}/api/Note/GetNote/{{noteId}}"),
+                Req("POST",   "Note | Create Note",                    "{{baseUrl}}/api/Note/PostNote",
+                    """{"subject":"","noteBody":"","entityType":4,"entity_ID":"{{projectId}}","noteCategory_ID":null,"noteStatus_ID":null}"""),
+                Req("PUT",    "Note | Update Note",                    "{{baseUrl}}/api/Note/PutNote",
+                    """{"note_ID":"{{noteId}}","subject":"","noteBody":""}"""),
+                Req("DELETE", "Note | Delete Note",                    "{{baseUrl}}/api/Note/DeleteNote/{{noteId}}"),
+
+                // ── Document (Linked Files) ────────────────────────────────────
+                Req("POST",   "Document | Linked Files List",          "{{baseUrl}}/api/LinkedFiles/LinkedFiles",                         P),
+                Req("POST",   "Document | Linked File Compact",        "{{baseUrl}}/api/LinkedFiles/LinkedFileCompact",                   P),
+                Req("GET",    "Document | Get Linked File",            "{{baseUrl}}/api/LinkedFiles/GetLinkedFile/{{fileId}}"),
+                Req("POST",   "Document | Create Linked File",         "{{baseUrl}}/api/LinkedFiles/PostLinkedFile",
+                    """{"fileName":"","filePath":"","entityType":4,"entity_ID":"{{projectId}}","storageType":0}"""),
+                Req("PUT",    "Document | Update Linked File",         "{{baseUrl}}/api/LinkedFiles/PutLinkedFile",
+                    """{"linkedFile_ID":"{{fileId}}","fileName":"","description":""}"""),
+                Req("DELETE", "Document | Delete Linked File",         "{{baseUrl}}/api/LinkedFiles/DeleteLinkedFile/{{fileId}}"),
+                Req("GET",    "Document | View Linked File",           "{{baseUrl}}/api/LinkedFiles/GenerateSignedURL/{{fileId}}"),
+                Req("GET",    "Document | Cloud Connection Data",      "{{baseUrl}}/api/LinkedFiles/GetCloudConnectionData"),
+
+                // ── Submittal ─────────────────────────────────────────────────
+                Req("POST",   "Submittal | Submittal List",            "{{baseUrl}}/api/Submittal/SubmittalList",                         P),
+                Req("POST",   "Submittal | Submittals",                "{{baseUrl}}/api/Submittal/Submittals",                            P),
+                Req("GET",    "Submittal | Get Submittal",             "{{baseUrl}}/api/Submittal/GetSubmittal/{{submittalId}}"),
+                Req("POST",   "Submittal | Create Submittal",          "{{baseUrl}}/api/Submittal/PostSubmittal",
+                    """{"project_ID":"{{projectId}}","title":"","specSection":"","submittalNumber":""}"""),
+                Req("PUT",    "Submittal | Update Submittal",          "{{baseUrl}}/api/Submittal/PutSubmittal",
+                    """{"submittal_ID":"{{submittalId}}","title":"","specSection":""}"""),
+                Req("DELETE", "Submittal | Delete Submittal",          "{{baseUrl}}/api/Submittal/DeleteSubmittal/{{submittalId}}"),
+                Req("GET",    "Submittal | Status History",            "{{baseUrl}}/api/Submittal/GetSubmittalStatusHistory/{{submittalId}}"),
+                Req("POST",   "Submittal | Status History List",       "{{baseUrl}}/api/Submittal/SubmittalStatusHistories",              P),
+                Req("POST",   "Submittal | Create Status History",     "{{baseUrl}}/api/Submittal/PostSubmittalStatusHistory",
+                    """{"submittal_ID":"{{submittalId}}","status":1,"statusDate":null,"comments":""}"""),
+                Req("DELETE", "Submittal | Delete Status History",     "{{baseUrl}}/api/Submittal/DeleteSubmittalStatusHistory/{{historyId}}"),
+
+                // ── RFI ───────────────────────────────────────────────────────
+                Req("POST",   "RFI | RFI List",                        "{{baseUrl}}/api/RFI/RFIList",                                     P),
+                Req("POST",   "RFI | RFIs",                            "{{baseUrl}}/api/RFI/RFIs",                                        P),
+                Req("GET",    "RFI | Get RFI",                         "{{baseUrl}}/api/RFI/GetRFI/{{rfiId}}"),
+                Req("POST",   "RFI | Create RFI",                      "{{baseUrl}}/api/RFI/PostRFI",
+                    """{"project_ID":"{{projectId}}","title":"","rfiNumber":"","status":1}"""),
+                Req("PUT",    "RFI | Update RFI",                      "{{baseUrl}}/api/RFI/PutRFI",
+                    """{"rfi_ID":"{{rfiId}}","title":"","status":1}"""),
+                Req("DELETE", "RFI | Delete RFI",                      "{{baseUrl}}/api/RFI/DeleteRFI/{{rfiId}}"),
+
+                // ── Drawing ───────────────────────────────────────────────────
+                Req("POST",   "Drawing | Drawing List",                "{{baseUrl}}/api/Drawing/DrawingList",                             P),
+                Req("POST",   "Drawing | Drawings",                    "{{baseUrl}}/api/Drawing/Drawings",                                P),
+                Req("GET",    "Drawing | Get Drawing",                 "{{baseUrl}}/api/Drawing/GetDrawing/{{drawingId}}"),
+                Req("POST",   "Drawing | Create Drawing",              "{{baseUrl}}/api/Drawing/PostDrawing",
+                    """{"project_ID":"{{projectId}}","title":"","drawingNumber":"","status":1}"""),
+                Req("PUT",    "Drawing | Update Drawing",              "{{baseUrl}}/api/Drawing/PutDrawing",
+                    """{"drawing_ID":"{{drawingId}}","title":"","drawingNumber":""}"""),
+                Req("DELETE", "Drawing | Delete Drawing",              "{{baseUrl}}/api/Drawing/DeleteDrawing/{{drawingId}}"),
+
+                // ── Project Template ──────────────────────────────────────────
+                Req("POST",   "ProjectTemplate | Template List",       "{{baseUrl}}/api/ProjectTemplate/ProjectTemplateList",             P),
+                Req("GET",    "ProjectTemplate | Get Template",        "{{baseUrl}}/api/ProjectTemplate/GetProjectTemplate/{{templateId}}"),
+                Req("GET",    "ProjectTemplate | Get Template Detail", "{{baseUrl}}/api/ProjectTemplate/GetProjectTemplateDetail/{{templateId}}"),
+                Req("GET",    "ProjectTemplate | Get Structure",       "{{baseUrl}}/api/ProjectTemplate/GetProjectTemplateStructure/{{templateId}}"),
+                Req("GET",    "ProjectTemplate | Get Line Items",      "{{baseUrl}}/api/ProjectTemplate/GetProjectTemplateLineItems/{{templateId}}"),
+                Req("POST",   "ProjectTemplate | Create Template",     "{{baseUrl}}/api/ProjectTemplate/PostProjectTemplate"),
+                Req("PUT",    "ProjectTemplate | Update Template",     "{{baseUrl}}/api/ProjectTemplate/PutProjectTemplate"),
+                Req("POST",   "ProjectTemplate | Project As Template", "{{baseUrl}}/api/ProjectTemplate/PostProjectAsTemplate",
+                    """{"project_ID":"{{projectId}}","templateName":"","includeActivities":true,"includeFeeSchedule":true}"""),
+                Req("POST",   "ProjectTemplate | Clone Template",      "{{baseUrl}}/api/ProjectTemplate/PostCloneTemplate",
+                    """{"projectTemplate_ID":"{{templateId}}","name":""}"""),
+                Req("DELETE", "ProjectTemplate | Delete Template",     "{{baseUrl}}/api/ProjectTemplate/DeleteProjectTemplate/{{templateId}}"),
+
+                // ── PTO (Time Off) ────────────────────────────────────────────
+                Req("POST",   "PTO | PTO Request List",                "{{baseUrl}}/api/PTO/PTORequestList",                             P),
+                Req("POST",   "PTO | PTO Requests",                    "{{baseUrl}}/api/PTO/PTORequests",                                P),
+                Req("GET",    "PTO | Get PTO Request",                 "{{baseUrl}}/api/PTO/GetItem/{{ptoId}}"),
+                Req("POST",   "PTO | Create PTO Request",              "{{baseUrl}}/api/PTO/PostPtoRequest",
+                    """{"employee_ID":"{{employeeId}}","startDate":null,"endDate":null,"requestedHours":0,"reason":""}"""),
+                Req("PUT",    "PTO | Update PTO Request",              "{{baseUrl}}/api/PTO/PutPtoRequest",
+                    """{"ptoRequest_ID":"{{ptoId}}","reason":"","requestedHours":0}"""),
+                Req("DELETE", "PTO | Delete PTO Request",              "{{baseUrl}}/api/PTO/DeletePTORequest/{{ptoId}}"),
+                Req("GET",    "PTO | Get Requested Hours",             "{{baseUrl}}/api/PTO/GetRequestedHours?startDate={{startDate}}&EndDate={{endDate}}&User_ID={{employeeId}}"),
+                Req("POST",   "PTO | Get Employee Total Hours",        "{{baseUrl}}/api/PTO/GetEmployeeTotalHours",
+                    """{"employee_ID":"{{employeeId}}"}"""),
+
+                // ── Project Assignment (AssignedMappings) ─────────────────────
+                Req("POST",   "Assignment | Create Assignment",        "{{baseUrl}}/api/AssignedMappings/PostAssignedMappings",
+                    """{"employee_ID":"{{employeeId}}","project_ID":"{{projectId}}","role_ID":null,"isActive":true}"""),
+                Req("POST",   "Assignment | Create Bulk Assignments",  "{{baseUrl}}/api/AssignedMappings/PostAssignedMappingsList",
+                    """[{"employee_ID":"{{employeeId}}","project_ID":"{{projectId}}","isActive":true}]"""),
+                Req("PUT",    "Assignment | Update Assignment",        "{{baseUrl}}/api/AssignedMappings/PutAssignedMappings",
+                    """{"assignedMapping_ID":"{{assignmentId}}","isActive":true}"""),
+                Req("DELETE", "Assignment | Delete Assignment",        "{{baseUrl}}/api/AssignedMappings/DeleteAssignedMappings/{{assignmentId}}"),
+                Req("POST",   "Assignment | Set Primary",              "{{baseUrl}}/api/AssignedMappings/SetPrimary",
+                    """{"entity_ID":"{{projectId}}","linkedEntity_ID":"{{employeeId}}"}"""),
+
+                // ── Assigned Contacts ─────────────────────────────────────────
+                Req("GET",    "AssignedContact | Get Assigned Contacts","{{baseUrl}}/api/AssignedContacts/GetAssignedContacts/{{entityId}}"),
+                Req("POST",   "AssignedContact | Assign Contact",      "{{baseUrl}}/api/AssignedContacts/PostAssignedContacts",
+                    """{"contact_ID":"{{contactId}}","entity_ID":"{{clientId}}","entityType":3,"isPrimary":false}"""),
+                Req("PUT",    "AssignedContact | Update Assigned Contact","{{baseUrl}}/api/AssignedContacts/PutAssignedContacts",
+                    """{"assignedContact_ID":"{{assignmentId}}","isPrimary":true}"""),
+                Req("DELETE", "AssignedContact | Remove Contact",      "{{baseUrl}}/api/AssignedContacts/DeleteAssignedContacts/{{assignmentId}}"),
+                Req("POST",   "AssignedContact | Bulk Assign Contacts","{{baseUrl}}/api/AssignedContacts/BatchAssignedContacts",
+                    """{"entity_ID":"{{clientId}}","entityType":3,"contactIDs":["{{contactId}}"]}"""),
+
+                // ── Address / Communication ───────────────────────────────────
+                Req("GET",    "Address | Get Address",                 "{{baseUrl}}/api/Address/GetAddress/{{entityId}}/{{moduleType}}"),
+                Req("GET",    "Address | Get Default Address",         "{{baseUrl}}/api/Address/GetDefaultAddress/{{entityId}}/{{moduleType}}"),
+                Req("PUT",    "Address | Update Address",              "{{baseUrl}}/api/Address/PutEntityAddress",
+                    """{"entity_ID":"{{entityId}}","entityType":4,"addresses":[],"phones":[],"emails":[],"websites":[]}"""),
+                Req("DELETE", "Address | Delete Communication",        "{{baseUrl}}/api/Address/DeleteCommunication/{{communicationId}}"),
+                Req("POST",   "Address | Get Email Recipient List",    "{{baseUrl}}/api/Address/GetEmailRecipientList",                   P),
+
+                // ── Image ─────────────────────────────────────────────────────
+                Req("GET",    "Image | Get Image",                     "{{baseUrl}}/api/Image/GetImage/{{imageId}}"),
+                Req("GET",    "Image | Get Image By Entity",           "{{baseUrl}}/api/Image/GetImageByEntityId/{{entityId}}"),
+                Req("POST",   "Image | Upload Image",                  "{{baseUrl}}/api/Image/PostImage",
+                    """{"entity_ID":"{{entityId}}","entityType":1,"imageData":"","imageType":"png"}"""),
+                Req("PUT",    "Image | Update Image",                  "{{baseUrl}}/api/Image/PutImage",
+                    """{"image_ID":"{{imageId}}","imageData":"","imageType":"png"}"""),
+                Req("DELETE", "Image | Delete Image",                  "{{baseUrl}}/api/Image/DeleteImage/{{imageId}}"),
+                Req("DELETE", "Image | Delete Image By Entity",        "{{baseUrl}}/api/Image/DeleteImageByEntity/{{entityId}}"),
+
+                // ── Skill & Skill Assignment ──────────────────────────────────
+                Req("POST",   "Skill | Skills List",                   "{{baseUrl}}/api/Skill/Skills",                                    P),
+                Req("GET",    "Skill | Get Skill",                     "{{baseUrl}}/api/Skill/GetSkill/{{skillId}}"),
+                Req("POST",   "Skill | Create Skill",                  "{{baseUrl}}/api/Skill/PostSkill",
+                    """{"skillName":"","description":"","isActive":true}"""),
+                Req("PUT",    "Skill | Update Skill",                  "{{baseUrl}}/api/Skill/PutSkill",
+                    """{"skill_ID":"{{skillId}}","skillName":"","isActive":true}"""),
+                Req("DELETE", "Skill | Delete Skill",                  "{{baseUrl}}/api/Skill/DeleteSkill/{{skillId}}"),
+                Req("GET",    "Skill | Get Employee Skills",           "{{baseUrl}}/api/SkillAssignment/GetSkillAssignments/{{employeeId}}"),
+                Req("POST",   "Skill | Assign Skill",                  "{{baseUrl}}/api/SkillAssignment/PostSkillAssignment",
+                    """{"employee_ID":"{{employeeId}}","skill_ID":"{{skillId}}","proficiency":1}"""),
+                Req("DELETE", "Skill | Remove Skill Assignment",       "{{baseUrl}}/api/SkillAssignment/DeleteSkillAssignment/{{assignmentId}}"),
+
+                // ── Custom Fields ─────────────────────────────────────────────
+                Req("POST",   "CustomField | Custom Fields List",      "{{baseUrl}}/api/CustomField/CustomFields",                        P),
+                Req("GET",    "CustomField | Get Custom Field",        "{{baseUrl}}/api/CustomField/GetCustomField/{{cfId}}"),
+                Req("GET",    "CustomField | Get Available Fields",    "{{baseUrl}}/api/CustomField/GetAvailableCustomFields/{{moduleType}}"),
+                Req("GET",    "CustomField | Get Model Fields",        "{{baseUrl}}/api/CustomField/GetModelCustomFields/{{moduleType}}"),
+                Req("GET",    "CustomField | Get Model Fields Detail", "{{baseUrl}}/api/CustomField/GetModelCustomFieldsDetail/{{moduleType}}"),
+                Req("GET",    "CustomField | Get Field Values",        "{{baseUrl}}/api/CustomField/GetCustomFieldValues/{{entityId}}"),
+                Req("GET",    "CustomField | Get Model Field Data",    "{{baseUrl}}/api/CustomField/GetModelCustomFieldsData/{{entityId}}"),
+                Req("POST",   "CustomField | Create Custom Field",     "{{baseUrl}}/api/CustomField/PostCustomField",
+                    """{"fieldName":"","fieldType":1,"moduleType":4,"isActive":true}"""),
+                Req("PUT",    "CustomField | Update Custom Field",     "{{baseUrl}}/api/CustomField/PutCustomField",
+                    """{"customField_ID":"{{cfId}}","fieldName":"","isActive":true}"""),
+                Req("POST",   "CustomField | Assign Custom Fields",    "{{baseUrl}}/api/CustomField/PostAssignCustomFields",
+                    """{"entity_ID":"{{entityId}}","moduleType":4,"customFields":[]}"""),
+                Req("PUT",    "CustomField | Update Field Value",      "{{baseUrl}}/api/CustomField/UpdateFieldValue",
+                    """{"customFieldModelStructure_ID":"{{cfmsId}}","entity_ID":"{{entityId}}","value":""}"""),
+                Req("POST",   "CustomField | Batch Update Values",     "{{baseUrl}}/api/CustomField/BatchUpdateFieldValue",
+                    """[{"customFieldModelStructure_ID":"{{cfmsId}}","entity_ID":"{{entityId}}","value":""}]"""),
+                Req("DELETE", "CustomField | Delete Custom Field",     "{{baseUrl}}/api/CustomField/DeleteCustomField/{{cfId}}?model=employee"),
+
+                // ── Employee Tabs ─────────────────────────────────────────────
+                Req("POST",   "Employee | Bank Info List",             "{{baseUrl}}/api/EmployeeBankInfo/GetEmployeeBankInfoList",        P),
+                Req("GET",    "Employee | Get Bank Info",              "{{baseUrl}}/api/EmployeeBankInfo/GetItem/{{bankInfoId}}"),
+                Req("POST",   "Employee | Create Bank Info",           "{{baseUrl}}/api/EmployeeBankInfo/PostEmployeeBankInfo",
+                    """{"employee_ID":"{{employeeId}}","bankName":"","accountNumber":"","routingNumber":"","accountType":1}"""),
+                Req("PUT",    "Employee | Update Bank Info",           "{{baseUrl}}/api/EmployeeBankInfo/PutEmployeeBankInfo",
+                    """{"employeeBankInfo_ID":"{{bankInfoId}}","bankName":"","accountNumber":""}"""),
+                Req("DELETE", "Employee | Delete Bank Info",           "{{baseUrl}}/api/EmployeeBankInfo/Delete/{{bankInfoId}}"),
+
+                Req("POST",   "Employee | Benefits List",              "{{baseUrl}}/api/EmployeeBenefit/EmployeeBenefits",                P),
+                Req("GET",    "Employee | Get Benefit",                "{{baseUrl}}/api/EmployeeBenefit/GetEmployeeBenefit/{{benefitId}}"),
+                Req("POST",   "Employee | Create Benefit",             "{{baseUrl}}/api/EmployeeBenefit/PostEmployeeBenefit",
+                    """{"employee_ID":"{{employeeId}}","benefit_ID":"{{benefitId}}","startDate":null,"endDate":null}"""),
+                Req("PUT",    "Employee | Update Benefit",             "{{baseUrl}}/api/EmployeeBenefit/PutEmployeeBenefit",
+                    """{"employeeBenefit_ID":"{{benefitId}}","startDate":null,"endDate":null}"""),
+                Req("DELETE", "Employee | Delete Benefit",             "{{baseUrl}}/api/EmployeeBenefit/DeleteEmployeeBenefit/{{benefitId}}"),
+
+                Req("POST",   "Employee | Dependents List",            "{{baseUrl}}/api/EmployeeDependent/GetEmployeeDependents",         P),
+                Req("GET",    "Employee | Get Dependent",              "{{baseUrl}}/api/EmployeeDependent/GetItem/{{dependentId}}"),
+                Req("POST",   "Employee | Create Dependent",           "{{baseUrl}}/api/EmployeeDependent/PostEmployeeDependent",
+                    """{"employee_ID":"{{employeeId}}","firstName":"","lastName":"","relationship":1}"""),
+                Req("PUT",    "Employee | Update Dependent",           "{{baseUrl}}/api/EmployeeDependent/PutEmployeeDependent",
+                    """{"employeeDependent_ID":"{{dependentId}}","firstName":"","lastName":""}"""),
+                Req("DELETE", "Employee | Delete Dependent",           "{{baseUrl}}/api/EmployeeDependent/Delete/{{dependentId}}"),
+
+                Req("POST",   "Employee | Position List",              "{{baseUrl}}/api/EmployeePosition/EmployeePositionList",           P),
+                Req("GET",    "Employee | Get Position",               "{{baseUrl}}/api/EmployeePosition/GetEmployeePosition/{{positionId}}"),
+                Req("POST",   "Employee | Create Position",            "{{baseUrl}}/api/EmployeePosition/PostEmployeePosition",
+                    """{"employee_ID":"{{employeeId}}","position_ID":"{{positionId}}","startDate":null,"isPrimary":true}"""),
+                Req("PUT",    "Employee | Update Position",            "{{baseUrl}}/api/EmployeePosition/PutEmployeePosition",
+                    """{"employeePosition_ID":"{{positionId}}","startDate":null,"isPrimary":true}"""),
+                Req("DELETE", "Employee | Delete Position",            "{{baseUrl}}/api/EmployeePosition/DeleteEmployeePosition/{{positionId}}"),
+                Req("POST",   "Employee | Position Detail List",       "{{baseUrl}}/api/EmployeePosition/EmployeePositionDetailList",     P),
+                Req("PUT",    "Employee | Assign Position Details",    "{{baseUrl}}/api/EmployeePosition/AssignEmployeePositionDetails",
+                    """{"employeePosition_ID":"{{positionId}}","payCode_ID":"{{payCodeId}}","amount":0}"""),
+
+                Req("POST",   "Employee | Salary History List",        "{{baseUrl}}/api/EmployeeSalaryHistory/EmployeeSalaryHistories",   P),
+                Req("GET",    "Employee | Get Salary History",         "{{baseUrl}}/api/EmployeeSalaryHistory/GetEmployeeSalaryHistory/{{historyId}}"),
+                Req("GET",    "Employee | Last Salary History",        "{{baseUrl}}/api/EmployeeSalaryHistory/LastEmployeeSalaryHistory/{{employeeId}}"),
+                Req("POST",   "Employee | Create Salary History",      "{{baseUrl}}/api/EmployeeSalaryHistory/PostEmployeeSalaryHistory",
+                    """{"employee_ID":"{{employeeId}}","effectiveDate":null,"salaryType":1,"salary":0}"""),
+                Req("PUT",    "Employee | Update Salary History",      "{{baseUrl}}/api/EmployeeSalaryHistory/PutEmployeeSalaryHistory",
+                    """{"employeeSalaryHistory_ID":"{{historyId}}","effectiveDate":null,"salary":0}"""),
+                Req("DELETE", "Employee | Delete Salary History",      "{{baseUrl}}/api/EmployeeSalaryHistory/DeleteEmployeeSalaryHistory/{{historyId}}"),
+
+                Req("POST",   "Employee | Tax List",                   "{{baseUrl}}/api/EmployeeTax/GetEmployeeTaxes",                    P),
+                Req("GET",    "Employee | Get Tax",                    "{{baseUrl}}/api/EmployeeTax/GetItem/{{taxId}}"),
+                Req("POST",   "Employee | Create Tax",                 "{{baseUrl}}/api/EmployeeTax/PostEmployeeTax",
+                    """{"employee_ID":"{{employeeId}}","taxCode_ID":"{{taxCodeId}}","filingStatus":1,"exemptions":0}"""),
+                Req("PUT",    "Employee | Update Tax",                 "{{baseUrl}}/api/EmployeeTax/PutEmployeeTax",
+                    """{"employeeTax_ID":"{{taxId}}","filingStatus":1,"exemptions":0}"""),
+                Req("DELETE", "Employee | Delete Tax",                 "{{baseUrl}}/api/EmployeeTax/Delete/{{taxId}}"),
+
+                Req("POST",   "Employee | Withholding List",           "{{baseUrl}}/api/EmployeeWithholding/EmployeeWithholdings",        P),
+                Req("GET",    "Employee | Get Withholding",            "{{baseUrl}}/api/EmployeeWithholding/GetEmployeeWithholding/{{withholdingId}}"),
+                Req("POST",   "Employee | Create Withholding",         "{{baseUrl}}/api/EmployeeWithholding/PostEmployeeWithholding",
+                    """{"employee_ID":"{{employeeId}}","withholding_ID":"{{withholdingId}}","amount":0}"""),
+                Req("PUT",    "Employee | Update Withholding",         "{{baseUrl}}/api/EmployeeWithholding/PutEmployeeWithholding",
+                    """{"employeeWithholding_ID":"{{withholdingId}}","amount":0}"""),
+                Req("DELETE", "Employee | Delete Withholding",         "{{baseUrl}}/api/EmployeeWithholding/DeleteEmployeeWithholding/{{withholdingId}}"),
+
+                Req("POST",   "Employee | Termination List",           "{{baseUrl}}/api/EmployeeTermination/EmployeeTerminations",        P),
+                Req("GET",    "Employee | Get Termination",            "{{baseUrl}}/api/EmployeeTermination/GetEmployeeTermination/{{terminationId}}"),
+                Req("GET",    "Employee | Terminate Employee",         "{{baseUrl}}/api/EmployeeTermination/TerminateEmployee/{{employeeId}}"),
+                Req("GET",    "Employee | Termination Type List",      "{{baseUrl}}/api/EmployeeTermination/GetTerminationTypeList"),
+                Req("GET",    "Employee | Termination Reason List",    "{{baseUrl}}/api/EmployeeTermination/GetTerminationReasonList"),
+                Req("POST",   "Employee | Save Termination",           "{{baseUrl}}/api/EmployeeTermination/SaveEmployeeTermination",
+                    """{"employee_ID":"{{employeeId}}","terminationDate":null,"terminationType_ID":null,"terminationReason_ID":null}"""),
+
+                Req("POST",   "Employee | Payroll List",               "{{baseUrl}}/api/EmployeePayroll/EmployeePayrolls",                P),
+                Req("GET",    "Employee | Get Payroll",                "{{baseUrl}}/api/EmployeePayroll/GetEmployeePayroll/{{payrollId}}"),
+                Req("POST",   "Employee | Save Payroll",               "{{baseUrl}}/api/EmployeePayroll/SaveEmployeePayroll",
+                    """{"employee_ID":"{{employeeId}}","payFrequency":1,"payType":1}"""),
+
+                Req("POST",   "Employee | Review List",                "{{baseUrl}}/api/EmployeeReview/EmployeeReviews",                  P),
+                Req("GET",    "Employee | Get Review",                 "{{baseUrl}}/api/EmployeeReview/GetEmployeeReview/{{reviewId}}"),
+                Req("GET",    "Employee | Get Review Summary",         "{{baseUrl}}/api/EmployeeReview/GetEmployeeReviewSummary/{{reviewId}}"),
+                Req("POST",   "Employee | Create Review",              "{{baseUrl}}/api/EmployeeReview/PostEmployeeReview",
+                    """{"employee_ID":"{{employeeId}}","reviewDate":null,"reviewPeriodStart":null,"reviewPeriodEnd":null}"""),
+                Req("PUT",    "Employee | Update Review",              "{{baseUrl}}/api/EmployeeReview/PutEmployeeReview",
+                    """{"employeeReview_ID":"{{reviewId}}","reviewDate":null}"""),
+                Req("DELETE", "Employee | Delete Review",              "{{baseUrl}}/api/EmployeeReview/DeleteEmployeeReview/{{reviewId}}"),
+
+                // ── Vendor Tabs ───────────────────────────────────────────────
+                Req("POST",   "Vendor | Bank Info List",               "{{baseUrl}}/api/VendorBankInfo/GetEmployeeBankInfoList",          P),
+                Req("GET",    "Vendor | Get Bank Info",                "{{baseUrl}}/api/VendorBankInfo/GetItem/{{bankInfoId}}"),
+                Req("POST",   "Vendor | Create Bank Info",             "{{baseUrl}}/api/VendorBankInfo/PostEmployeeBankInfo",
+                    """{"employee_ID":"{{vendorId}}","bankName":"","accountNumber":"","routingNumber":"","accountType":1}"""),
+                Req("PUT",    "Vendor | Update Bank Info",             "{{baseUrl}}/api/VendorBankInfo/PutEmployeeBankInfo",
+                    """{"employeeBankInfo_ID":"{{bankInfoId}}","bankName":"","accountNumber":""}"""),
+                Req("DELETE", "Vendor | Delete Bank Info",             "{{baseUrl}}/api/VendorBankInfo/Delete/{{bankInfoId}}"),
+
+                Req("POST",   "Vendor | Dependents List",              "{{baseUrl}}/api/VendorDependent/GetEmployeeDependents",           P),
+                Req("GET",    "Vendor | Get Dependent",                "{{baseUrl}}/api/VendorDependent/GetItem/{{dependentId}}"),
+                Req("POST",   "Vendor | Create Dependent",             "{{baseUrl}}/api/VendorDependent/PostEmployeeDependent",
+                    """{"employee_ID":"{{vendorId}}","firstName":"","lastName":"","relationship":1}"""),
+                Req("PUT",    "Vendor | Update Dependent",             "{{baseUrl}}/api/VendorDependent/PutEmployeeDependent",
+                    """{"employeeDependent_ID":"{{dependentId}}","firstName":"","lastName":""}"""),
+                Req("DELETE", "Vendor | Delete Dependent",             "{{baseUrl}}/api/VendorDependent/Delete/{{dependentId}}"),
+
+                Req("POST",   "Vendor | Position List",                "{{baseUrl}}/api/VendorPosition/EmployeePositionList",             P),
+                Req("GET",    "Vendor | Get Position",                 "{{baseUrl}}/api/VendorPosition/GetEmployeePosition/{{positionId}}"),
+                Req("POST",   "Vendor | Create Position",              "{{baseUrl}}/api/VendorPosition/PostEmployeePosition",
+                    """{"employee_ID":"{{vendorId}}","position_ID":"{{positionId}}","startDate":null,"isPrimary":true}"""),
+                Req("PUT",    "Vendor | Update Position",              "{{baseUrl}}/api/VendorPosition/PutEmployeePosition",
+                    """{"employeePosition_ID":"{{positionId}}","startDate":null,"isPrimary":true}"""),
+                Req("DELETE", "Vendor | Delete Position",              "{{baseUrl}}/api/VendorPosition/DeleteEmployeePosition/{{positionId}}"),
+
+                Req("POST",   "Vendor | Tax List",                     "{{baseUrl}}/api/VendorTax/GetEmployeeTaxes",                      P),
+                Req("GET",    "Vendor | Get Tax",                      "{{baseUrl}}/api/VendorTax/GetItem/{{taxId}}"),
+                Req("POST",   "Vendor | Create Tax",                   "{{baseUrl}}/api/VendorTax/PostEmployeeTax",
+                    """{"employee_ID":"{{vendorId}}","taxCode_ID":"{{taxCodeId}}","filingStatus":1,"exemptions":0}"""),
+                Req("PUT",    "Vendor | Update Tax",                   "{{baseUrl}}/api/VendorTax/PutEmployeeTax",
+                    """{"employeeTax_ID":"{{taxId}}","filingStatus":1,"exemptions":0}"""),
+                Req("DELETE", "Vendor | Delete Tax",                   "{{baseUrl}}/api/VendorTax/Delete/{{taxId}}"),
+
+                Req("POST",   "Vendor | Withholding List",             "{{baseUrl}}/api/VendorWithholding/EmployeeWithholdings",          P),
+                Req("GET",    "Vendor | Get Withholding",              "{{baseUrl}}/api/VendorWithholding/GetEmployeeWithholding/{{withholdingId}}"),
+                Req("POST",   "Vendor | Create Withholding",           "{{baseUrl}}/api/VendorWithholding/PostEmployeeWithholding",
+                    """{"employee_ID":"{{vendorId}}","withholding_ID":"{{withholdingId}}","amount":0}"""),
+                Req("PUT",    "Vendor | Update Withholding",           "{{baseUrl}}/api/VendorWithholding/PutEmployeeWithholding",
+                    """{"employeeWithholding_ID":"{{withholdingId}}","amount":0}"""),
+                Req("DELETE", "Vendor | Delete Withholding",           "{{baseUrl}}/api/VendorWithholding/DeleteEmployeeWithholding/{{withholdingId}}"),
+
+                // ── Billing Schedule ──────────────────────────────────────────
+                Req("POST",   "BillingSchedule | Schedule List",       "{{baseUrl}}/api/BillingSchedule/BillingSchedules",               P),
+                Req("POST",   "BillingSchedule | Schedule Compact",    "{{baseUrl}}/api/BillingSchedule/BillingScheduleCompact",          P),
+                Req("GET",    "BillingSchedule | Get Schedule",        "{{baseUrl}}/api/BillingSchedule/GetBillingSchedule/{{scheduleId}}"),
+                Req("GET",    "BillingSchedule | Project Schedules",   "{{baseUrl}}/api/BillingSchedule/GetProjectBillingSchedules/{{projectId}}"),
+                Req("GET",    "BillingSchedule | Schedule Summary",    "{{baseUrl}}/api/BillingSchedule/GetBillingScheduleDetailSummary/{{projectId}}"),
+                Req("POST",   "BillingSchedule | Create Schedule",     "{{baseUrl}}/api/BillingSchedule/PostBillingSchedule",
+                    """{"project_ID":"{{projectId}}","scheduleName":"","billingType":1,"isActive":true}"""),
+                Req("PUT",    "BillingSchedule | Update Schedule",     "{{baseUrl}}/api/BillingSchedule/PutBillingSchedule",
+                    """{"billingSchedule_ID":"{{scheduleId}}","scheduleName":"","billingType":1}"""),
+                Req("DELETE", "BillingSchedule | Delete Schedule",     "{{baseUrl}}/api/BillingSchedule/DeleteBillingSchedule/{{scheduleId}}"),
+
+                // ── Reviewer ──────────────────────────────────────────────────
+                Req("POST",   "Reviewer | Reviewer List",              "{{baseUrl}}/api/Reviewer/Reviewers",                              P),
+                Req("POST",   "Reviewer | Reviewer Compact",           "{{baseUrl}}/api/Reviewer/ReviewerCompact",                        P),
+                Req("POST",   "Reviewer | Reviewers Page Total",       "{{baseUrl}}/api/Reviewer/ReviewersPageTotal",                     P),
+                Req("POST",   "Reviewer | Record Count",               "{{baseUrl}}/api/Reviewer/RecordCount",                            P),
+                Req("POST",   "Reviewer | Record Count With Limit",    "{{baseUrl}}/api/Reviewer/RecordCountWithCountLimit",
+                    """{"PageInfo":{"PageNumber":0,"PageSize":500},"FilterList":[{"Field":"Type","Operator":0,"StartValue":"1"}],"SortList":[],"ExpectedCount":500}"""),
+                Req("GET",    "Reviewer | Get Reviewer",               "{{baseUrl}}/api/Reviewer/GetReviewer/{{timeExpenseId}}"),
+                Req("PUT",    "Reviewer | Update Reviewer",            "{{baseUrl}}/api/Reviewer/PutReviewer",
+                    """{"Entry_ID":"{{timeExpenseId}}","status":1}"""),
+                Req("POST",   "Reviewer | Update Rates",               "{{baseUrl}}/api/Reviewer/UpdateRates",
+                    """{"entryIds":["{{timeExpenseId}}"],"billRate":0,"costRate":0}"""),
+                Req("PUT",    "Reviewer | Batch Update Entries",       "{{baseUrl}}/api/Reviewer/BatchUpdateEntries",
+                    """{"entryIds":["{{timeExpenseId}}"],"status":1,"billStatus":1}"""),
+                Req("POST",   "Reviewer | Attach To Invoice",          "{{baseUrl}}/api/Reviewer/AttachToInvoice",
+                    """{"entryIds":["{{timeExpenseId}}"],"invoice_ID":"{{invoiceId}}"}"""),
+            ]
+        });
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ACCOUNTING collection
+        // ══════════════════════════════════════════════════════════════════════
+        _collections.Add(new Models.HttpCollection
+        {
+            Name = "Accounting",
+            Requests = new System.Collections.ObjectModel.ObservableCollection<Models.SavedHttpRequest>(new[]
+            {
+                // ── Account ───────────────────────────────────────────────────
+                Req("POST",   "Account | List",                        "{{baseUrl}}/api/Account/AccountList",                             P),
+                Req("POST",   "Account | Compact",                     "{{baseUrl}}/api/Account/GetAccountCompact",                       P),
+                Req("POST",   "Account | Compact (Base)",              "{{baseUrl}}/api/Account/GetAccountCompactBase",                   P),
+                Req("POST",   "Account | Balance Sheet List",          "{{baseUrl}}/api/Account/BalanceSheetAccountList",                 P),
+                Req("GET",    "Account | Get Account",                 "{{baseUrl}}/api/Account/GetAccount/{{accountId}}"),
+                Req("POST",   "Account | Post Account",                "{{baseUrl}}/api/Account/PostAccountList",
+                    """{"accountName":"","accountNumber":"","accountType":1,"isActive":true}"""),
+                Req("PUT",    "Account | Batch Update",                "{{baseUrl}}/api/Account/BatchUpdateAccount",                      P),
+                Req("PATCH",  "Account | Patch Account",               "{{baseUrl}}/api/Account/PatchAccount/{{accountId}}",
+                    """{"operations":[{"op":"replace","path":"/accountName","value":""}]}"""),
+                Req("DELETE", "Account | Delete Account",              "{{baseUrl}}/api/Account/DeleteAccountList/{{accountId}}"),
+                Req("GET",    "Account | Balance",                     "{{baseUrl}}/api/Account/Balance"),
+                Req("GET",    "Account | Account Types",               "{{baseUrl}}/api/Account/GetAccountTypeList"),
+                Req("POST",   "Account | Starting Balance List",       "{{baseUrl}}/api/Account/StartingBalanceAccountList",              P),
+                Req("POST",   "Account | Post Starting Balance",       "{{baseUrl}}/api/Account/PostStartingBalanceAndAdjustments",       P),
+
+                // ── Account Reconciliation ────────────────────────────────────
+                Req("POST",   "AccountReconciliation | List",          "{{baseUrl}}/api/AccountReconciliation/AccountReconciliationList", P),
+                Req("GET",    "AccountReconciliation | Get New",       "{{baseUrl}}/api/AccountReconciliation/GetNewAccountReconciliation/{{accountId}}"),
+                Req("GET",    "AccountReconciliation | Last",          "{{baseUrl}}/api/AccountReconciliation/GetLastReconciliation/{{accountId}}"),
+                Req("GET",    "AccountReconciliation | Entries",       "{{baseUrl}}/api/AccountReconciliation/GetReconciliationEntries/{{accountId}}"),
+                Req("POST",   "AccountReconciliation | Post",          "{{baseUrl}}/api/AccountReconciliation/PostAccountReconciliation", P),
+                Req("PUT",    "AccountReconciliation | Put Entries",   "{{baseUrl}}/api/AccountReconciliation/PutReconciliationEntries",  P),
+                Req("DELETE", "AccountReconciliation | Undo Last",     "{{baseUrl}}/api/AccountReconciliation/UndoLastReconciliation/{{accountId}}"),
+
+                // ── Accounting Period ─────────────────────────────────────────
+                Req("GET",    "AccountingPeriod | Fiscal Years",       "{{baseUrl}}/api/AccountingPeriod/GetAllAccountingFiscalYears"),
+                Req("GET",    "AccountingPeriod | Get By ID",          "{{baseUrl}}/api/AccountingPeriod/GetAccountingFiscalYearByID/{{fiscalYearId}}"),
+                Req("POST",   "AccountingPeriod | Post Fiscal Year",   "{{baseUrl}}/api/AccountingPeriod/PostAccountingFiscalYear",
+                    """{"fiscalYearName":"","startDate":"","endDate":""}"""),
+                Req("PUT",    "AccountingPeriod | Put Fiscal Year",    "{{baseUrl}}/api/AccountingPeriod/PutAccountingFiscalYear",        P),
+                Req("DELETE", "AccountingPeriod | Delete",             "{{baseUrl}}/api/AccountingPeriod/DeleteAccountingFiscalYear/{{fiscalYearId}}"),
+                Req("GET",    "AccountingPeriod | All Periods",        "{{baseUrl}}/api/AccountingPeriod/GetAllAccountingPeriods"),
+                Req("GET",    "AccountingPeriod | Date Range",         "{{baseUrl}}/api/AccountingPeriod/GetDateRange"),
+                Req("GET",    "AccountingPeriod | Is Enabled",         "{{baseUrl}}/api/AccountingPeriod/IsAccountingPeriodEnabledAtCompanyLevel"),
+
+                // ── General Journal ───────────────────────────────────────────
+                Req("POST",   "GeneralJournal | List",                 "{{baseUrl}}/api/GeneralJournal/GetGeneralJournalList",            P),
+                Req("POST",   "GeneralJournal | Page Total",           "{{baseUrl}}/api/GeneralJournal/GeneralJournalListPageTotal",      P),
+                Req("GET",    "GeneralJournal | Get",                  "{{baseUrl}}/api/GeneralJournal/GetGeneralJournal/{{journalId}}"),
+                Req("POST",   "GeneralJournal | Post",                 "{{baseUrl}}/api/GeneralJournal/PostGeneralJournal",               P),
+                Req("PUT",    "GeneralJournal | Put",                  "{{baseUrl}}/api/GeneralJournal/PutGeneralJournal",                P),
+                Req("DELETE", "GeneralJournal | Delete",               "{{baseUrl}}/api/GeneralJournal/DeleteGeneralJournal/{{journalId}}"),
+                Req("POST",   "GeneralJournal | Clone",                "{{baseUrl}}/api/GeneralJournal/CloneJournal/{{journalId}}"),
+                Req("POST",   "GeneralJournal | Reverse",              "{{baseUrl}}/api/GeneralJournal/ReverseJournal/{{journalId}}"),
+                Req("GET",    "GeneralJournal | Next Number",          "{{baseUrl}}/api/GeneralJournal/GetNextJournalNumber"),
+                Req("PATCH",  "GeneralJournal | Patch",                "{{baseUrl}}/api/GeneralJournal/PatchGeneralJournal/{{journalId}}",
+                    """{"operations":[{"op":"replace","path":"/memo","value":""}]}"""),
+
+                // ── Journal ───────────────────────────────────────────────────
+                Req("POST",   "Journal | List",                        "{{baseUrl}}/api/Journal/GetJournalList",                         P),
+                Req("GET",    "Journal | Get",                         "{{baseUrl}}/api/Journal/GetJournal/{{journalId}}"),
+                Req("POST",   "Journal | Post",                        "{{baseUrl}}/api/Journal/PostJournal",                            P),
+                Req("PUT",    "Journal | Put",                         "{{baseUrl}}/api/Journal/PutJournal",                             P),
+                Req("DELETE", "Journal | Delete",                      "{{baseUrl}}/api/Journal/DeleteJournal/{{journalId}}"),
+
+                // ── Class List ────────────────────────────────────────────────
+                Req("POST",   "ClassList | List",                      "{{baseUrl}}/api/ClassList/ClassList",                            P),
+                Req("GET",    "ClassList | Get",                       "{{baseUrl}}/api/ClassList/GetClass/{{classId}}"),
+                Req("POST",   "ClassList | Post",                      "{{baseUrl}}/api/ClassList/PostClass",
+                    """{"className":"","isActive":true}"""),
+                Req("PUT",    "ClassList | Put",                       "{{baseUrl}}/api/ClassList/PutClass",                             P),
+                Req("DELETE", "ClassList | Delete",                    "{{baseUrl}}/api/ClassList/DeleteClass/{{classId}}"),
+
+                // ── Currency Multiplier ───────────────────────────────────────
+                Req("POST",   "CurrencyMultiplier | List",             "{{baseUrl}}/api/CurrencyMultiplier/CurrencyMultipliers",         P),
+                Req("GET",    "CurrencyMultiplier | Get",              "{{baseUrl}}/api/CurrencyMultiplier/GetCurrencyMultiplier/{{currencyId}}"),
+                Req("PUT",    "CurrencyMultiplier | Put",              "{{baseUrl}}/api/CurrencyMultiplier/PutCurrencyMultiplier",        P),
+                Req("DELETE", "CurrencyMultiplier | Delete",           "{{baseUrl}}/api/CurrencyMultiplier/DeleteCurrencyMultiplier/{{currencyId}}"),
+
+                // ── Deposit ───────────────────────────────────────────────────
+                Req("POST",   "Deposit | List",                        "{{baseUrl}}/api/Deposit/DepositList",                            P),
+                Req("GET",    "Deposit | Get",                         "{{baseUrl}}/api/Deposit/Getitem/{{depositId}}"),
+                Req("POST",   "Deposit | Undeposited Payments",        "{{baseUrl}}/api/Deposit/GetUndepositedPayments",                 P),
+                Req("POST",   "Deposit | Post",                        "{{baseUrl}}/api/Deposit/PostDeposit",                            P),
+                Req("PUT",    "Deposit | Put",                         "{{baseUrl}}/api/Deposit/PutDeposit",                             P),
+                Req("DELETE", "Deposit | Delete",                      "{{baseUrl}}/api/Deposit/DeleteDeposit/{{depositId}}"),
+                Req("POST",   "Deposit | Totals",                      "{{baseUrl}}/api/Deposit/DepositTotals",                          P),
+
+                // ── Financial Budget ──────────────────────────────────────────
+                Req("GET",    "FinancialBudget | List",                "{{baseUrl}}/api/FinancialBudget/FinancialBudgetList"),
+                Req("GET",    "FinancialBudget | Get",                 "{{baseUrl}}/api/FinancialBudget/GetFinancialBudget/{{budgetId}}"),
+                Req("POST",   "FinancialBudget | Compact",             "{{baseUrl}}/api/FinancialBudget/GetFinancialBudgetCompacts",      P),
+                Req("POST",   "FinancialBudget | Post",                "{{baseUrl}}/api/FinancialBudget/PostFinancialBudget",             P),
+                Req("PUT",    "FinancialBudget | Put",                 "{{baseUrl}}/api/FinancialBudget/PutFinancialBudget",              P),
+                Req("DELETE", "FinancialBudget | Delete",              "{{baseUrl}}/api/FinancialBudget/GetFinancialBudget/{{budgetId}}"),
+                Req("POST",   "FinancialBudget | Clone",               "{{baseUrl}}/api/FinancialBudget/CloneFinancialBudget",            P),
+
+                // ── Tax Code ──────────────────────────────────────────────────
+                Req("POST",   "TaxCode | States",                      "{{baseUrl}}/api/TaxCode/States",                                 P),
+                Req("POST",   "TaxCode | Tax Types",                   "{{baseUrl}}/api/TaxCode/TaxTypes",                               P),
+                Req("POST",   "TaxCode | Tax Codes",                   "{{baseUrl}}/api/TaxCode/TaxCodes",                               P),
+                Req("POST",   "TaxCode | Tax Bases",                   "{{baseUrl}}/api/TaxCode/TaxBases",                               P),
+
+                // ── Terms ─────────────────────────────────────────────────────
+                Req("POST",   "Terms | List",                          "{{baseUrl}}/api/Terms/TermsList",                                P),
+                Req("GET",    "Terms | Get",                           "{{baseUrl}}/api/Terms/GetTerm/{{termsId}}"),
+                Req("DELETE", "Terms | Delete",                        "{{baseUrl}}/api/Terms/DeleteTerm/{{termsId}}"),
+
+                // ── Withholding ───────────────────────────────────────────────
+                Req("POST",   "Withholding | List",                    "{{baseUrl}}/api/Withholding/GetWithholdingList",                  P),
+                Req("POST",   "Withholding | Compact",                 "{{baseUrl}}/api/Withholding/WithholdingCompact",                  P),
+                Req("GET",    "Withholding | Get",                     "{{baseUrl}}/api/Withholding/GetItem/{{withholdingId}}"),
+                Req("DELETE", "Withholding | Delete",                  "{{baseUrl}}/api/Withholding/Delete/{{withholdingId}}"),
+                Req("POST",   "WithholdingCategory | List",            "{{baseUrl}}/api/WithholdingCategory/WithholdingCategories",       P),
+                Req("GET",    "WithholdingCategory | Get",             "{{baseUrl}}/api/WithholdingCategory/GetWithholdingCategory/{{categoryId}}"),
+            })
+        });
+
+        // ══════════════════════════════════════════════════════════════════════
+        // BILLING collection
+        // ══════════════════════════════════════════════════════════════════════
+        _collections.Add(new Models.HttpCollection
+        {
+            Name = "Billing",
+            Requests = new System.Collections.ObjectModel.ObservableCollection<Models.SavedHttpRequest>(new[]
+            {
+                // ── Invoice Review ────────────────────────────────────────────
+                Req("POST",   "InvoiceReview | Invoice List",          "{{baseUrl}}/api/InvoiceReview/Invoices",                         P),
+                Req("POST",   "InvoiceReview | Invoice Compact",       "{{baseUrl}}/api/InvoiceReview/InvoiceCompactList",               P),
+                Req("GET",    "InvoiceReview | Get Invoice",           "{{baseUrl}}/api/InvoiceReview/GetInvoice/{{invoiceId}}"),
+                Req("POST",   "InvoiceReview | Invoice Totals",        "{{baseUrl}}/api/InvoiceReview/InvoiceTotals",                    P),
+                Req("POST",   "InvoiceReview | Post Invoice",          "{{baseUrl}}/api/InvoiceReview/PostInvoice",                      P),
+                Req("PUT",    "InvoiceReview | Put Invoice",           "{{baseUrl}}/api/InvoiceReview/PutInvoice",                       P),
+                Req("PUT",    "InvoiceReview | Batch Update",          "{{baseUrl}}/api/InvoiceReview/BatchUpdateInvoices",              P),
+                Req("PUT",    "InvoiceReview | Void Invoice",          "{{baseUrl}}/api/InvoiceReview/VoidInvoice",                      P),
+                Req("DELETE", "InvoiceReview | Delete Invoice",        "{{baseUrl}}/api/InvoiceReview/DeleteInvoice/{{invoiceId}}"),
+                Req("GET",    "InvoiceReview | Detail Summary",        "{{baseUrl}}/api/InvoiceReview/GetInvoiceDetailSummary/{{invoiceId}}"),
+                Req("GET",    "InvoiceReview | Collections",           "{{baseUrl}}/api/InvoiceReview/GetInvoiceCollections"),
+                Req("POST",   "InvoiceReview | Summary",               "{{baseUrl}}/api/InvoiceReview/InvoiceSummary",                   P),
+                Req("GET",    "InvoiceReview | Payment Portal URL",    "{{baseUrl}}/api/InvoiceReview/PaymentPortalUrl/{{invoiceId}}"),
+                Req("GET",    "InvoiceReview | Email Info",            "{{baseUrl}}/api/InvoiceReview/GetInvoiceEmailInfo/{{invoiceId}}"),
+
+                // ── Manual Invoice ────────────────────────────────────────────
+                Req("POST",   "ManualInvoice | Compact",               "{{baseUrl}}/api/ManualInvoice/InvoiceCompact",                   P),
+                Req("GET",    "ManualInvoice | Get By ID",             "{{baseUrl}}/api/ManualInvoice/GetInvoiceByID/{{invoiceId}}"),
+                Req("POST",   "ManualInvoice | New Invoice",           "{{baseUrl}}/api/ManualInvoice/NewInvoice",                       P),
+                Req("POST",   "ManualInvoice | Post Invoice",          "{{baseUrl}}/api/ManualInvoice/PostInvoice",                      P),
+                Req("PUT",    "ManualInvoice | Put Invoice",           "{{baseUrl}}/api/ManualInvoice/PutInvoice",                       P),
+                Req("GET",    "ManualInvoice | Clone",                 "{{baseUrl}}/api/ManualInvoice/Clone/{{invoiceId}}"),
+
+                // ── Billing Review ────────────────────────────────────────────
+                Req("POST",   "BillingReview | Reviews",               "{{baseUrl}}/api/BillingReview/BillingReviews",                   P),
+                Req("GET",    "BillingReview | Extended Item",         "{{baseUrl}}/api/BillingReview/GetExtendedBillingReviewItem/{{billingReviewId}}"),
+                Req("POST",   "BillingReview | Post",                  "{{baseUrl}}/api/BillingReview/PostBillingReview",                P),
+                Req("PUT",    "BillingReview | Put",                   "{{baseUrl}}/api/BillingReview/PutBillingReviews",                P),
+                Req("POST",   "BillingReview | Project List",          "{{baseUrl}}/api/BillingReview/ProjectList",                      P),
+                Req("GET",    "BillingReview | Summary",               "{{baseUrl}}/api/BillingReview/BillingReviewSummaryInfo"),
+                Req("POST",   "BillingReview | Time Entries",          "{{baseUrl}}/api/BillingReview/TimeEntries",                      P),
+                Req("POST",   "BillingReview | Expense Logs",          "{{baseUrl}}/api/BillingReview/ExpenseLogs",                      P),
+                Req("PUT",    "BillingReview | Batch Update TE",       "{{baseUrl}}/api/BillingReview/BatchUpdateTimeEntries",           P),
+                Req("PUT",    "BillingReview | Batch Update Expense",  "{{baseUrl}}/api/BillingReview/BatchUpdateExpenseLogs",           P),
+                Req("POST",   "BillingReview | Separate Invoices",     "{{baseUrl}}/api/BillingReview/SaparateInvoices",                 P),
+                Req("POST",   "BillingReview | Combine Invoices",      "{{baseUrl}}/api/BillingReview/CombineInvoices",                  P),
+
+                // ── Batch Invoice ─────────────────────────────────────────────
+                Req("POST",   "BatchInvoice | List",                   "{{baseUrl}}/api/BatchInvoice/GetList",                           P),
+                Req("GET",    "BatchInvoice | Get",                    "{{baseUrl}}/api/BatchInvoice/GetBatchInvoice/{{batchId}}"),
+                Req("PUT",    "BatchInvoice | Put",                    "{{baseUrl}}/api/BatchInvoice/PutBatchInvoice",                    P),
+                Req("DELETE", "BatchInvoice | Delete Full",            "{{baseUrl}}/api/BatchInvoice/DeleteFullBatchInvoice/{{batchId}}"),
+                Req("GET",    "BatchInvoice | Active Count",           "{{baseUrl}}/api/BatchInvoice/GetActiveBatchCount"),
+
+                // ── Retainer ─────────────────────────────────────────────────
+                Req("POST",   "Retainer | Invoice List",               "{{baseUrl}}/api/Retainer/RetainerInvoiceList",                   P),
+                Req("GET",    "Retainer | Get",                        "{{baseUrl}}/api/Retainer/GetRetainerInvoice/{{retainerId}}"),
+                Req("POST",   "Retainer | Post",                       "{{baseUrl}}/api/Retainer/PostRetainerInvoice",                    P),
+                Req("PUT",    "Retainer | Put",                        "{{baseUrl}}/api/Retainer/PutRetainerInvoice",                     P),
+                Req("DELETE", "Retainer | Delete",                     "{{baseUrl}}/api/Retainer/DeleteRetainerInvoice/{{retainerId}}"),
+                Req("POST",   "Retainer | Transfer",                   "{{baseUrl}}/api/Retainer/PostRetainerTransfer",                   P),
+                Req("POST",   "Retainer | Total",                      "{{baseUrl}}/api/Retainer/GetRetainerTotal",                       P),
+                Req("GET",    "Retainer | New",                        "{{baseUrl}}/api/Retainer/GetNewRetainerInvoice"),
+                Req("GET",    "Retainer | Next Invoice Number",        "{{baseUrl}}/api/Retainer/GetNextAvailableInvoiceNumber"),
+
+                // ── Recurring Invoice ─────────────────────────────────────────
+                Req("POST",   "RecurringInvoice | List",               "{{baseUrl}}/api/RecurringInvoice/RecurringInvoices",             P),
+                Req("GET",    "RecurringInvoice | Get",                "{{baseUrl}}/api/RecurringInvoice/GetRecurringInvoice/{{recurringId}}"),
+                Req("POST",   "RecurringInvoice | Post",               "{{baseUrl}}/api/RecurringInvoice/PostRecurringInvoice",           P),
+                Req("PUT",    "RecurringInvoice | Put",                "{{baseUrl}}/api/RecurringInvoice/PutRecurringInvoice",            P),
+                Req("POST",   "RecurringInvoice | Process",            "{{baseUrl}}/api/RecurringInvoice/ProcessRecurringInvoices",       P),
+                Req("DELETE", "RecurringInvoice | Delete",             "{{baseUrl}}/api/RecurringInvoice/DeleteRecurringSchedule/{{recurringId}}"),
+
+                // ── Invoice Template ──────────────────────────────────────────
+                Req("POST",   "InvoiceTemplate | List",                "{{baseUrl}}/api/InvoiceTemplate/Templates",                      P),
+                Req("GET",    "InvoiceTemplate | Get",                 "{{baseUrl}}/api/InvoiceTemplate/GetTemplate/{{templateId}}"),
+                Req("POST",   "InvoiceTemplate | Post",                "{{baseUrl}}/api/InvoiceTemplate/PostTemplate",                    P),
+                Req("PUT",    "InvoiceTemplate | Put",                 "{{baseUrl}}/api/InvoiceTemplate/PutTemplate",                     P),
+                Req("DELETE", "InvoiceTemplate | Delete",              "{{baseUrl}}/api/InvoiceTemplate/DeleteTemplate/{{templateId}}"),
+
+                // ── Credit Memo ───────────────────────────────────────────────
+                Req("POST",   "CreditMemo | List",                     "{{baseUrl}}/api/CreditMemo/List",                                P),
+                Req("GET",    "CreditMemo | Get",                      "{{baseUrl}}/api/CreditMemo/GetItem/{{creditMemoId}}"),
+                Req("POST",   "CreditMemo | Post",                     "{{baseUrl}}/api/CreditMemo/PostCreditMemo",                       P),
+                Req("PUT",    "CreditMemo | Put",                      "{{baseUrl}}/api/CreditMemo/PutCreditMemo",                        P),
+                Req("DELETE", "CreditMemo | Delete",                   "{{baseUrl}}/api/CreditMemo/DeleteCreditMemo/{{creditMemoId}}"),
+
+                // ── Statement ────────────────────────────────────────────────
+                Req("POST",   "Statement | Client Balance",            "{{baseUrl}}/api/Statement/ClientBalanceList",                    P),
+                Req("POST",   "Statement | Statements",                "{{baseUrl}}/api/Statement/Statements",                           P),
+                Req("POST",   "Statement | Report",                    "{{baseUrl}}/api/Statement/GetStatementReport",                    P),
+            })
+        });
+
+        // ══════════════════════════════════════════════════════════════════════
+        // PAYMENTS & AP collection
+        // ══════════════════════════════════════════════════════════════════════
+        _collections.Add(new Models.HttpCollection
+        {
+            Name = "Payments & AP",
+            Requests = new System.Collections.ObjectModel.ObservableCollection<Models.SavedHttpRequest>(new[]
+            {
+                // ── Payment ───────────────────────────────────────────────────
+                Req("POST",   "Payment | List",                        "{{baseUrl}}/api/Payment/Payments",                               P),
+                Req("POST",   "Payment | Page Totals",                 "{{baseUrl}}/api/Payment/PaymentsPageTotals",                     P),
+                Req("GET",    "Payment | Get",                         "{{baseUrl}}/api/Payment/GetPayment/{{paymentId}}"),
+                Req("GET",    "Payment | Get Details",                 "{{baseUrl}}/api/Payment/GetPaymentDetails/{{paymentId}}"),
+                Req("POST",   "Payment | Unpaid Invoices",             "{{baseUrl}}/api/Payment/GetUnPaidInvoices",                      P),
+                Req("POST",   "Payment | Post",                        "{{baseUrl}}/api/Payment/PostPayment",                            P),
+                Req("PUT",    "Payment | Put",                         "{{baseUrl}}/api/Payment/PutPayment",                             P),
+                Req("PUT",    "Payment | Void",                        "{{baseUrl}}/api/Payment/PutVoidPayment/{{paymentId}}"),
+                Req("DELETE", "Payment | Delete",                      "{{baseUrl}}/api/Payment/DeletePayment/{{paymentId}}"),
+                Req("GET",    "Payment | Payment Methods",             "{{baseUrl}}/api/Payment/GetPaymentMethodsList"),
+                Req("GET",    "Payment | Retainer Summary",            "{{baseUrl}}/api/Payment/GetRetainerSummary"),
+                Req("PATCH",  "Payment | Patch",                       "{{baseUrl}}/api/Payment/PatchPayment/{{paymentId}}",
+                    """{"operations":[{"op":"replace","path":"/memo","value":""}]}"""),
+
+                // ── Payment Category ──────────────────────────────────────────
+                Req("POST",   "PaymentCategory | List",                "{{baseUrl}}/api/PaymentCategory/PaymentCategories",              P),
+                Req("GET",    "PaymentCategory | Get",                 "{{baseUrl}}/api/PaymentCategory/GetPaymentCategory/{{categoryId}}"),
+                Req("POST",   "PaymentCategory | Post",                "{{baseUrl}}/api/PaymentCategory/PostPaymentCategory",            P),
+                Req("PUT",    "PaymentCategory | Put",                 "{{baseUrl}}/api/PaymentCategory/PutPaymentCategory",             P),
+                Req("DELETE", "PaymentCategory | Delete",              "{{baseUrl}}/api/PaymentCategory/DeletePaymentCategory/{{categoryId}}"),
+
+                // ── Vendor Bill ───────────────────────────────────────────────
+                Req("POST",   "VendorBill | List",                     "{{baseUrl}}/api/VendorBill/VendorBillList",                      P),
+                Req("POST",   "VendorBill | Page Total",               "{{baseUrl}}/api/VendorBill/VendorBillsPageTotal",                P),
+                Req("GET",    "VendorBill | Get",                      "{{baseUrl}}/api/VendorBill/GetVendorBill/{{vendorBillId}}"),
+                Req("POST",   "VendorBill | Post",                     "{{baseUrl}}/api/VendorBill/PostVendorBill",                      P),
+                Req("PUT",    "VendorBill | Put",                      "{{baseUrl}}/api/VendorBill/PutVendorBill",                       P),
+                Req("DELETE", "VendorBill | Delete",                   "{{baseUrl}}/api/VendorBill/Delete/{{vendorBillId}}"),
+                Req("GET",    "VendorBill | Clone",                    "{{baseUrl}}/api/VendorBill/Clone/{{vendorBillId}}"),
+                Req("PATCH",  "VendorBill | Patch",                    "{{baseUrl}}/api/VendorBill/PatchVendorBill/{{vendorBillId}}",
+                    """{"operations":[{"op":"replace","path":"/memo","value":""}]}"""),
+
+                // ── Vendor Credit ─────────────────────────────────────────────
+                Req("POST",   "VendorCredit | List",                   "{{baseUrl}}/api/VendorCredit/VendorCredits",                     P),
+                Req("GET",    "VendorCredit | Get",                    "{{baseUrl}}/api/VendorCredit/GetVendorCredit/{{vendorCreditId}}"),
+                Req("DELETE", "VendorCredit | Delete",                 "{{baseUrl}}/api/VendorCredit/DeleteVendorCredit/{{vendorCreditId}}"),
+
+                // ── Bill Payment ──────────────────────────────────────────────
+                Req("POST",   "BillPayment | Unpaid Bills",            "{{baseUrl}}/api/BillPayment/GetUnpaidBills",                     P),
+                Req("POST",   "BillPayment | Previous Payments",       "{{baseUrl}}/api/BillPayment/GetPreviousPayments",                P),
+                Req("GET",    "BillPayment | Get",                     "{{baseUrl}}/api/BillPayment/GetBillPayment/{{billPaymentId}}"),
+                Req("POST",   "BillPayment | Post",                    "{{baseUrl}}/api/BillPayment/PostBillPayment",                    P),
+                Req("DELETE", "BillPayment | Delete",                  "{{baseUrl}}/api/BillPayment/Delete/{{billPaymentId}}"),
+
+                // ── Check ─────────────────────────────────────────────────────
+                Req("POST",   "Check | List",                          "{{baseUrl}}/api/Check/CheckList",                                P),
+                Req("POST",   "Check | Page Total",                    "{{baseUrl}}/api/Check/ChecksPageTotal",                         P),
+                Req("GET",    "Check | Get",                           "{{baseUrl}}/api/Check/GetCheck/{{checkId}}"),
+                Req("POST",   "Check | Post",                          "{{baseUrl}}/api/Check/PostCheck",                                P),
+                Req("PUT",    "Check | Put",                           "{{baseUrl}}/api/Check/PutCheck",                                 P),
+                Req("DELETE", "Check | Delete",                        "{{baseUrl}}/api/Check/DeleteCheck/{{checkId}}"),
+                Req("PUT",    "Check | Void",                          "{{baseUrl}}/api/Check/VoidCheck",                                P),
+                Req("PUT",    "Check | UnVoid",                        "{{baseUrl}}/api/Check/UnVoidCheck/{{checkId}}"),
+                Req("PATCH",  "Check | Patch",                         "{{baseUrl}}/api/Check/PatchCheck/{{checkId}}",
+                    """{"operations":[{"op":"replace","path":"/memo","value":""}]}"""),
+
+                // ── Purchase Order ────────────────────────────────────────────
+                Req("POST",   "PurchaseOrder | List",                  "{{baseUrl}}/api/PurchaseOrder/PurchaseOrderList",                P),
+                Req("POST",   "PurchaseOrder | Page Total",            "{{baseUrl}}/api/PurchaseOrder/PurchaseOrdersTotal",              P),
+                Req("GET",    "PurchaseOrder | Get",                   "{{baseUrl}}/api/PurchaseOrder/GetPurchaseOrder/{{purchaseOrderId}}"),
+                Req("POST",   "PurchaseOrder | New",                   "{{baseUrl}}/api/PurchaseOrder/NewPurchaseOrder",                  P),
+                Req("POST",   "PurchaseOrder | Post",                  "{{baseUrl}}/api/PurchaseOrder/PostPurchaseOrder",                 P),
+                Req("PUT",    "PurchaseOrder | Put",                   "{{baseUrl}}/api/PurchaseOrder/PutPurchaseOrder",                  P),
+                Req("DELETE", "PurchaseOrder | Delete",                "{{baseUrl}}/api/PurchaseOrder/DeletePurchaseOrder/{{purchaseOrderId}}"),
+                Req("POST",   "PurchaseOrder | Clone",                 "{{baseUrl}}/api/PurchaseOrder/PostPurchaseOrderClone",            P),
+                Req("PATCH",  "PurchaseOrder | Patch",                 "{{baseUrl}}/api/PurchaseOrder/PatchPurchaseOrder/{{purchaseOrderId}}",
+                    """{"operations":[{"op":"replace","path":"/memo","value":""}]}"""),
+
+                // ── Recurring Bill ────────────────────────────────────────────
+                Req("POST",   "RecurringBill | List",                  "{{baseUrl}}/api/RecurringBill/RecurringBills",                   P),
+                Req("GET",    "RecurringBill | Get",                   "{{baseUrl}}/api/RecurringBill/GetRecurringBill/{{recurringBillId}}"),
+                Req("POST",   "RecurringBill | Post",                  "{{baseUrl}}/api/RecurringBill/PostRecurringBill",                 P),
+                Req("POST",   "RecurringBill | Process",               "{{baseUrl}}/api/RecurringBill/ProcessRecurringBills",             P),
+                Req("DELETE", "RecurringBill | Delete",                "{{baseUrl}}/api/RecurringBill/DeleteRecurringSchedule/{{recurringBillId}}"),
+
+                // ── Recurring Check ───────────────────────────────────────────
+                Req("POST",   "RecurringCheck | List",                 "{{baseUrl}}/api/RecurringCheck/RecurringChecks",                 P),
+                Req("GET",    "RecurringCheck | Get",                  "{{baseUrl}}/api/RecurringCheck/GetRecurringCheck/{{recurringCheckId}}"),
+                Req("POST",   "RecurringCheck | Post",                 "{{baseUrl}}/api/RecurringCheck/PostRecurringCheck",               P),
+                Req("DELETE", "RecurringCheck | Delete",               "{{baseUrl}}/api/RecurringCheck/DeleteRecurringSchedule/{{recurringCheckId}}"),
+
+                // ── Allocate (Resource Planner) ───────────────────────────────
+                Req("POST",   "Allocate | List",                       "{{baseUrl}}/api/Allocate/AllocateList",                          P),
+                Req("GET",    "Allocate | Get",                        "{{baseUrl}}/api/Allocate/GetItem/{{allocateId}}"),
+                Req("POST",   "Allocate | Forecast",                   "{{baseUrl}}/api/Allocate/Forecast",                              P),
+                Req("POST",   "Allocate | Post",                       "{{baseUrl}}/api/Allocate/PostAllocate",                          P),
+                Req("PUT",    "Allocate | Put",                        "{{baseUrl}}/api/Allocate/PutAllocate",                           P),
+                Req("DELETE", "Allocate | Delete",                     "{{baseUrl}}/api/Allocate/DeleteAllocate/{{allocateId}}"),
+                Req("POST",   "Allocate | Gantt Chart",                "{{baseUrl}}/api/Allocate/GanttChart",                            P),
+                Req("POST",   "Allocate | Task Conflicts",             "{{baseUrl}}/api/Allocate/TaskConflicts",                         P),
+            })
+        });
+
+        // ══════════════════════════════════════════════════════════════════════
+        // CRM collection
+        // ══════════════════════════════════════════════════════════════════════
+        _collections.Add(new Models.HttpCollection
+        {
+            Name = "CRM",
+            Requests = new System.Collections.ObjectModel.ObservableCollection<Models.SavedHttpRequest>(new[]
+            {
+                // ── Lead ─────────────────────────────────────────────────────
+                Req("POST",   "Lead | List",                           "{{baseUrl}}/api/Lead/GetLeadList",                               P),
+                Req("POST",   "Lead | Compact",                        "{{baseUrl}}/api/Lead/GetLeadCompacts",                           P),
+                Req("GET",    "Lead | Get",                            "{{baseUrl}}/api/Lead/GetItem/{{leadId}}"),
+                Req("POST",   "Lead | Post",                           "{{baseUrl}}/api/Lead/PostLead",                                   P),
+                Req("PUT",    "Lead | Put",                            "{{baseUrl}}/api/Lead/PutLead",                                    P),
+                Req("DELETE", "Lead | Delete",                         "{{baseUrl}}/api/Lead/Delete/{{leadId}}"),
+                Req("POST",   "Lead | Clone",                          "{{baseUrl}}/api/Lead/CloneLead",                                  P),
+                Req("PATCH",  "Lead | Patch",                          "{{baseUrl}}/api/Lead/PatchLead/{{leadId}}",
+                    """{"operations":[{"op":"replace","path":"/status","value":1}]}"""),
+
+                // ── Campaign ──────────────────────────────────────────────────
+                Req("POST",   "Campaign | List",                       "{{baseUrl}}/api/Campaign/GetCampaignList",                       P),
+                Req("POST",   "Campaign | Compact",                    "{{baseUrl}}/api/Campaign/GetCampaignCompacts",                   P),
+                Req("GET",    "Campaign | Get",                        "{{baseUrl}}/api/Campaign/GetItem/{{campaignId}}"),
+                Req("POST",   "Campaign | Post",                       "{{baseUrl}}/api/Campaign/PostCampaign",                           P),
+                Req("PUT",    "Campaign | Put",                        "{{baseUrl}}/api/Campaign/PutCampaign",                            P),
+                Req("DELETE", "Campaign | Delete",                     "{{baseUrl}}/api/Campaign/Delete/{{campaignId}}"),
+                Req("POST",   "Campaign | Clone",                      "{{baseUrl}}/api/Campaign/CloneCampaign",                          P),
+                Req("POST",   "Campaign | Recipients",                 "{{baseUrl}}/api/Campaign/GetCampaignRecipientList",               P),
+                Req("POST",   "Campaign | Summary",                    "{{baseUrl}}/api/Campaign/GetCampaignSummary",                     P),
+                Req("PATCH",  "Campaign | Patch",                      "{{baseUrl}}/api/Campaign/PatchCampaign/{{campaignId}}",
+                    """{"operations":[{"op":"replace","path":"/status","value":1}]}"""),
+
+                // ── Opportunity ───────────────────────────────────────────────
+                Req("POST",   "Opportunity | List",                    "{{baseUrl}}/api/Opportunity/GetOpportunityList",                 P),
+                Req("POST",   "Opportunity | Compact",                 "{{baseUrl}}/api/Opportunity/GetOpportunityCompacts",             P),
+                Req("GET",    "Opportunity | Get",                     "{{baseUrl}}/api/Opportunity/GetItem/{{opportunityId}}"),
+                Req("POST",   "Opportunity | Post",                    "{{baseUrl}}/api/Opportunity/PostOpportunity",                     P),
+                Req("PUT",    "Opportunity | Put",                     "{{baseUrl}}/api/Opportunity/PutOpportunity",                      P),
+                Req("DELETE", "Opportunity | Delete",                  "{{baseUrl}}/api/Opportunity/Delete/{{opportunityId}}"),
+                Req("POST",   "Opportunity | Clone",                   "{{baseUrl}}/api/Opportunity/CloneOpportunity",                    P),
+                Req("GET",    "Opportunity | New from Template",       "{{baseUrl}}/api/Opportunity/GetNewProjectFromTemplate/{{templateId}}"),
+                Req("POST",   "Opportunity | Mark as Won",             "{{baseUrl}}/api/Opportunity/MarkOpportunityAsWon",                P),
+                Req("PATCH",  "Opportunity | Patch",                   "{{baseUrl}}/api/Opportunity/PatchOpportunity/{{opportunityId}}",
+                    """{"operations":[{"op":"replace","path":"/status","value":1}]}"""),
+
+                // ── Quote ─────────────────────────────────────────────────────
+                Req("POST",   "Quote | List",                          "{{baseUrl}}/api/Quote/GetQuoteList",                             P),
+                Req("POST",   "Quote | Compact",                       "{{baseUrl}}/api/Quote/GetQuoteCompact",                          P),
+                Req("GET",    "Quote | Get",                           "{{baseUrl}}/api/Quote/GetItem/{{quoteId}}"),
+                Req("POST",   "Quote | Post",                          "{{baseUrl}}/api/Quote/PostQuote",                                 P),
+                Req("PUT",    "Quote | Put",                           "{{baseUrl}}/api/Quote/PutQuote",                                  P),
+                Req("DELETE", "Quote | Delete",                        "{{baseUrl}}/api/Quote/Delete/{{quoteId}}"),
+                Req("POST",   "Quote | Clone",                         "{{baseUrl}}/api/Quote/CloneQuote",                                P),
+                Req("POST",   "Quote | Activity List",                 "{{baseUrl}}/api/Quote/GetQuoteActivityList",                      P),
+                Req("POST",   "Quote | Expense List",                  "{{baseUrl}}/api/Quote/GetQuoteExpenseList",                       P),
+                Req("GET",    "Quote | Next Number",                   "{{baseUrl}}/api/Quote/GetNextAvailableQuoteNumber"),
+                Req("PATCH",  "Quote | Patch",                         "{{baseUrl}}/api/Quote/PatchQuote/{{quoteId}}",
+                    """{"operations":[{"op":"replace","path":"/status","value":1}]}"""),
+
+                // ── Quote Template ────────────────────────────────────────────
+                Req("POST",   "QuoteTemplate | List",                  "{{baseUrl}}/api/QuoteTemplate/GetQuoteTemplateList",             P),
+                Req("GET",    "QuoteTemplate | Get",                   "{{baseUrl}}/api/QuoteTemplate/GetItem/{{quoteTemplateId}}"),
+                Req("POST",   "QuoteTemplate | Post",                  "{{baseUrl}}/api/QuoteTemplate/PostQuoteTemplate",                 P),
+                Req("PUT",    "QuoteTemplate | Put",                   "{{baseUrl}}/api/QuoteTemplate/PutQuoteTemplate",                  P),
+                Req("DELETE", "QuoteTemplate | Delete",                "{{baseUrl}}/api/QuoteTemplate/Delete/{{quoteTemplateId}}"),
+
+                // ── Proposal ──────────────────────────────────────────────────
+                Req("POST",   "Proposal | List",                       "{{baseUrl}}/api/Proposal/GetProposalList",                       P),
+                Req("POST",   "Proposal | Compact",                    "{{baseUrl}}/api/Proposal/GetProposalCompacts",                   P),
+                Req("GET",    "Proposal | Get",                        "{{baseUrl}}/api/Proposal/GetItem/{{proposalId}}"),
+                Req("POST",   "Proposal | Post",                       "{{baseUrl}}/api/Proposal/PostProposal",                           P),
+                Req("PUT",    "Proposal | Put",                        "{{baseUrl}}/api/Proposal/PutProposal",                            P),
+                Req("DELETE", "Proposal | Delete",                     "{{baseUrl}}/api/Proposal/Delete/{{proposalId}}"),
+                Req("POST",   "Proposal | Clone",                      "{{baseUrl}}/api/Proposal/CloneProposal",                          P),
+                Req("GET",    "Proposal | PDF",                        "{{baseUrl}}/api/Proposal/GetProposalPDF/{{proposalId}}"),
+                Req("PATCH",  "Proposal | Patch",                      "{{baseUrl}}/api/Proposal/PatchProposal/{{proposalId}}",
+                    """{"operations":[{"op":"replace","path":"/status","value":1}]}"""),
+
+                // ── Proposal Template ─────────────────────────────────────────
+                Req("POST",   "ProposalTemplate | List",               "{{baseUrl}}/api/ProposalTemplate/GetProposalTemplateList",       P),
+                Req("GET",    "ProposalTemplate | Get",                "{{baseUrl}}/api/ProposalTemplate/GetItem/{{proposalTemplateId}}"),
+                Req("POST",   "ProposalTemplate | Post",               "{{baseUrl}}/api/ProposalTemplate/PostProposalTemplate",           P),
+                Req("PUT",    "ProposalTemplate | Put",                "{{baseUrl}}/api/ProposalTemplate/PutProposalTemplate",            P),
+                Req("DELETE", "ProposalTemplate | Delete",             "{{baseUrl}}/api/ProposalTemplate/Delete/{{proposalTemplateId}}"),
+
+                // ── Sales Goal ────────────────────────────────────────────────
+                Req("POST",   "SalesGoal | List",                      "{{baseUrl}}/api/SalesGoal/GetSalesGoalList",                     P),
+                Req("GET",    "SalesGoal | Get",                       "{{baseUrl}}/api/SalesGoal/GetItem/{{salesGoalId}}"),
+                Req("POST",   "SalesGoal | Post",                      "{{baseUrl}}/api/SalesGoal/PostSalesGoal",                         P),
+                Req("PUT",    "SalesGoal | Put",                       "{{baseUrl}}/api/SalesGoal/PutSalesGoal",                          P),
+                Req("DELETE", "SalesGoal | Delete",                    "{{baseUrl}}/api/SalesGoal/Delete/{{salesGoalId}}"),
+                Req("POST",   "SalesGoal | Summary",                   "{{baseUrl}}/api/SalesGoal/GetSalesGoalSummary",                   P),
+
+                // ── Sales Forecast ────────────────────────────────────────────
+                Req("POST",   "SalesForecast | Distributive",          "{{baseUrl}}/api/SalesForecast/Distributive",                     P),
+                Req("POST",   "SalesForecast | Summarized",            "{{baseUrl}}/api/SalesForecast/Summarized",                       P),
+                Req("POST",   "SalesForecast | Opportunities",         "{{baseUrl}}/api/SalesForecast/Opportunities",                    P),
+
+                // ── Follow Up ─────────────────────────────────────────────────
+                Req("POST",   "FollowUp | List",                       "{{baseUrl}}/api/FollowUp/GetFollowUps",                          P),
+                Req("GET",    "FollowUp | Get",                        "{{baseUrl}}/api/FollowUp/GetItem/{{followUpId}}"),
+                Req("POST",   "FollowUp | Post",                       "{{baseUrl}}/api/FollowUp/PostFollowUp",                           P),
+                Req("PUT",    "FollowUp | Put",                        "{{baseUrl}}/api/FollowUp/PutFollowUp",                            P),
+                Req("DELETE", "FollowUp | Delete",                     "{{baseUrl}}/api/FollowUp/Delete/{{followUpId}}"),
+                Req("POST",   "FollowUp | Compact",                    "{{baseUrl}}/api/FollowUp/FollowUpCompact",                        P),
+                Req("PATCH",  "FollowUp | Patch",                      "{{baseUrl}}/api/FollowUp/PatchFollowUp/{{followUpId}}",
+                    """{"operations":[{"op":"replace","path":"/status","value":1}]}"""),
+
+                // ── Region ────────────────────────────────────────────────────
+                Req("POST",   "Region | List",                         "{{baseUrl}}/api/Region/GetRegions",                              P),
+                Req("POST",   "Region | Compact",                      "{{baseUrl}}/api/Region/GetRegionsCompact",                       P),
+                Req("GET",    "Region | Get",                          "{{baseUrl}}/api/Region/GetItem/{{regionId}}"),
+                Req("POST",   "Region | Post",                         "{{baseUrl}}/api/Region/PostRegion",                               P),
+                Req("PUT",    "Region | Put",                          "{{baseUrl}}/api/Region/PutRegion",                                P),
+                Req("DELETE", "Region | Delete",                       "{{baseUrl}}/api/Region/Delete/{{regionId}}"),
+
+                // ── Competition ───────────────────────────────────────────────
+                Req("POST",   "Competition | List",                    "{{baseUrl}}/api/Competition/GetCompetitions",                    P),
+                Req("GET",    "Competition | Get",                     "{{baseUrl}}/api/Competition/GetItem/{{competitionId}}"),
+                Req("POST",   "Competition | Post",                    "{{baseUrl}}/api/Competition/PostCompetition",                     P),
+                Req("PUT",    "Competition | Put",                     "{{baseUrl}}/api/Competition/PutCompetition",                      P),
+                Req("DELETE", "Competition | Delete",                  "{{baseUrl}}/api/Competition/Delete/{{competitionId}}"),
+
+                // ── Commission Profile ────────────────────────────────────────
+                Req("POST",   "CommissionProfile | List",              "{{baseUrl}}/api/CommissionProfile/GetCommissionProfileList",     P),
+                Req("GET",    "CommissionProfile | Get",               "{{baseUrl}}/api/CommissionProfile/GetItem/{{commProfileId}}"),
+                Req("POST",   "CommissionProfile | Post",              "{{baseUrl}}/api/CommissionProfile/PostCommissionProfile",         P),
+                Req("PUT",    "CommissionProfile | Put",               "{{baseUrl}}/api/CommissionProfile/PutCommissionProfile",          P),
+                Req("DELETE", "CommissionProfile | Delete",            "{{baseUrl}}/api/CommissionProfile/Delete/{{commProfileId}}"),
+                Req("POST",   "CommissionProfile | Clone",             "{{baseUrl}}/api/CommissionProfile/CloneCommissionProfile",        P),
+
+                // ── Visit / Event / Reminder ──────────────────────────────────
+                Req("POST",   "Visit | Project Visit List",            "{{baseUrl}}/api/Visit/GetProjectVisitList/{{projectId}}"),
+                Req("GET",    "Visit | Get",                           "{{baseUrl}}/api/Visit/GetVisit/{{visitId}}"),
+                Req("POST",   "Event | List",                          "{{baseUrl}}/api/Event/EventList",                                P),
+                Req("POST",   "Event | Post",                          "{{baseUrl}}/api/Event/PostEvent",                                 P),
+                Req("GET",    "Event | Get",                           "{{baseUrl}}/api/Event/GetEvent/{{eventId}}"),
+                Req("DELETE", "Event | Delete",                        "{{baseUrl}}/api/Event/DeleteEvent/{{eventId}}"),
+                Req("POST",   "Reminder | List",                       "{{baseUrl}}/api/Reminder/GetList",                               P),
+                Req("POST",   "Reminder | Post",                       "{{baseUrl}}/api/Reminder/PostReminder",                           P),
+            })
+        });
+
+        // ══════════════════════════════════════════════════════════════════════
+        // TIME & EXPENSE TRACKING collection
+        // ══════════════════════════════════════════════════════════════════════
+        _collections.Add(new Models.HttpCollection
+        {
+            Name = "Time & Expense",
+            Requests = new System.Collections.ObjectModel.ObservableCollection<Models.SavedHttpRequest>(new[]
+            {
+                // ── Activity (Lookups) ────────────────────────────────────────
+                Req("POST",   "Activity | List",                       "{{baseUrl}}/api/Activity/ActivityList",                          P),
+                Req("POST",   "Activity | Compact",                    "{{baseUrl}}/api/Activity/ActivityCompact",                       P),
+                Req("POST",   "Activity | Compact Plus",               "{{baseUrl}}/api/Activity/ActivityCompactPlus",                   P),
+                Req("GET",    "Activity | Get",                        "{{baseUrl}}/api/Activity/GetActivity/{{activityId}}"),
+                Req("POST",   "Activity | Post",                       "{{baseUrl}}/api/Activity/PostActivity",
+                    """{"activityName":"","isActive":true,"isBillable":true}"""),
+                Req("PUT",    "Activity | Put",                        "{{baseUrl}}/api/Activity/PutActivity",                           P),
+                Req("DELETE", "Activity | Delete",                     "{{baseUrl}}/api/Activity/DeleteActivity/{{activityId}}"),
+                Req("PATCH",  "Activity | Patch",                      "{{baseUrl}}/api/Activity/PatchActivity/{{activityId}}",
+                    """{"operations":[{"op":"replace","path":"/activityName","value":""}]}"""),
+
+                // ── Expense (Categories) ──────────────────────────────────────
+                Req("POST",   "Expense | List",                        "{{baseUrl}}/api/Expense/ExpenseList",                            P),
+                Req("POST",   "Expense | Compact",                     "{{baseUrl}}/api/Expense/ExpenseCompact",                         P),
+                Req("GET",    "Expense | Get",                         "{{baseUrl}}/api/Expense/GetExpense/{{expenseId}}"),
+                Req("POST",   "Expense | Post",                        "{{baseUrl}}/api/Expense/PostExpense",
+                    """{"expenseName":"","isActive":true,"isBillable":true}"""),
+                Req("PUT",    "Expense | Put",                         "{{baseUrl}}/api/Expense/PutExpense",                             P),
+                Req("DELETE", "Expense | Delete",                      "{{baseUrl}}/api/Expense/DeleteExpense/{{expenseId}}"),
+                Req("PATCH",  "Expense | Patch",                       "{{baseUrl}}/api/Expense/PatchExpense/{{expenseId}}",
+                    """{"operations":[{"op":"replace","path":"/expenseName","value":""}]}"""),
+
+                // ── Expense Log (Entries) ─────────────────────────────────────
+                Req("POST",   "ExpenseLog | List",                     "{{baseUrl}}/api/ExpenseLog/ExpenseLogList",                      P),
+                Req("POST",   "ExpenseLog | Compact",                  "{{baseUrl}}/api/ExpenseLog/ExpenseLogCompact",                   P),
+                Req("POST",   "ExpenseLog | Totals",                   "{{baseUrl}}/api/ExpenseLog/ExpenseLogTotals",                    P),
+                Req("GET",    "ExpenseLog | Get",                      "{{baseUrl}}/api/ExpenseLog/GetExpenseLog/{{expenseLogId}}"),
+                Req("POST",   "ExpenseLog | Post",                     "{{baseUrl}}/api/ExpenseLog/PostExpenseLog",                       P),
+                Req("PUT",    "ExpenseLog | Put",                      "{{baseUrl}}/api/ExpenseLog/PutExpenseLog",                        P),
+                Req("PUT",    "ExpenseLog | Batch Update",             "{{baseUrl}}/api/ExpenseLog/BatchUpdateExpenseLogs",               P),
+                Req("DELETE", "ExpenseLog | Delete",                   "{{baseUrl}}/api/ExpenseLog/DeleteExpenseLog/{{expenseLogId}}"),
+                Req("POST",   "ExpenseLog | Summary Info",             "{{baseUrl}}/api/ExpenseLog/ExpenseLogSummaryInfo",                P),
+                Req("POST",   "ExpenseLog | Rates & Defaults",         "{{baseUrl}}/api/ExpenseLog/GetRatesAndDefaults",                  P),
+                Req("PATCH",  "ExpenseLog | Patch",                    "{{baseUrl}}/api/ExpenseLog/PatchExpenseLog/{{expenseLogId}}",
+                    """{"operations":[{"op":"replace","path":"/memo","value":""}]}"""),
+
+                // ── Timer ─────────────────────────────────────────────────────
+                Req("POST",   "Timer | List",                          "{{baseUrl}}/api/Timer/Timers",                                   P),
+                Req("GET",    "Timer | With Pin State",                "{{baseUrl}}/api/Timer/TimersWithPinState"),
+                Req("GET",    "Timer | Running Timer",                 "{{baseUrl}}/api/Timer/GetRunningTimer"),
+                Req("GET",    "Timer | All Running",                   "{{baseUrl}}/api/Timer/GetAllRunningTimer"),
+                Req("GET",    "Timer | Get",                           "{{baseUrl}}/api/Timer/GetTimer/{{timerId}}"),
+                Req("POST",   "Timer | Save Timers",                   "{{baseUrl}}/api/Timer/SaveTimers",                               P),
+                Req("DELETE", "Timer | Delete",                        "{{baseUrl}}/api/Timer/DeleteTimer/{{timerId}}"),
+                Req("POST",   "Timer | Stop Timers",                   "{{baseUrl}}/api/Timer/StopTimers",                               P),
+                Req("PATCH",  "Timer | Patch",                         "{{baseUrl}}/api/Timer/PatchTimer/{{timerId}}",
+                    """{"operations":[{"op":"replace","path":"/description","value":""}]}"""),
+
+                // ── Benefit (Lookups) ─────────────────────────────────────────
+                Req("POST",   "Benefit | List",                        "{{baseUrl}}/api/Benefit/Benefits",                               P),
+                Req("POST",   "Benefit | Compact",                     "{{baseUrl}}/api/Benefit/BenefitCompact",                         P),
+                Req("GET",    "Benefit | Get",                         "{{baseUrl}}/api/Benefit/GetBenefit/{{benefitId}}"),
+                Req("POST",   "Benefit | Post",                        "{{baseUrl}}/api/Benefit/PostBenefit",
+                    """{"benefitName":"","isActive":true}"""),
+                Req("PUT",    "Benefit | Put",                         "{{baseUrl}}/api/Benefit/PutBenefit",                             P),
+                Req("DELETE", "Benefit | Delete",                      "{{baseUrl}}/api/Benefit/DeleteBenefit/{{benefitId}}"),
+
+                // ── Agency (Pay Codes) ────────────────────────────────────────
+                Req("POST",   "Agency | List",                         "{{baseUrl}}/api/Agency/AgencyList",                              P),
+                Req("POST",   "Agency | Compact",                      "{{baseUrl}}/api/Agency/AgencyCompact",                           P),
+                Req("GET",    "Agency | Get",                          "{{baseUrl}}/api/Agency/GetAgency/{{agencyId}}"),
+                Req("POST",   "Agency | Post",                         "{{baseUrl}}/api/Agency/PostAgency",
+                    """{"agencyName":"","isActive":true}"""),
+                Req("PUT",    "Agency | Put",                          "{{baseUrl}}/api/Agency/PutAgency",                               P),
+                Req("DELETE", "Agency | Delete",                       "{{baseUrl}}/api/Agency/DeleteAgency/{{agencyId}}"),
+
+                // ── Pay Code ──────────────────────────────────────────────────
+                Req("POST",   "PayCode | List",                        "{{baseUrl}}/api/PayCode/PayCodeList",                            P),
+                Req("POST",   "PayCode | Compact",                     "{{baseUrl}}/api/PayCode/PayCodeCompact"),
+                Req("GET",    "PayCode | Get",                         "{{baseUrl}}/api/PayCode/GetPayCode/{{payCodeId}}"),
+                Req("POST",   "PayCode | Post",                        "{{baseUrl}}/api/PayCode/PostPayCode",                             P),
+                Req("PUT",    "PayCode | Put",                         "{{baseUrl}}/api/PayCode/PutPayCode",                              P),
+                Req("DELETE", "PayCode | Delete",                      "{{baseUrl}}/api/PayCode/DeletePayCode/{{payCodeId}}"),
+
+                // ── Workflow ──────────────────────────────────────────────────
+                Req("GET",    "Workflow | Get",                        "{{baseUrl}}/api/Workflow/GetItem/{{workflowId}}"),
+                Req("POST",   "Workflow | List",                       "{{baseUrl}}/api/Workflow/GetList",                               P),
+                Req("POST",   "Workflow | Batch Update",               "{{baseUrl}}/api/Workflow/PutBatchWorkflow",                       P),
+                Req("POST",   "Workflow | Entries Info",               "{{baseUrl}}/api/Workflow/GetEntriesInfo",                         P),
+
+                // ── OT Calculator ─────────────────────────────────────────────
+                Req("POST",   "ExpenseLog | Create GJ for RevRec",     "{{baseUrl}}/api/ExpenseLog/CreateGeneralJournalForRevRec",        P),
+            })
+        });
+
+        // ══════════════════════════════════════════════════════════════════════
+        // PAYROLL collection
+        // ══════════════════════════════════════════════════════════════════════
+        _collections.Add(new Models.HttpCollection
+        {
+            Name = "Payroll",
+            Requests = new System.Collections.ObjectModel.ObservableCollection<Models.SavedHttpRequest>(new[]
+            {
+                // ── Payroll Group ─────────────────────────────────────────────
+                Req("POST",   "PayrollGroup | List",                   "{{baseUrl}}/api/PayrollGroup/PayrollGroups",                     P),
+                Req("POST",   "PayrollGroup | Compact",                "{{baseUrl}}/api/PayrollGroup/PayrollGroupCompact",               P),
+                Req("GET",    "PayrollGroup | Get",                    "{{baseUrl}}/api/PayrollGroup/GetPayrollGroup/{{payrollGroupId}}"),
+                Req("POST",   "PayrollGroup | Post",                   "{{baseUrl}}/api/PayrollGroup/PostPayrollGroup",                   P),
+                Req("PUT",    "PayrollGroup | Put",                    "{{baseUrl}}/api/PayrollGroup/PutPayrollGroup",                    P),
+                Req("DELETE", "PayrollGroup | Delete",                 "{{baseUrl}}/api/PayrollGroup/DeletePayrollGroup/{{payrollGroupId}}"),
+                Req("GET",    "PayrollGroup | Pay Periods",            "{{baseUrl}}/api/PayrollGroup/GetRunPayrollPayPeriods/{{payrollGroupId}}"),
+                Req("GET",    "PayrollGroup | Default Pay Period",     "{{baseUrl}}/api/PayrollGroup/GetDefaultPayrollPayPeriod"),
+
+                // ── Payroll Time Expense ──────────────────────────────────────
+                Req("POST",   "PayrollTimeExpense | List",             "{{baseUrl}}/api/PayrollTimeExpense/PayrollTimeExpensesList",      P),
+                Req("GET",    "PayrollTimeExpense | Get",              "{{baseUrl}}/api/PayrollTimeExpense/GetPayrollTimeExpense/{{payrollTeId}}"),
+                Req("POST",   "PayrollTimeExpense | Post",             "{{baseUrl}}/api/PayrollTimeExpense/PostPayrollTimeExpense",        P),
+                Req("PUT",    "PayrollTimeExpense | Put",              "{{baseUrl}}/api/PayrollTimeExpense/PutPayrollTimeExpense",         P),
+                Req("DELETE", "PayrollTimeExpense | Delete",           "{{baseUrl}}/api/PayrollTimeExpense/DeletePayrollTimeExpense/{{payrollTeId}}"),
+                Req("PUT",    "PayrollTimeExpense | Batch Change",     "{{baseUrl}}/api/PayrollTimeExpense/BatchChange",                   P),
+
+                // ── Payroll (Gusto Integration) ───────────────────────────────
+                Req("GET",    "Payroll | Company Status",              "{{baseUrl}}/api/Payroll/GetCompanyStatus"),
+                Req("GET",    "Payroll | Company Details",             "{{baseUrl}}/api/Payroll/GetGustoCompanyDetails"),
+                Req("POST",   "Payroll | Employee List",               "{{baseUrl}}/api/Payroll/GetPayrollEmployeeList",                  P),
+                Req("POST",   "Payroll | Compact Employee List",       "{{baseUrl}}/api/Payroll/GetCompactPayrollEmployeeList",           P),
+                Req("POST",   "Payroll | Reviewer List",               "{{baseUrl}}/api/Payroll/GetPayrollReviewerList",                  P),
+                Req("POST",   "Payroll | Reviewer List Total",         "{{baseUrl}}/api/Payroll/GetPayrollReviewerListTotal",             P),
+                Req("POST",   "Payroll | Time Entry Compact",          "{{baseUrl}}/api/Payroll/GetPayrollTimeEntryCompact",              P),
+                Req("POST",   "Payroll | Expense Entry Compact",       "{{baseUrl}}/api/Payroll/GetPayrollExpenseEntryCompact",           P),
+                Req("GET",    "Payroll | Auth URL",                    "{{baseUrl}}/api/Payroll/GetGustoAuthUrl"),
+                Req("GET",    "Payroll | Payroll Admin",               "{{baseUrl}}/api/Payroll/GetPayrollAdmin"),
+                Req("GET",    "Payroll | Payroll Admins With Config",  "{{baseUrl}}/api/Payroll/GetPayrollAdminsWithPaymentConfig"),
+                Req("GET",    "Payroll | Has Approved Company",        "{{baseUrl}}/api/Payroll/HasApprovedGustoCompany"),
+                Req("GET",    "Payroll | Last Two Year Payrolls",      "{{baseUrl}}/api/Payroll/GetLastTwoYearPayrolls"),
+                Req("POST",   "Payroll | Send to Gusto",               "{{baseUrl}}/api/Payroll/SendToGusto",                             P),
+                Req("GET",    "Payroll | Global Settings",             "{{baseUrl}}/api/Payroll/PayrollGlobalSettings"),
+                Req("PUT",    "Payroll | Update Global Settings",      "{{baseUrl}}/api/Payroll/PayrollGlobalSettings",                   P),
+
+                // ── Pay Schedule ──────────────────────────────────────────────
+                Req("POST",   "PaySchedule | List",                    "{{baseUrl}}/api/PaySchedule/PaySchedules",                       P),
+                Req("GET",    "PaySchedule | Get",                     "{{baseUrl}}/api/PaySchedule/Get/{{payScheduleId}}"),
+                Req("POST",   "PaySchedule | Post",                    "{{baseUrl}}/api/PaySchedule/Post",                                P),
+                Req("PUT",    "PaySchedule | Put",                     "{{baseUrl}}/api/PaySchedule/Put",                                 P),
+                Req("DELETE", "PaySchedule | Delete",                  "{{baseUrl}}/api/PaySchedule/Delete/{{payScheduleId}}"),
+
+                // ── Time Off Policy ───────────────────────────────────────────
+                Req("GET",    "TimeOffPolicy | Summary List",          "{{baseUrl}}/api/TimeOffPolicy/GetTimeOffPolicySummaryList"),
+                Req("GET",    "TimeOffPolicy | Get",                   "{{baseUrl}}/api/TimeOffPolicy/GetTimeOffPolicyById/{{policyId}}"),
+                Req("POST",   "TimeOffPolicy | Create",                "{{baseUrl}}/api/TimeOffPolicy/CreateTimeOffPolicy",               P),
+                Req("PUT",    "TimeOffPolicy | Put",                   "{{baseUrl}}/api/TimeOffPolicy/PutTimeOffPolicy",                   P),
+                Req("PUT",    "TimeOffPolicy | Deactivate",            "{{baseUrl}}/api/TimeOffPolicy/DeactivateTimeOffPolicy/{{policyId}}"),
+                Req("POST",   "TimeOffPolicy | Employee List",         "{{baseUrl}}/api/TimeOffPolicy/GetPolicyEmployeeList",              P),
+                Req("GET",    "TimeOffPolicy | Employee Activities",   "{{baseUrl}}/api/TimeOffPolicy/GetEmployeeTimeOffActivities/{{employeeId}}"),
+
+                // ── Payroll Dashboard ─────────────────────────────────────────
+                Req("GET",    "PayrollDashboard | Upcoming Payroll",   "{{baseUrl}}/api/PayrollDashBoard/GetUpcomingPayroll"),
+                Req("GET",    "PayrollDashboard | Payroll Tracker",    "{{baseUrl}}/api/PayrollDashBoard/GetPayrollTracker"),
+                Req("GET",    "PayrollDashboard | Pending Approvals",  "{{baseUrl}}/api/PayrollDashBoard/GetPendingTimeApprovalsOfPayroll"),
+                Req("POST",   "PayrollDashboard | Take Home Pay",      "{{baseUrl}}/api/PayrollDashBoard/GetTakeHomePayBreakdown",         P),
+
+                // ── Employee Recurring Payment ─────────────────────────────────
+                Req("POST",   "EmployeeRecurringPayment | List",       "{{baseUrl}}/api/EmployeeRecurringPayment/GetEmployeeRecurringPayments", P),
+                Req("GET",    "EmployeeRecurringPayment | Get",        "{{baseUrl}}/api/EmployeeRecurringPayment/GetItem/{{recurringPaymentId}}"),
+                Req("POST",   "EmployeeRecurringPayment | Post",       "{{baseUrl}}/api/EmployeeRecurringPayment/PostEmployeeRecurringPayment",  P),
+                Req("PUT",    "EmployeeRecurringPayment | Put",        "{{baseUrl}}/api/EmployeeRecurringPayment/PutEmployeeRecurringPayment",   P),
+                Req("DELETE", "EmployeeRecurringPayment | Delete",     "{{baseUrl}}/api/EmployeeRecurringPayment/Delete/{{recurringPaymentId}}"),
+            })
+        });
+
+        // ══════════════════════════════════════════════════════════════════════
+        // HR & EMPLOYEE EXTRAS collection
+        // ══════════════════════════════════════════════════════════════════════
+        _collections.Add(new Models.HttpCollection
+        {
+            Name = "HR & Employee",
+            Requests = new System.Collections.ObjectModel.ObservableCollection<Models.SavedHttpRequest>(new[]
+            {
+                // ── Employee Review ───────────────────────────────────────────
+                Req("POST",   "EmployeeReview | List",                 "{{baseUrl}}/api/EmployeeReview/EmployeeReviews",                 P),
+                Req("GET",    "EmployeeReview | Get",                  "{{baseUrl}}/api/EmployeeReview/GetEmployeeReview/{{reviewId}}"),
+                Req("GET",    "EmployeeReview | Summary",              "{{baseUrl}}/api/EmployeeReview/GetEmployeeReviewSummary/{{employeeId}}"),
+                Req("POST",   "EmployeeReview | Post",                 "{{baseUrl}}/api/EmployeeReview/PostEmployeeReview",               P),
+                Req("PUT",    "EmployeeReview | Put",                  "{{baseUrl}}/api/EmployeeReview/PutEmployeeReview",                P),
+                Req("DELETE", "EmployeeReview | Delete",               "{{baseUrl}}/api/EmployeeReview/DeleteEmployeeReview/{{reviewId}}"),
+                Req("GET",    "EmployeeReview | Report URI",           "{{baseUrl}}/api/EmployeeReview/GetReportURI"),
+                Req("PATCH",  "EmployeeReview | Patch",                "{{baseUrl}}/api/EmployeeReview/PatchEmployeeReview/{{reviewId}}",
+                    """{"operations":[{"op":"replace","path":"/status","value":1}]}"""),
+
+                // ── Employee Review Detail ────────────────────────────────────
+                Req("POST",   "EmployeeReviewDetail | List",           "{{baseUrl}}/api/EmployeeReviewDetail/EmployeeReviewDetails",     P),
+                Req("GET",    "EmployeeReviewDetail | Get",            "{{baseUrl}}/api/EmployeeReviewDetail/GetEmployeeReviewDetail/{{reviewDetailId}}"),
+                Req("POST",   "EmployeeReviewDetail | Post",           "{{baseUrl}}/api/EmployeeReviewDetail/PostEmployeeReviewDetail",   P),
+                Req("PUT",    "EmployeeReviewDetail | Put",            "{{baseUrl}}/api/EmployeeReviewDetail/PutEmployeeReviewDetail",    P),
+                Req("DELETE", "EmployeeReviewDetail | Delete",         "{{baseUrl}}/api/EmployeeReviewDetail/DeleteEmployeeReviewDetail/{{reviewDetailId}}"),
+
+                // ── Review Template ───────────────────────────────────────────
+                Req("POST",   "ReviewTemplate | List",                 "{{baseUrl}}/api/ReviewTemplate/ReviewTemplates",                 P),
+                Req("POST",   "ReviewTemplate | Compact",              "{{baseUrl}}/api/ReviewTemplate/ReviewTemplateCompact",           P),
+                Req("GET",    "ReviewTemplate | Get",                  "{{baseUrl}}/api/ReviewTemplate/GetReviewTemplate/{{reviewTemplateId}}"),
+                Req("POST",   "ReviewTemplate | Post",                 "{{baseUrl}}/api/ReviewTemplate/PostReviewTemplate",               P),
+                Req("PUT",    "ReviewTemplate | Put",                  "{{baseUrl}}/api/ReviewTemplate/PutReviewTemplate",                P),
+                Req("DELETE", "ReviewTemplate | Delete",               "{{baseUrl}}/api/ReviewTemplate/DeleteReviewTemplate/{{reviewTemplateId}}"),
+
+                // ── Employee Incident ─────────────────────────────────────────
+                Req("POST",   "EmployeeIncident | List",               "{{baseUrl}}/api/EmployeeIncident/EmployeeIncidents",             P),
+                Req("GET",    "EmployeeIncident | Get",                "{{baseUrl}}/api/EmployeeIncident/GetEmployeeIncident/{{incidentId}}"),
+                Req("POST",   "EmployeeIncident | Post",               "{{baseUrl}}/api/EmployeeIncident/PostEmployeeIncident",           P),
+                Req("PUT",    "EmployeeIncident | Put",                "{{baseUrl}}/api/EmployeeIncident/PutEmployeeIncident",            P),
+                Req("DELETE", "EmployeeIncident | Delete",             "{{baseUrl}}/api/EmployeeIncident/DeleteEmployeeIncident/{{incidentId}}"),
+
+                // ── Employee Benefit Usage ────────────────────────────────────
+                Req("POST",   "EmployeeBenefitUsage | List",           "{{baseUrl}}/api/EmployeeBenefitUsage/EmployeeBenefitUsages",     P),
+                Req("GET",    "EmployeeBenefitUsage | Get",            "{{baseUrl}}/api/EmployeeBenefitUsage/GetEmployeeBenefitUsage/{{benefitUsageId}}"),
+                Req("POST",   "EmployeeBenefitUsage | Benefits Accrued","{{baseUrl}}/api/EmployeeBenefitUsage/BenefitsAccrued",          P),
+                Req("POST",   "EmployeeBenefitUsage | Post",           "{{baseUrl}}/api/EmployeeBenefitUsage/PostEmployeeBenefitUsage",   P),
+                Req("PUT",    "EmployeeBenefitUsage | Put",            "{{baseUrl}}/api/EmployeeBenefitUsage/PutEmployeeBenefitUsage",    P),
+                Req("DELETE", "EmployeeBenefitUsage | Delete",         "{{baseUrl}}/api/EmployeeBenefitUsage/DeleteEmployeeBenefitUsage/{{benefitUsageId}}"),
+
+                // ── Employee Control ──────────────────────────────────────────
+                Req("GET",    "EmployeeControl | Get",                 "{{baseUrl}}/api/EmployeeControl/GetEmployeeControl/{{employeeId}}"),
+                Req("POST",   "EmployeeControl | List",                "{{baseUrl}}/api/EmployeeControl/EmployeeControlSettingList",      P),
+                Req("POST",   "EmployeeControl | Query",               "{{baseUrl}}/api/EmployeeControl/EmployeeControlQuery",            P),
+                Req("POST",   "EmployeeControl | Copy",                "{{baseUrl}}/api/EmployeeControl/CopyEmployeeControl",             P),
+                Req("PUT",    "EmployeeControl | Setting",             "{{baseUrl}}/api/EmployeeControl/PutEmployeeControlSetting/{{employeeId}}",
+                    """{"isEnabled":true}"""),
+
+                // ── HR Form ───────────────────────────────────────────────────
+                Req("POST",   "HrForm | Types",                        "{{baseUrl}}/api/HrForm/HrFormTypes",                             P),
+                Req("POST",   "HrForm | List",                         "{{baseUrl}}/api/HrForm/HrForms",                                 P),
+
+                // ── Work Position ─────────────────────────────────────────────
+                Req("GET",    "WorkPosition | List",                   "{{baseUrl}}/api/WorkPosition/GetWorkPositions"),
+                Req("GET",    "WorkPosition | Compact",                "{{baseUrl}}/api/WorkPosition/WorkPositionCompact"),
+                Req("GET",    "WorkPosition | Get",                    "{{baseUrl}}/api/WorkPosition/GetWorkPosition/{{workPositionId}}"),
+            })
+        });
+
+        // ══════════════════════════════════════════════════════════════════════
+        // SETTINGS & ADMIN collection
+        // ══════════════════════════════════════════════════════════════════════
+        _collections.Add(new Models.HttpCollection
+        {
+            Name = "Settings & Admin",
+            Requests = new System.Collections.ObjectModel.ObservableCollection<Models.SavedHttpRequest>(new[]
+            {
+                // ── Global Settings (Read) ────────────────────────────────────
+                Req("GET",    "GlobalSettings | All Settings",         "{{baseUrl}}/api/GlobalSettings/GetGlobalSettings"),
+                Req("GET",    "GlobalSettings | Detailed Settings",    "{{baseUrl}}/api/GlobalSettings/GetDetailedGlobalSettings"),
+                Req("GET",    "GlobalSettings | Master Info",          "{{baseUrl}}/api/GlobalSettings/GetMasterInformationSetting"),
+                Req("GET",    "GlobalSettings | Time & Expense",       "{{baseUrl}}/api/GlobalSettings/GetTimeExpenseSetting"),
+                Req("GET",    "GlobalSettings | Billing",              "{{baseUrl}}/api/GlobalSettings/GetBillingSetting"),
+                Req("GET",    "GlobalSettings | Accounting",           "{{baseUrl}}/api/GlobalSettings/GetAccountingSetting"),
+                Req("GET",    "GlobalSettings | Security",             "{{baseUrl}}/api/GlobalSettings/GetSecuritySetting"),
+                Req("GET",    "GlobalSettings | Email",                "{{baseUrl}}/api/GlobalSettings/GetEmailSetting"),
+                Req("GET",    "GlobalSettings | Payroll",              "{{baseUrl}}/api/GlobalSettings/GetPayrollSettings"),
+                Req("GET",    "GlobalSettings | Project General",      "{{baseUrl}}/api/GlobalSettings/GetProjectGeneralSetting"),
+                Req("GET",    "GlobalSettings | Project Display",      "{{baseUrl}}/api/GlobalSettings/GetProjectDisplaySetting"),
+                Req("GET",    "GlobalSettings | CRM Quotes",           "{{baseUrl}}/api/GlobalSettings/GetCRMQuotesSetting"),
+                Req("GET",    "GlobalSettings | Integration",          "{{baseUrl}}/api/GlobalSettings/GetIntegrationSetting"),
+                Req("GET",    "GlobalSettings | Tax",                  "{{baseUrl}}/api/GlobalSettings/GetTaxSetting"),
+                Req("GET",    "GlobalSettings | User Interface",       "{{baseUrl}}/api/GlobalSettings/GetUserInterfaceSetting"),
+                Req("GET",    "GlobalSettings | Revenue Recognition",  "{{baseUrl}}/api/GlobalSettings/GetRevenueRecognitionSetting"),
+                Req("GET",    "GlobalSettings | Invoice Reminders",    "{{baseUrl}}/api/GlobalSettings/GetInvoiceRemindersList"),
+                Req("GET",    "GlobalSettings | System Time Zones",    "{{baseUrl}}/api/GlobalSettings/GetSystemTimeZones"),
+
+                // ── Global Settings (Write) ───────────────────────────────────
+                Req("PUT",    "GlobalSettings | Put Master Info",      "{{baseUrl}}/api/GlobalSettings/PutMasterInformationSetting",      P),
+                Req("PUT",    "GlobalSettings | Put Time & Expense",   "{{baseUrl}}/api/GlobalSettings/PutTimeExpenseSetting",            P),
+                Req("PUT",    "GlobalSettings | Put Billing",          "{{baseUrl}}/api/GlobalSettings/PutBillingSetting",                P),
+                Req("PUT",    "GlobalSettings | Put Accounting",       "{{baseUrl}}/api/GlobalSettings/PutAccountingSetting",             P),
+                Req("PUT",    "GlobalSettings | Put Email",            "{{baseUrl}}/api/GlobalSettings/PutEmailSetting",                  P),
+                Req("PUT",    "GlobalSettings | Put Security",         "{{baseUrl}}/api/GlobalSettings/PutSecuritySetting",               P),
+                Req("POST",   "GlobalSettings | Send Test Email",      "{{baseUrl}}/api/GlobalSettings/SendTestEmail",                    P),
+
+                // ── Company ───────────────────────────────────────────────────
+                Req("GET",    "Company | Get",                         "{{baseUrl}}/api/Company/GetCompany"),
+                Req("PUT",    "Company | Put",                         "{{baseUrl}}/api/Company/PutCompany",                              P),
+                Req("GET",    "Company | Logo",                        "{{baseUrl}}/api/Company/GetCompanyLogo"),
+                Req("PUT",    "Company | Toggle Flag",                 "{{baseUrl}}/api/Company/ToggleCompanyFlag",
+                    """{"flagName":"","value":true}"""),
+                Req("GET",    "Company | Payrix Integration Detail",   "{{baseUrl}}/api/Company/GetPayrixIntegrationDetail"),
+
+                // ── Preference ────────────────────────────────────────────────
+                Req("GET",    "Preference | General",                  "{{baseUrl}}/api/Preference/GetGeneralSetting/{{employeeId}}"),
+                Req("GET",    "Preference | Notification",             "{{baseUrl}}/api/Preference/GetNotificationAndReminderSetting/{{employeeId}}"),
+                Req("GET",    "Preference | Time & Expense",           "{{baseUrl}}/api/Preference/GetTimeAndExpenseSetting/{{employeeId}}"),
+                Req("GET",    "Preference | Email",                    "{{baseUrl}}/api/Preference/GetEmailSetting/{{employeeId}}"),
+                Req("GET",    "Preference | User Preferences",         "{{baseUrl}}/api/Preference/GetUserPreferences/{{employeeId}}"),
+                Req("POST",   "Preference | Post General",             "{{baseUrl}}/api/Preference/PostGeneral",                          P),
+                Req("PUT",    "Preference | Put General",              "{{baseUrl}}/api/Preference/PutGeneral",                           P),
+                Req("PUT",    "Preference | Put Email",                "{{baseUrl}}/api/Preference/PutEmailSetting",                      P),
+                Req("POST",   "Preference | Nav Menu List",            "{{baseUrl}}/api/Preference/PostNavigationMenus",                  P),
+                Req("POST",   "Preference | User Preference Item",     "{{baseUrl}}/api/Preference/PostUserPreferenceItem",               P),
+                Req("PUT",    "Preference | Create/Update Preference", "{{baseUrl}}/api/Preference/CreateOrUpdateUserPreferenceItem",      P),
+
+                // ── Custom Label ──────────────────────────────────────────────
+                Req("POST",   "CustomLabel | List",                    "{{baseUrl}}/api/CustomLabel/CustomLabels",                        P),
+                Req("GET",    "CustomLabel | By Module",               "{{baseUrl}}/api/CustomLabel/GetModuleCustomLabels/{{moduleId}}"),
+                Req("GET",    "CustomLabel | Get",                     "{{baseUrl}}/api/CustomLabel/GetCustomLabel/{{customLabelId}}"),
+                Req("POST",   "CustomLabel | Post",                    "{{baseUrl}}/api/CustomLabel/PostCustomLabel",                      P),
+                Req("PUT",    "CustomLabel | Put",                     "{{baseUrl}}/api/CustomLabel/PutCustomLabel",                       P),
+                Req("DELETE", "CustomLabel | Delete",                  "{{baseUrl}}/api/CustomLabel/DeleteCustomLabel/{{customLabelId}}"),
+                Req("PUT",    "CustomLabel | Reset",                   "{{baseUrl}}/api/CustomLabel/ResetCustomLabel",                     P),
+
+                // ── Custom List ───────────────────────────────────────────────
+                Req("POST",   "CustomList | List",                     "{{baseUrl}}/api/CustomList/CustomLists",                          P),
+                Req("GET",    "CustomList | Get",                      "{{baseUrl}}/api/CustomList/GetCustomList/{{customListId}}"),
+                Req("POST",   "CustomList | Post",                     "{{baseUrl}}/api/CustomList/PostCustomList",                        P),
+                Req("PUT",    "CustomList | Put",                      "{{baseUrl}}/api/CustomList/PutCustomList",                         P),
+                Req("DELETE", "CustomList | Delete",                   "{{baseUrl}}/api/CustomList/DeleteCustomList/{{customListId}}"),
+                Req("POST",   "CustomList | Line Items",               "{{baseUrl}}/api/CustomList/CustomListLineItems",                   P),
+                Req("POST",   "CustomList | Post Line Item",           "{{baseUrl}}/api/CustomList/PostCustomListLineItem",                P),
+
+                // ── Column Chooser ────────────────────────────────────────────
+                Req("POST",   "ColumnChooser | List",                  "{{baseUrl}}/api/ColumnChooser/ColumnChoosers",                    P),
+                Req("GET",    "ColumnChooser | Get",                   "{{baseUrl}}/api/ColumnChooser/GetColumnChooser/{{moduleId}}"),
+                Req("GET",    "ColumnChooser | Details",               "{{baseUrl}}/api/ColumnChooser/GetColumnChooserDetails/{{moduleId}}"),
+                Req("GET",    "ColumnChooser | Reset to Default",      "{{baseUrl}}/api/ColumnChooser/ResetToDefault/{{moduleId}}"),
+
+                // ── Report ────────────────────────────────────────────────────
+                Req("POST",   "Report | List",                         "{{baseUrl}}/api/Report/GetReports",                               P),
+                Req("POST",   "Report | Compact",                      "{{baseUrl}}/api/Report/ReportCompact",                            P),
+                Req("GET",    "Report | Get",                          "{{baseUrl}}/api/Report/GetReport/{{reportId}}"),
+                Req("POST",   "Report | Request",                      "{{baseUrl}}/api/Report/ReportRequest",                            P),
+                Req("POST",   "Report | Get URI",                      "{{baseUrl}}/api/Report/GetReportURI/{{reportId}}",                P),
+                Req("POST",   "Report | Custom Reports",               "{{baseUrl}}/api/Report/GetCustomReports",                         P),
+                Req("POST",   "Report | My Reports",                   "{{baseUrl}}/api/Report/GetMyReportList",                          P),
+                Req("POST",   "Report | Groups",                       "{{baseUrl}}/api/Report/GetReportGroups",                          P),
+                Req("POST",   "Report | Screen Filters",               "{{baseUrl}}/api/Report/ReportScreenFilters",                      P),
+
+                // ── General API ───────────────────────────────────────────────
+                Req("GET",    "GeneralAPI | Login User",               "{{baseUrl}}/api/GeneralAPI/GetLoginUser"),
+                Req("GET",    "GeneralAPI | Login User ID",            "{{baseUrl}}/api/GeneralAPI/GetLoginUserID"),
+                Req("GET",    "GeneralAPI | Version",                  "{{baseUrl}}/api/GeneralAPI/Version"),
+                Req("GET",    "GeneralAPI | API Version",              "{{baseUrl}}/api/GeneralAPI/GetCurrentCoreApiVersion"),
+                Req("POST",   "GeneralAPI | Global Search",            "{{baseUrl}}/api/GeneralAPI/GlobalSearchList",                     P),
+                Req("POST",   "GeneralAPI | Time/Expense Compact",     "{{baseUrl}}/api/GeneralAPI/TimeExpenseCompactList",                P),
+                Req("POST",   "GeneralAPI | Employee/Vendor+Group",    "{{baseUrl}}/api/GeneralAPI/EmployeeVendorWithGroupList",           P),
+                Req("GET",    "GeneralAPI | Enum Values",              "{{baseUrl}}/api/GeneralAPI/GetEnumValues"),
+                Req("GET",    "GeneralAPI | Check Module Sub",         "{{baseUrl}}/api/GeneralAPI/CheckModuleSubscription"),
+                Req("POST",   "GeneralAPI | Send Email",               "{{baseUrl}}/api/GeneralAPI/SendEmail",                            P),
+                Req("GET",    "GeneralAPI | Logged-in Packages",       "{{baseUrl}}/api/GeneralAPI/GetLoggedInUserPackages"),
+
+                // ── Dashboard ─────────────────────────────────────────────────
+                Req("POST",   "Dashboard | My Dashboards",             "{{baseUrl}}/api/Dashboard/UserDashboards",                        P),
+                Req("GET",    "Dashboard | Get",                       "{{baseUrl}}/api/Dashboard/GetDashboard/{{dashboardId}}"),
+                Req("POST",   "Dashboard | Post",                      "{{baseUrl}}/api/Dashboard/PostDashboard",                          P),
+                Req("PUT",    "Dashboard | Put",                       "{{baseUrl}}/api/Dashboard/PutDashboard",                           P),
+                Req("DELETE", "Dashboard | Delete",                    "{{baseUrl}}/api/Dashboard/DeleteDashboard/{{dashboardId}}"),
+                Req("POST",   "Dashboard | Widgets",                   "{{baseUrl}}/api/Dashboard/Widgets",                               P),
+                Req("POST",   "Dashboard | Hours",                     "{{baseUrl}}/api/Dashboard/Hours",                                  P),
+                Req("POST",   "Dashboard | Unbilled Time",             "{{baseUrl}}/api/Dashboard/UnbilledTime",                           P),
+                Req("POST",   "Dashboard | Aged Receivables",          "{{baseUrl}}/api/Dashboard/AgedReceivables",                        P),
+                Req("POST",   "Dashboard | Project Status",            "{{baseUrl}}/api/Dashboard/ProjectStatus",                          P),
+                Req("POST",   "Dashboard | Gross Margin",              "{{baseUrl}}/api/Dashboard/GrossMargin",                            P),
+                Req("POST",   "Dashboard | Staff Utilization",         "{{baseUrl}}/api/Dashboard/StaffUtilizationRate",                   P),
+                Req("POST",   "Dashboard | Employee Allocation",       "{{baseUrl}}/api/Dashboard/EmployeeAllocation",                     P),
+                Req("POST",   "Dashboard | Project Allocation",        "{{baseUrl}}/api/Dashboard/ProjectAllocation",                      P),
+                Req("POST",   "Dashboard | Profit & Loss",             "{{baseUrl}}/api/Dashboard/ProfitAndLoss",                          P),
+                Req("POST",   "Dashboard | Balance Sheet",             "{{baseUrl}}/api/Dashboard/BalanceSheet",                           P),
+
+                // ── Communication Type ────────────────────────────────────────
+                Req("POST",   "CommunicationType | List",              "{{baseUrl}}/api/CommunicationType/CommunicationTypes",            P),
+                Req("GET",    "CommunicationType | Get",               "{{baseUrl}}/api/CommunicationType/GetCommunicationType/{{commTypeId}}"),
+                Req("DELETE", "CommunicationType | Delete",            "{{baseUrl}}/api/CommunicationType/DeleteCommunicationType/{{commTypeId}}"),
+
+                // ── Tag ───────────────────────────────────────────────────────
+                Req("GET",    "Tag | All Tags",                        "{{baseUrl}}/api/Tag/Tags"),
+                Req("GET",    "Tag | Compact",                         "{{baseUrl}}/api/Tag/TagCompact"),
+                Req("GET",    "Tag | Assigned",                        "{{baseUrl}}/api/Tag/GetAssignedTags/{{entityId}}"),
+                Req("POST",   "Tag | Assign",                          "{{baseUrl}}/api/Tag/PostAssignTag",
+                    """{"entityId":"{{entityId}}","entityType":1,"tagNames":["tag1"]}"""),
+                Req("DELETE", "Tag | Delete By Entity",                "{{baseUrl}}/api/Tag/DeleteByEntityID/{{entityId}}"),
+
+                // ── Notification ──────────────────────────────────────────────
+                Req("POST",   "Message | Inbox",                       "{{baseUrl}}/api/Message/GetInboxList",                            P),
+                Req("POST",   "Message | Sent",                        "{{baseUrl}}/api/Message/GetSentList",                             P),
+                Req("POST",   "Message | Send",                        "{{baseUrl}}/api/Message/SendMessage",                             P),
+                Req("POST",   "Message | Send Email",                  "{{baseUrl}}/api/Message/SendEmail",                               P),
+                Req("POST",   "Message | Send Invoice Email",          "{{baseUrl}}/api/Message/SendInvoiceEmail",                         P),
+                Req("GET",    "Message | Entity Email List",           "{{baseUrl}}/api/Message/GetEntityEmailList/{{entityId}}"),
+
+                // ── Email Template ────────────────────────────────────────────
+                Req("POST",   "EmailTemplate | List",                  "{{baseUrl}}/api/EmailTemplate/GetEmailTemplateList",              P),
+                Req("GET",    "EmailTemplate | Get",                   "{{baseUrl}}/api/EmailTemplate/GetItem/{{emailTemplateId}}"),
+                Req("POST",   "EmailTemplate | Post",                  "{{baseUrl}}/api/EmailTemplate/PostEmailTemplate",                  P),
+                Req("PUT",    "EmailTemplate | Put",                   "{{baseUrl}}/api/EmailTemplate/PutEmailTemplate",                   P),
+                Req("DELETE", "EmailTemplate | Delete",                "{{baseUrl}}/api/EmailTemplate/Delete/{{emailTemplateId}}"),
+                Req("POST",   "EmailTemplate | Clone",                 "{{baseUrl}}/api/EmailTemplate/CloneEmailTemplate",                 P),
+
+                // ── Audit ─────────────────────────────────────────────────────
+                Req("POST",   "EmailHistory | Get Histories",          "{{baseUrl}}/api/EmailHistory/GetEmailHistories",                   P),
+                Req("GET",    "EmailHistory | Entity Histories",       "{{baseUrl}}/api/EmailHistory/GetEntityEmailHistories"),
+                Req("GET",    "EmailHistory | Get",                    "{{baseUrl}}/api/EmailHistory/GetItem/{{emailHistoryId}}"),
+                Req("DELETE", "EmailHistory | Delete",                 "{{baseUrl}}/api/EmailHistory/Delete/{{emailHistoryId}}"),
+            })
+        });
+
+        PersistCollections();
+    }
+
+    // ── Method / URL ─────────────────────────────────────────────────────────
+
+    private void HttpMethod_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        // Show/hide body tab based on method
+        if (HttpReqTabs == null) return;
+        var method = (HttpMethodBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "GET";
+        var bodyTab = HttpReqTabs.Items[2] as System.Windows.Controls.TabItem;
+        if (bodyTab != null)
+            bodyTab.Visibility = method is "POST" or "PUT" or "PATCH"
+                ? Visibility.Visible : Visibility.Collapsed;
+
+        // Persist selected method to active environment
+        if (!_suppressUrlSave && _activeEnvironment != null)
+        {
+            _activeEnvironment.LastMethod = method;
+            PersistEnvironments();
+        }
+    }
+
+    private void HttpUrl_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.Enter)
+        {
+            if (UrlSuggestPopup.IsOpen)
+                UrlSuggestPopup.IsOpen = false;
+            HttpSend_Click(sender, e);
+        }
+        else if (e.Key == System.Windows.Input.Key.Down && UrlSuggestPopup.IsOpen)
+        {
+            // Move keyboard focus into the suggestion list
+            UrlSuggestList.Focus();
+            if (UrlSuggestList.Items.Count > 0)
+                UrlSuggestList.SelectedIndex = 0;
+            e.Handled = true;
+        }
+        else if (e.Key == System.Windows.Input.Key.Escape && UrlSuggestPopup.IsOpen)
+        {
+            UrlSuggestPopup.IsOpen = false;
+            e.Handled = true;
+        }
+    }
+
+    // ── Body type ─────────────────────────────────────────────────────────────
+
+    private void BodyType_Changed(object sender, RoutedEventArgs e)
+    {
+        if (HttpBodyBox == null) return;
+        bool isRaw = BodyRawRb.IsChecked == true;
+        HttpBodyBox.Visibility       = isRaw                              ? Visibility.Visible : Visibility.Collapsed;
+        BodyRawFormatBox.Visibility  = isRaw                              ? Visibility.Visible : Visibility.Collapsed;
+        HttpFormGrid.Visibility      = BodyFormRb.IsChecked     == true   ? Visibility.Visible : Visibility.Collapsed;
+        HttpFormDataGrid.Visibility  = BodyFormDataRb.IsChecked == true   ? Visibility.Visible : Visibility.Collapsed;
+        HttpBinaryPanel.Visibility   = BodyBinaryRb.IsChecked   == true   ? Visibility.Visible : Visibility.Collapsed;
+        HttpGraphQLPanel.Visibility  = BodyGraphQLRb.IsChecked  == true   ? Visibility.Visible : Visibility.Collapsed;
+        UpdateTokenInBodyWarning();
+    }
+
+    private void HttpBodyBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+        => UpdateTokenInBodyWarning();
+
+    private void UpdateTokenInBodyWarning()
+    {
+        if (TokenInBodyWarning == null || HttpBodyBox == null) return;
+        var show = BodyRawRb?.IsChecked == true && IsLikelyBearerToken(HttpBodyBox.Text ?? "");
+        TokenInBodyWarning.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void ClearBody_Click(object sender, RoutedEventArgs e)
+    {
+        HttpBodyBox.Text = "";
+        BodyNoneRb.IsChecked = true;   // switch back to "none"
+    }
+
+    private void HttpBinaryBrowse_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new Microsoft.Win32.OpenFileDialog { Title = "Select file to upload" };
+        if (dlg.ShowDialog() == true)
+            HttpBinaryPathBox.Text = dlg.FileName;
+    }
+
+    // ── Auth type ─────────────────────────────────────────────────────────────
+
+    private void HttpAuthType_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (AuthApiKeyPanel == null) return;
+        AuthApiKeyPanel.Visibility  = Visibility.Collapsed;
+        AuthBearerPanel.Visibility  = Visibility.Collapsed;
+        AuthBasicPanel.Visibility   = Visibility.Collapsed;
+        switch (HttpAuthTypeBox.SelectedIndex)
+        {
+            case 1: AuthApiKeyPanel.Visibility = Visibility.Visible;  break;
+            case 2: AuthBearerPanel.Visibility = Visibility.Visible;  break;
+            case 3: AuthBasicPanel.Visibility  = Visibility.Visible;  break;
+        }
+        SaveAuthToActiveEnv();
+    }
+
+    // Set true while LoadEnvAuthIntoUI is populating fields so we don't save half-loaded state
+    private bool _suppressAuthSave;
+
+    // Called whenever any auth field changes — persists to active environment
+    private void HttpAuthField_Changed(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    { if (!_suppressAuthSave) SaveAuthToActiveEnv(); }
+
+    private void HttpAuthLocation_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    { if (!_suppressAuthSave) SaveAuthToActiveEnv(); }
+
+    private void SaveAuthToActiveEnv()
+    {
+        if (_suppressAuthSave || _activeEnvironment == null) return;
+        _activeEnvironment.AuthTypeIndex      = HttpAuthTypeBox.SelectedIndex;
+        _activeEnvironment.AuthApiKeyName     = AuthApiKeyNameBox.Text;
+        _activeEnvironment.AuthApiKeyValue    = AuthApiKeyValueBox.Text;
+        _activeEnvironment.AuthApiKeyLocation = AuthApiKeyLocationBox.SelectedIndex;
+        _activeEnvironment.AuthBearerToken    = AuthBearerTokenBox.Text;
+        _activeEnvironment.AuthBasicUser      = AuthBasicUserBox.Text;
+        _activeEnvironment.AuthBasicPass      = AuthBasicPassBox.Text;
+        PersistEnvironments();
+    }
+
+    // ── Save URL + Method to active environment whenever they change ──────────
+    private bool _suppressUrlSave;
+
+    private void HttpUrl_Changed(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        if (_suppressUrlSave || _activeEnvironment == null) return;
+        _activeEnvironment.LastUrl = HttpUrlBox.Text ?? "";
+        PersistEnvironments();
+
+        // ── URL autocomplete ─────────────────────────────────────────────────
+        var typed = HttpUrlBox.Text?.Trim() ?? "";
+        var all   = _collections.SelectMany(c => c.Requests).ToList();
+
+        List<Models.SavedHttpRequest> matches;
+        if (string.IsNullOrEmpty(typed))
+        {
+            // Show everything when the box is empty / just focused
+            matches = all;
+        }
+        else
+        {
+            matches = all
+                .Where(r => r.Url.Contains(typed,  StringComparison.OrdinalIgnoreCase)
+                         || r.Name.Contains(typed, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
+
+        UrlSuggestList.ItemsSource = matches;
+        UrlSuggestPopup.IsOpen     = matches.Count > 0;
+    }
+
+    private void HttpUrlBox_GotFocus(object sender, RoutedEventArgs e)
+    {
+        // Show all APIs when the URL box gains focus
+        var all = _collections.SelectMany(c => c.Requests).ToList();
+        UrlSuggestList.ItemsSource = all;
+        UrlSuggestPopup.IsOpen     = all.Count > 0;
+    }
+
+    private void HttpUrlBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        // Small delay so a click on the popup list registers before we close it
+        Dispatcher.InvokeAsync(() => UrlSuggestPopup.IsOpen = false,
+            System.Windows.Threading.DispatcherPriority.Background);
+    }
+
+    private void UrlSuggest_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case System.Windows.Input.Key.Enter:
+                if (UrlSuggestList.SelectedItem is Models.SavedHttpRequest sel)
+                    LoadSuggestedRequest(sel);
+                e.Handled = true;
+                break;
+
+            case System.Windows.Input.Key.Escape:
+                UrlSuggestPopup.IsOpen = false;
+                HttpUrlBox.Focus();
+                e.Handled = true;
+                break;
+
+            case System.Windows.Input.Key.Up:
+                if (UrlSuggestList.SelectedIndex > 0)
+                    UrlSuggestList.SelectedIndex--;
+                UrlSuggestList.ScrollIntoView(UrlSuggestList.SelectedItem);
+                e.Handled = true;
+                break;
+
+            case System.Windows.Input.Key.Down:
+                if (UrlSuggestList.SelectedIndex < UrlSuggestList.Items.Count - 1)
+                    UrlSuggestList.SelectedIndex++;
+                UrlSuggestList.ScrollIntoView(UrlSuggestList.SelectedItem);
+                e.Handled = true;
+                break;
+        }
+    }
+
+    private void UrlSuggest_Select(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (UrlSuggestList.SelectedItem is Models.SavedHttpRequest sel)
+            LoadSuggestedRequest(sel);
+    }
+
+    private void LoadSuggestedRequest(Models.SavedHttpRequest req)
+    {
+        UrlSuggestPopup.IsOpen = false;
+
+        // Method
+        HttpMethodBox.SelectedItem = HttpMethodBox.Items
+            .Cast<System.Windows.Controls.ComboBoxItem>()
+            .FirstOrDefault(i => i.Content?.ToString() == req.Method);
+
+        // URL (suppress double-save)
+        _suppressUrlSave = true;
+        HttpUrlBox.Text  = req.Url;
+        _suppressUrlSave = false;
+
+        // Body
+        HttpBodyBox.Text = req.Body ?? "";
+
+        // Headers
+        _httpHeaders.Clear();
+        foreach (var h in req.Headers)
+            _httpHeaders.Add(new Models.HttpKeyValueRow { Key = h.Key, Value = h.Value, Enabled = h.Enabled });
+        _httpHeaders.Add(new Models.HttpKeyValueRow());
+
+        // Params
+        _httpParams.Clear();
+        foreach (var p in req.Params)
+            _httpParams.Add(new Models.HttpKeyValueRow { Key = p.Key, Value = p.Value, Enabled = p.Enabled });
+        _httpParams.Add(new Models.HttpKeyValueRow());
+
+        // Auth — set the combo and pre-fill whichever field is relevant
+        var authItem = HttpAuthTypeBox.Items
+            .Cast<System.Windows.Controls.ComboBoxItem>()
+            .FirstOrDefault(i => i.Content?.ToString() == req.AuthType);
+        if (authItem != null) HttpAuthTypeBox.SelectedItem = authItem;
+        // Populate the right token/key boxes based on auth type
+        if (req.AuthType == "Bearer Token")
+            AuthBearerTokenBox.Text = req.AuthValue ?? "";
+        else if (req.AuthType == "API Key")
+        {
+            AuthApiKeyNameBox.Text  = req.AuthKey   ?? "";
+            AuthApiKeyValueBox.Text = req.AuthValue ?? "";
+        }
+        else if (req.AuthType == "Basic Auth")
+        {
+            AuthBasicUserBox.Text = req.AuthKey   ?? "";
+            AuthBasicPassBox.Text = req.AuthValue ?? "";
+        }
+
+        // Switch to Params tab so user sees what was loaded
+        HttpUrlBox.Focus();
+    }
+
+
+    // ── Params → URL sync ────────────────────────────────────────────────────
+
+    private void HttpParams_CellEditEnding(object sender, System.Windows.Controls.DataGridCellEditEndingEventArgs e)
+        => Dispatcher.InvokeAsync(SyncParamsToUrl);
+
+    private void SyncParamsToUrl()
+    {
+        var url = HttpUrlBox.Text ?? "";
+        var qi  = url.IndexOf('?');
+        var baseUrl = qi >= 0 ? url[..qi] : url;
+
+        var enabled = _httpParams.Where(p => p.Enabled && !string.IsNullOrWhiteSpace(p.Key)).ToList();
+        if (enabled.Count == 0) { HttpUrlBox.Text = baseUrl; return; }
+
+        var qs = string.Join("&", enabled.Select(p =>
+            $"{Uri.EscapeDataString(p.Key)}={Uri.EscapeDataString(p.Value)}"));
+        HttpUrlBox.Text = $"{baseUrl}?{qs}";
+    }
+
+    // ── Send ──────────────────────────────────────────────────────────────────
+
+    private async void HttpSend_Click(object sender, RoutedEventArgs e)
+    {
+        var url = Interpolate(HttpUrlBox.Text?.Trim() ?? "");
+        if (string.IsNullOrEmpty(url)) { WpfMessageBox.Show("Enter a URL first.", "HTTP Client"); return; }
+
+        // Hard block: body tab has a bearer token — never send it
+        if (TokenInBodyWarning.Visibility == Visibility.Visible)
+        {
+            System.Windows.MessageBox.Show(
+                "⛔  Your Body tab contains a Bearer Token.\n\n" +
+                "1. Clear the Body tab\n" +
+                "2. Go to Auth tab → select Bearer Token\n" +
+                "3. Paste your token there\n\n" +
+                "The token must be in the Auth tab, not the Body.",
+                "Token in Body — Send Blocked",
+                System.Windows.MessageBoxButton.OK,
+                System.Windows.MessageBoxImage.Error);
+            return;
+        }
+
+        // Build the request
+        var method = (HttpMethodBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "GET";
+        var req    = new System.Net.Http.HttpRequestMessage(new System.Net.Http.HttpMethod(method), url);
+
+        // Apply auth
+        ApplyAuth(req);
+
+        // Body — GET / HEAD / DELETE never carry a body (Postman greys it out too)
+        bool methodAllowsBody = method is "POST" or "PUT" or "PATCH";
+
+        // Apply enabled headers (with variable substitution)
+        // Skip Content-Type for bodyless methods — ASP.NET Web API reads it as a signal
+        // that a JSON body is present and crashes trying to parse an empty/absent body.
+        // Also skip rows with empty values (e.g. the default APIKEY placeholder row).
+        foreach (var h in _httpHeaders.Where(h => h.Enabled && !string.IsNullOrWhiteSpace(h.Key)))
+        {
+            var hKey = Interpolate(h.Key).Trim();
+            var hVal = Interpolate(h.Value);
+
+            // Never add Content-Type to a request without a body
+            if (!methodAllowsBody && hKey.Equals("Content-Type", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            // Skip empty-value rows (placeholder rows like the default APIKEY row)
+            if (string.IsNullOrWhiteSpace(hVal)) continue;
+
+            req.Headers.TryAddWithoutValidation(hKey, hVal);
+        }
+
+        if (methodAllowsBody && BodyRawRb.IsChecked == true && !string.IsNullOrWhiteSpace(HttpBodyBox.Text))
+        {
+            var rawBody   = HttpBodyBox.Text.Trim();
+            var rawFormat = (BodyRawFormatBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "JSON";
+            var mimeType  = rawFormat switch
+            {
+                "Text"       => "text/plain",
+                "JavaScript" => "application/javascript",
+                "HTML"       => "text/html",
+                "XML"        => "application/xml",
+                _            => "application/json"
+            };
+            req.Content = new System.Net.Http.StringContent(
+                Interpolate(rawBody), System.Text.Encoding.UTF8, mimeType);
+        }
+        else if (BodyFormRb.IsChecked == true && methodAllowsBody)
+        {
+            var form = _httpForm
+                .Where(r => r.Enabled && !string.IsNullOrWhiteSpace(r.Key))
+                .ToDictionary(r => r.Key, r => r.Value);
+            req.Content = new System.Net.Http.FormUrlEncodedContent(form);
+        }
+        else if (BodyFormDataRb.IsChecked == true && methodAllowsBody)
+        {
+            var multipart = new System.Net.Http.MultipartFormDataContent();
+            foreach (var row in _httpFormData.Where(r => r.Enabled && !string.IsNullOrWhiteSpace(r.Key)))
+                multipart.Add(new System.Net.Http.StringContent(Interpolate(row.Value)), row.Key);
+            req.Content = multipart;
+        }
+        else if (BodyBinaryRb.IsChecked == true && File.Exists(HttpBinaryPathBox.Text))
+        {
+            req.Content = new System.Net.Http.StreamContent(File.OpenRead(HttpBinaryPathBox.Text));
+        }
+        else if (methodAllowsBody && BodyGraphQLRb.IsChecked == true && !string.IsNullOrWhiteSpace(HttpGraphQLQueryBox.Text))
+        {
+            var query     = HttpGraphQLQueryBox.Text.Trim();
+            var variables = HttpGraphQLVariablesBox.Text?.Trim() ?? "{}";
+            var gqlBody   = $"{{\"query\":{System.Text.Json.JsonSerializer.Serialize(query)},\"variables\":{variables}}}";
+            req.Content   = new System.Net.Http.StringContent(gqlBody, System.Text.Encoding.UTF8, "application/json");
+        }
+
+        // UI: busy state — dump the full outgoing request so we can see exactly what's sent
+        HttpSendBtn.IsEnabled    = false;
+        HttpCancelBtn.Visibility = Visibility.Visible;
+        HttpResponseBox.Foreground = (System.Windows.Media.Brush)FindResource("SubText");
+
+        // Read body text ONCE — reused for both the UI preview and the debug log
+        var _bodyText = req.Content != null
+            ? await req.Content.ReadAsStringAsync()
+            : null;
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"──── REQUEST ────────────────────────────────");
+        sb.AppendLine($"{method} {url}");
+        sb.AppendLine();
+        sb.AppendLine("── Request Headers ──");
+        foreach (var h in req.Headers)
+            sb.AppendLine($"  {h.Key}: {string.Join(", ", h.Value)}");
+        if (req.Content != null && _bodyText != null)
+        {
+            foreach (var h in req.Content.Headers)
+                sb.AppendLine($"  {h.Key}: {string.Join(", ", h.Value)}");
+            sb.AppendLine();
+            sb.AppendLine("── Body ──");
+            sb.AppendLine(_bodyText.Length > 200 ? _bodyText[..200] + "…" : _bodyText);
+        }
+        else
+        {
+            sb.AppendLine();
+            sb.AppendLine("── Body: (none) ──");
+        }
+        sb.AppendLine();
+        sb.AppendLine("Sending…");
+        HttpResponseBox.Text = sb.ToString();
+        HttpStatusBadge.Visibility = Visibility.Collapsed;
+        HttpTimingText.Text     = "";
+        HttpSizeText.Text       = "";
+        _respHeaders.Clear();
+
+        _httpCts = new CancellationTokenSource();
+        var sw   = System.Diagnostics.Stopwatch.StartNew();
+
+        // Write full request details to debug log
+        try
+        {
+            var log = new System.Text.StringBuilder();
+            log.AppendLine($"=== {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===");
+            log.AppendLine($"{method} {url}");
+            log.AppendLine("-- Request Headers --");
+            foreach (var h in req.Headers)
+                log.AppendLine($"  {h.Key}: {string.Join(", ", h.Value)}");
+            if (req.Content != null)
+            {
+                foreach (var h in req.Content.Headers)
+                    log.AppendLine($"  {h.Key}: {string.Join(", ", h.Value)}");
+                var bodyText = _bodyText ?? "";
+                log.AppendLine($"-- Body ({bodyText.Length} chars) --");
+                log.AppendLine(bodyText.Length > 500 ? bodyText[..500] + "…" : bodyText);
+            }
+            else log.AppendLine("-- Body: (none) --");
+            File.AppendAllText(
+                Path.Combine(AppContext.BaseDirectory, "request_debug.log"),
+                log.ToString() + Environment.NewLine);
+        }
+        catch { /* never block the actual send */ }
+
+        try
+        {
+            using var resp = await _httpClient.SendAsync(req, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, _httpCts.Token);
+            sw.Stop();
+
+            // Populate response headers
+            foreach (var h in resp.Headers)
+                _respHeaders.Add(new Models.HttpHeaderEntry { Key = h.Key, Value = string.Join(", ", h.Value) });
+            foreach (var h in resp.Content.Headers)
+                _respHeaders.Add(new Models.HttpHeaderEntry { Key = h.Key, Value = string.Join(", ", h.Value) });
+
+            var bytes = await resp.Content.ReadAsByteArrayAsync(_httpCts.Token);
+            _lastRawResponse = System.Text.Encoding.UTF8.GetString(bytes);
+
+            // Pretty-print fallback (used when WebView2 not ready)
+            _lastPrettyResponse = await Task.Run(() => TryPrettyJson(_lastRawResponse));
+
+            var contentType = resp.Content.Headers.ContentType?.MediaType ?? "";
+            ShowHttpResponse(resp.StatusCode, sw.ElapsedMilliseconds, bytes.Length, contentType);
+
+            // ── Log URL + token (deduplicated) ──────────────────────────────
+            var bearerToken = AuthBearerTokenBox.Text?.Trim() ?? "";
+            Services.RequestLogService.Append(new Models.RequestLogEntry
+            {
+                Url      = url,
+                Method   = method,
+                Token    = bearerToken,
+                AuthType = (HttpAuthTypeBox.SelectedIndex) switch { 1 => "API Key", 2 => "Bearer Token", 3 => "Basic Auth", _ => "No Auth" }
+            });
+            RefreshRecentPanel();
+        }
+        catch (OperationCanceledException)
+        {
+            HttpResponseBox.Text = "Request cancelled.";
+            HttpResponseBox.Foreground = (System.Windows.Media.Brush)FindResource("SubText");
+        }
+        catch (Exception ex)
+        {
+            HttpResponseBox.Text = $"Error: {ex.Message}";
+            HttpResponseBox.Foreground = System.Windows.Media.Brushes.IndianRed;
+        }
+        finally
+        {
+            HttpSendBtn.IsEnabled    = true;
+            HttpCancelBtn.Visibility = Visibility.Collapsed;
+            _httpCts = null;
+        }
+    }
+
+    private void ApplyAuth(System.Net.Http.HttpRequestMessage req)
+    {
+        switch (HttpAuthTypeBox.SelectedIndex)
+        {
+            case 1: // API Key
+                var keyName = Interpolate(AuthApiKeyNameBox.Text?.Trim() ?? "APIKEY");
+                var keyVal  = Interpolate(AuthApiKeyValueBox.Text?.Trim() ?? "");
+                if (!string.IsNullOrEmpty(keyVal))
+                {
+                    if (AuthApiKeyLocationBox.SelectedIndex == 0)
+                        req.Headers.TryAddWithoutValidation(keyName, keyVal);
+                    else
+                    {
+                        var sep = req.RequestUri!.Query.Length > 0 ? "&" : "?";
+                        req.RequestUri = new Uri($"{req.RequestUri}{sep}{Uri.EscapeDataString(keyName)}={Uri.EscapeDataString(keyVal)}");
+                    }
+                }
+                break;
+            case 2: // Bearer — use raw value, never run through Interpolate
+                    // Interpolate collapses // which corrupts base64 tokens that contain //
+                var token = AuthBearerTokenBox.Text?.Trim() ?? "";
+                if (!string.IsNullOrEmpty(token))
+                    req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+                break;
+            case 3: // Basic — same, use raw values
+                var user = AuthBasicUserBox.Text?.Trim() ?? "";
+                var pass = AuthBasicPassBox.Text?.Trim() ?? "";
+                if (!string.IsNullOrEmpty(user))
+                {
+                    var encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"{user}:{pass}"));
+                    req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", encoded);
+                }
+                break;
+        }
+    }
+
+    private void ShowHttpResponse(System.Net.HttpStatusCode code, long ms, int bytes, string contentType = "")
+    {
+        _lastContentType = contentType;
+
+        var statusInt = (int)code;
+        HttpStatusText.Text = $"{statusInt} {code}";
+        HttpStatusBadge.Background = statusInt < 300
+            ? new WpfBrush(WpfColor.FromRgb(0x16, 0xa3, 0x4a))
+            : statusInt < 400
+                ? new WpfBrush(WpfColor.FromRgb(0xd9, 0x77, 0x06))
+                : new WpfBrush(WpfColor.FromRgb(0xdc, 0x26, 0x26));
+        HttpStatusText.Foreground  = System.Windows.Media.Brushes.White;
+        HttpStatusBadge.Visibility = Visibility.Visible;
+        HttpTimingText.Text = $"{ms} ms";
+        HttpSizeText.Text   = bytes < 1024 ? $"{bytes} B" : $"{bytes / 1024.0:F1} KB";
+
+        if (RespLangLabel != null)
+            RespLangLabel.Text = DetectLang(_lastRawResponse, contentType).ToUpperInvariant();
+
+        RefreshResponseView();
+    }
+
+    // ── Response viewer helpers ───────────────────────────────────────────────
+
+    private void RefreshResponseView()
+    {
+        if (HttpPrettyView == null || HttpResponseBox == null || HttpPreviewView == null) return;
+        if (RespPrettyRb?.IsChecked  == true) ShowPrettyView();
+        else if (RespRawRb?.IsChecked == true) ShowRawView();
+        else                                   ShowPreviewView();
+    }
+
+    // WebView2 NavigateToString limit is ~2 MB — truncate HTML payload to stay safe
+    private const int WebViewMaxChars = 1_500_000;
+
+    private void ShowPrettyView()
+    {
+        if (_prettyViewReady)
+        {
+            var html = BuildPrettyHtml(_lastRawResponse, _lastContentType, _isDarkMode);
+
+            if (html.Length > WebViewMaxChars)
+            {
+                // Response too large for WebView2 pretty view — fall back to plain TextBox
+                HttpPrettyView.Visibility  = Visibility.Collapsed;
+                HttpResponseBox.Visibility = Visibility.Visible;
+                HttpPreviewView.Visibility = Visibility.Collapsed;
+                HttpResponseBox.Foreground = (System.Windows.Media.Brush)FindResource("PrimaryText");
+                HttpResponseBox.Text = _lastPrettyResponse.Length > 0
+                    ? _lastPrettyResponse
+                    : _lastRawResponse;
+                return;
+            }
+
+            HttpPrettyView.Visibility  = Visibility.Visible;
+            HttpResponseBox.Visibility = Visibility.Collapsed;
+            HttpPreviewView.Visibility = Visibility.Collapsed;
+            HttpPrettyView.NavigateToString(html);
+        }
+        else
+        {
+            // WebView2 not yet ready — fall back to plain TextBox
+            HttpPrettyView.Visibility  = Visibility.Collapsed;
+            HttpResponseBox.Visibility = Visibility.Visible;
+            HttpPreviewView.Visibility = Visibility.Collapsed;
+            HttpResponseBox.Foreground = (System.Windows.Media.Brush)FindResource("PrimaryText");
+            HttpResponseBox.Text = string.IsNullOrEmpty(_lastRawResponse)
+                ? "— Send a request to see the response —"
+                : (!string.IsNullOrEmpty(_lastPrettyResponse) ? _lastPrettyResponse : _lastRawResponse);
+        }
+    }
+
+    private void ShowRawView()
+    {
+        HttpPrettyView.Visibility  = Visibility.Collapsed;
+        HttpResponseBox.Visibility = Visibility.Visible;
+        HttpPreviewView.Visibility = Visibility.Collapsed;
+        HttpResponseBox.Foreground = (System.Windows.Media.Brush)FindResource("PrimaryText");
+        HttpResponseBox.Text = string.IsNullOrEmpty(_lastRawResponse)
+            ? "— Send a request to see the response —"
+            : Minify(_lastRawResponse);   // compact/minified — visually distinct from Pretty
+    }
+
+    private void ShowPreviewView()
+    {
+        HttpPrettyView.Visibility  = Visibility.Collapsed;
+        HttpResponseBox.Visibility = Visibility.Collapsed;
+        HttpPreviewView.Visibility = Visibility.Visible;
+        if (!_previewViewReady) return;
+
+        if (string.IsNullOrEmpty(_lastRawResponse))
+        {
+            HttpPreviewView.NavigateToString(
+                "<html><body style='font-family:sans-serif;color:#999;padding:24px'>— Send a request to see the preview —</body></html>");
+            return;
+        }
+
+        // WebView2 NavigateToString has a ~2 MB limit — if the response is larger,
+        // fall back to the Raw text view rather than throwing.
+        if (_lastRawResponse.Length > WebViewMaxChars)
+        {
+            bool d = _isDarkMode;
+            HttpPreviewView.NavigateToString(
+                $"<html><body style='margin:24px;background:{(d ? "#1E1E2E" : "#F8F8FA")};" +
+                $"font-family:Consolas,monospace;color:{(d ? "#F38BA8" : "#DC2626")};font-size:13px'>" +
+                $"⚠ Response is too large for the Preview view ({_lastRawResponse.Length / 1024} KB).<br/><br/>" +
+                $"Switch to <b>Raw</b> or <b>Pretty</b> to see the full response.</body></html>");
+            return;
+        }
+
+        HttpPreviewView.NavigateToString(_lastRawResponse);
+    }
+
+    private void ShowPrettyPlaceholder()
+    {
+        if (!_prettyViewReady) return;
+        bool d = _isDarkMode;
+        HttpPrettyView.NavigateToString(
+            $"<html><body style='margin:0;background:{(d?"#1E1E2E":"#F8F8FA")};display:flex;" +
+            $"align-items:center;justify-content:center;height:100vh'>" +
+            $"<span style='font-family:Consolas,monospace;color:{(d?"#6C7086":"#AAAAAA")};font-size:13px'>" +
+            $"— Send a request to see the response —</span></body></html>");
+    }
+
+    // ── WebView2 Loaded events ────────────────────────────────────────────────
+
+    private async void HttpPrettyView_Loaded(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            await HttpPrettyView.EnsureCoreWebView2Async();
+            _prettyViewReady = true;
+            if (string.IsNullOrEmpty(_lastRawResponse))
+                ShowPrettyPlaceholder();
+            else
+                ShowPrettyView();
+        }
+        catch { /* WebView2 runtime unavailable — falls back to TextBox */ }
+    }
+
+    private async void HttpPreviewView_Loaded(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            await HttpPreviewView.EnsureCoreWebView2Async();
+            _previewViewReady = true;
+        }
+        catch { }
+    }
+
+    // ── Language detection ────────────────────────────────────────────────────
+
+    private static string DetectLang(string content, string contentType)
+    {
+        if (contentType.Contains("json") ||
+            (!string.IsNullOrEmpty(content) &&
+             content.AsSpan().TrimStart() is var t &&
+             (t.StartsWith("{") || t.StartsWith("["))))
+            return "json";
+        if (contentType.Contains("html"))       return "html";
+        if (contentType.Contains("xml"))        return "xml";
+        if (contentType.Contains("javascript")) return "javascript";
+        return "text";
+    }
+
+    // ── Syntax-highlighted HTML builder ──────────────────────────────────────
+
+    private static string BuildPrettyHtml(string content, string contentType, bool dark)
+    {
+        string bg  = dark ? "#1E1E2E" : "#FFFFFF";
+        string fg  = dark ? "#CDD6F4" : "#24292E";
+
+        if (string.IsNullOrEmpty(content))
+            return $"<html><body style='margin:0;background:{bg};display:flex;align-items:center;" +
+                   $"justify-content:center;height:100vh'><span style='font-family:Consolas,monospace;" +
+                   $"color:{(dark?"#6C7086":"#AAAAAA")};font-size:13px'>— Send a request to see the response —</span></body></html>";
+
+        string lang    = DetectLang(content, contentType);
+        string body    = lang == "json" ? HighlightJson(content) : RespHtmlEsc(content);
+        string lnBg    = dark ? "#181825" : "#F6F8FA";
+        string lnCol   = dark ? "#45475A" : "#BBBBBB";
+        string border  = dark ? "#313244" : "#E1E4E8";
+        string selBg   = dark ? "#45475A" : "#B3D7FF";
+        string scroll  = dark ? "#45475A" : "#C0C0C0";
+
+        return $@"<!DOCTYPE html>
+<html>
+<head>
+<meta charset='utf-8'>
+<style>
+html,body{{margin:0;padding:0;height:100%;overflow:hidden;}}
+*{{box-sizing:border-box;}}
+body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier New',monospace;font-size:13px;line-height:1.65;}}
+::selection{{background:{selBg};}}
+::-webkit-scrollbar{{width:8px;height:8px;}}
+::-webkit-scrollbar-track{{background:transparent;}}
+::-webkit-scrollbar-thumb{{background:{scroll};border-radius:4px;}}
+#wrap{{display:flex;height:100vh;overflow:auto;}}
+#ln{{flex-shrink:0;padding:10px 12px;text-align:right;color:{lnCol};background:{lnBg};
+     border-right:1px solid {border};user-select:none;white-space:pre;line-height:1.65;min-width:50px;}}
+#code{{padding:10px 16px;flex:1;white-space:pre;outline:none;}}
+.k{{color:{(dark?"#89B4FA":"#032F62")};font-weight:500;}}
+.s{{color:{(dark?"#A6E3A1":"#22863A")};}}
+.n{{color:{(dark?"#FAB387":"#E36209")};}}
+.b{{color:{(dark?"#89DCEB":"#005CC5")};}}
+.p{{color:{(dark?"#CDD6F4":"#24292E")};opacity:0.6;}}
+</style>
+</head>
+<body>
+<div id='wrap'>
+  <div id='ln'></div>
+  <div id='code'>{body}</div>
+</div>
+<script>
+(function(){{
+  var lines=document.getElementById('code').textContent.split('\n').length;
+  var s='';for(var i=1;i<=lines;i++)s+=i+'\n';
+  document.getElementById('ln').textContent=s;
+}})();
+</script>
+</body>
+</html>";
+    }
+
+    // ── JSON tokenizer/highlighter ────────────────────────────────────────────
+
+    private static string HighlightJson(string json)
+    {
+        string pretty;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            pretty = System.Text.Json.JsonSerializer.Serialize(doc.RootElement, PrettyJson);
+        }
+        catch { pretty = json; }
+
+        var sb = new System.Text.StringBuilder(pretty.Length * 2);
+        int i = 0, n = pretty.Length;
+
+        while (i < n)
+        {
+            char c = pretty[i];
+
+            if (c == '"')
+            {
+                // Collect full JSON string literal
+                var tok = new System.Text.StringBuilder();
+                tok.Append('"');
+                i++;
+                while (i < n)
+                {
+                    char cc = pretty[i];
+                    if (cc == '\\' && i + 1 < n) { tok.Append(cc); tok.Append(pretty[++i]); i++; }
+                    else if (cc == '"')           { tok.Append('"'); i++; break; }
+                    else                          { tok.Append(cc); i++; }
+                }
+                // Key if followed (after optional spaces) by ':'
+                int j = i;
+                while (j < n && (pretty[j] == ' ' || pretty[j] == '\t')) j++;
+                var cls = (j < n && pretty[j] == ':') ? "k" : "s";
+                sb.Append($"<span class='{cls}'>{RespHtmlEsc(tok.ToString())}</span>");
+            }
+            else if (c == 't' && i + 4 <= n && pretty[i..(i+4)] == "true")
+                { sb.Append("<span class='b'>true</span>");  i += 4; }
+            else if (c == 'f' && i + 5 <= n && pretty[i..(i+5)] == "false")
+                { sb.Append("<span class='b'>false</span>"); i += 5; }
+            else if (c == 'n' && i + 4 <= n && pretty[i..(i+4)] == "null")
+                { sb.Append("<span class='b'>null</span>");  i += 4; }
+            else if (char.IsDigit(c) || (c == '-' && i + 1 < n && char.IsDigit(pretty[i + 1])))
+            {
+                int s = i; if (c == '-') i++;
+                while (i < n && (char.IsDigit(pretty[i]) || pretty[i] == '.' ||
+                       ((pretty[i] == 'e' || pretty[i] == 'E')) ||
+                       ((pretty[i] == '+' || pretty[i] == '-') && i > 0 &&
+                        (pretty[i-1] == 'e' || pretty[i-1] == 'E')))) i++;
+                sb.Append($"<span class='n'>{pretty[s..i]}</span>");
+            }
+            else if (c is '{' or '}' or '[' or ']' or ',' or ':')
+                { sb.Append($"<span class='p'>{RespHtmlEsc(c)}</span>"); i++; }
+            else
+                { sb.Append(RespHtmlEsc(c)); i++; }
+        }
+        return sb.ToString();
+    }
+
+    private static string RespHtmlEsc(string s)
+        => s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
+    private static string RespHtmlEsc(char c) => RespHtmlEsc(c.ToString());
+
+    private static string TryPrettyJson(string raw)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(raw);
+            return System.Text.Json.JsonSerializer.Serialize(doc.RootElement, PrettyJson);
+        }
+        catch { return ""; }
+    }
+
+    private void RespView_Changed(object sender, RoutedEventArgs e)
+    {
+        if (HttpPrettyView == null || HttpResponseBox == null || HttpPreviewView == null) return;
+        RefreshResponseView();
+    }
+
+    private void RespWordWrap_Changed(object sender, RoutedEventArgs e)
+    {
+        bool wrap = RespWordWrapChk?.IsChecked == true;
+        HttpResponseBox.TextWrapping = wrap ? TextWrapping.Wrap : TextWrapping.NoWrap;
+        if (_prettyViewReady && HttpPrettyView.CoreWebView2 != null)
+            _ = HttpPrettyView.CoreWebView2.ExecuteScriptAsync(
+                wrap ? "document.getElementById('code').style.whiteSpace='pre-wrap';"
+                     : "document.getElementById('code').style.whiteSpace='pre';");
+    }
+
+    // ── Cancel ────────────────────────────────────────────────────────────────
+
+    private void HttpCancel_Click(object sender, RoutedEventArgs e)
+        => _httpCts?.Cancel();
+
+    // ── Copy / Save response ──────────────────────────────────────────────────
+
+    private void HttpCopyResponse_Click(object sender, RoutedEventArgs e)
+    {
+        var text = RespRawRb?.IsChecked == true ? _lastRawResponse
+                   : !string.IsNullOrEmpty(_lastPrettyResponse) ? _lastPrettyResponse
+                   : _lastRawResponse;
+        if (!string.IsNullOrEmpty(text))
+            System.Windows.Clipboard.SetText(text);
+    }
+
+    private void HttpSaveResponse_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Title      = "Save Response",
+            Filter     = "JSON files (*.json)|*.json|Text files (*.txt)|*.txt|All files (*.*)|*.*",
+            DefaultExt = ".json",
+            FileName   = "response"
+        };
+        if (dlg.ShowDialog() == true)
+            File.WriteAllText(dlg.FileName, HttpResponseBox.Text);
+    }
+
+    // ── Save request ──────────────────────────────────────────────────────────
+
+    // ── Save to Collection ────────────────────────────────────────────────────
+
+    private void HttpSaveToCollection_Click(object sender, RoutedEventArgs e)
+    {
+        var method = (HttpMethodBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "GET";
+        var url    = HttpUrlBox.Text?.Trim() ?? "";
+
+        var dlg = new CollectionSaveDialog(_collections)
+        {
+            Owner = this
+        };
+        if (dlg.ShowDialog() != true) return;
+
+        var req = new Models.SavedHttpRequest
+        {
+            Method   = method,
+            Url      = url,
+            Name     = dlg.RequestName,
+            Body     = HttpBodyBox.Text ?? "",
+            Params   = [.. _httpParams],
+            Headers  = [.. _httpHeaders],
+            Form     = [.. _httpForm],
+            AuthType = (HttpAuthTypeBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "No Auth",
+        };
+
+        // Target collection
+        var col = dlg.TargetCollection;
+        if (col == null)
+        {
+            // User wants a new collection
+            col = new Models.HttpCollection { Name = dlg.NewCollectionName };
+            _collections.Add(col);
+        }
+
+        // Update or add
+        var existing = col.Requests.FirstOrDefault(r => r.Id == req.Id);
+        if (existing != null)
+        {
+            var idx = col.Requests.IndexOf(existing);
+            col.Requests[idx] = req;
+        }
+        else
+        {
+            col.Requests.Add(req);
+        }
+
+        PersistCollections();
+        SetStatus($"Saved '{req.Name}' to collection '{col.Name}'.");
+    }
+
+    // ── Group header toggle ───────────────────────────────────────────────────
+
+    private void GroupHeader_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if ((sender as System.Windows.Controls.Border)?.Tag is not Models.RequestGroup grp) return;
+        grp.Expanded = !grp.Expanded;
+
+        // Persist expand state so it survives re-group
+        foreach (var col in _collections)
+        {
+            if (col.Requests.Any(r => r.Category == grp.Category))
+                col.SetGroupExpanded(grp.Category, grp.Expanded);
+        }
+    }
+
+    // ── Load request from sidebar ─────────────────────────────────────────────
+
+    private void RequestItem_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if ((sender as System.Windows.Controls.Border)?.Tag is not Models.SavedHttpRequest req) return;
+        LoadRequestIntoEditor(req);
+    }
+
+    private void LoadRequestIntoEditor(Models.SavedHttpRequest req)
+    {
+        // Method
+        foreach (System.Windows.Controls.ComboBoxItem item in HttpMethodBox.Items)
+        {
+            if (item.Content?.ToString() == req.Method)
+            { HttpMethodBox.SelectedItem = item; break; }
+        }
+
+        // URL — store raw template; suppress TextChanged save so resolved display
+        // doesn't overwrite the {{baseUrl}} template in LastUrl
+        _suppressUrlSave = true;
+        if (_activeEnvironment != null) _activeEnvironment.LastUrl = req.Url;
+        HttpUrlBox.Text  = Interpolate(req.Url);
+        _suppressUrlSave = false;
+        // Load body — auto-clear if it looks like a bearer token accidentally saved there
+        var savedBody = req.Body ?? "";
+        if (IsLikelyBearerToken(savedBody))
+        {
+            savedBody  = "";
+            req.Body   = "";
+            PersistCollections();   // fix the saved request so it won't happen again
+        }
+        HttpBodyBox.Text = savedBody;
+        if (!string.IsNullOrEmpty(savedBody)) BodyRawRb.IsChecked = true;
+
+        _httpParams.Clear();
+        foreach (var p in req.Params)  _httpParams.Add(p);
+
+        _httpHeaders.Clear();
+        foreach (var h in req.Headers) _httpHeaders.Add(h);
+
+        _httpForm.Clear();
+        foreach (var f in req.Form)    _httpForm.Add(f);
+
+        // Auth — apply request-level auth to the panel if set; otherwise keep the
+        // environment's auth (already loaded by LoadEnvAuthIntoUI).
+        if (req.AuthType is not ("No Auth" or "" or null))
+        {
+            HttpAuthTypeBox.SelectionChanged -= HttpAuthType_Changed;
+            HttpAuthTypeBox.SelectedIndex = req.AuthType switch
+            {
+                "API Key"      => 1,
+                "Bearer Token" => 2,
+                "Basic Auth"   => 3,
+                _              => 0
+            };
+            AuthApiKeyNameBox.Text  = req.AuthKey;
+            AuthApiKeyValueBox.Text = req.AuthValue;
+            AuthBearerTokenBox.Text = req.AuthType == "Bearer Token" ? req.AuthValue : AuthBearerTokenBox.Text;
+            UpdateHttpAuthPanels(HttpAuthTypeBox.SelectedIndex);
+            HttpAuthTypeBox.SelectionChanged += HttpAuthType_Changed;
+        }
+    }
+
+    private void UpdateHttpAuthPanels(int idx)
+    {
+        if (AuthApiKeyPanel == null || AuthBearerPanel == null || AuthBasicPanel == null) return;
+        AuthApiKeyPanel.Visibility = idx == 1 ? Visibility.Visible : Visibility.Collapsed;
+        AuthBearerPanel.Visibility = idx == 2 ? Visibility.Visible : Visibility.Collapsed;
+        AuthBasicPanel.Visibility  = idx == 3 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    // ── API count badge ───────────────────────────────────────────────────────
+
+    private void RefreshApiCount()
+    {
+        var total = _collections.Sum(c => c.Requests.Count);
+        if (ApiCountLabel != null)
+            ApiCountLabel.Text = total.ToString("N0");
+        RefreshOverviewApiKpis();
+    }
+
+    // ── Merchants tab ─────────────────────────────────────────────────────────
+
+    private readonly System.Collections.ObjectModel.ObservableCollection<Models.Merchant> _merchants = [];
+    private List<Models.Merchant> _allMerchants = [];
+    private Models.Merchant? _selectedMerchant;
+    private string _merchantStatusFilter = "All"; // "All" | "Active" | "Inactive" | "Suspended"
+
+    // Pinned merchant IDs (persists across re-loads within a session)
+    private const string DefaultPinnedMerchantId = "t1_mer_626f798aec3d7dea43bb707";
+    private readonly HashSet<string> _pinnedMerchantIds = new(StringComparer.OrdinalIgnoreCase)
+        { DefaultPinnedMerchantId };
+
+    // Sort state for Merchants tab
+    private string? _mSortColumn    = null;
+    private bool    _mSortAscending = true;
+
+    private async void LoadMerchants_Click(object sender, RoutedEventArgs e)
+    {
+        var apiKey   = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+        var envLabel = IsSandbox ? "Sandbox" : "Production";
+
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            WpfMessageBox.Show($"Enter your {envLabel} API key in the Settings tab first.",
+                "Load Merchants", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        LoadMerchantsBtn.IsEnabled = false;
+        LoadMerchantsBtn.Content   = "⟳  Loading…";
+        MerchantEmptyState.Visibility = Visibility.Visible;
+        MerchantEmptyText.Text        = $"Fetching merchants from {envLabel} (loading all pages)…";
+        MerchantList.ItemsSource = null;
+        MerchantDetailPanel.Visibility = Visibility.Collapsed;
+        MerchantDetailEmpty.Visibility = Visibility.Visible;
+
+        try
+        {
+            var env     = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service = new PayrixService(apiKey, env);
+
+            var (merchants, _, error) = await service.GetMerchantsAsync(100);
+
+            if (error != null)
+            {
+                MerchantEmptyText.Text = $"Error: {error}";
+                WpfMessageBox.Show($"Failed to load merchants:\n\n{error}", "Load Merchants",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
+            // Restore pin state from session set
+            foreach (var m in merchants)
+                m.IsPinned = _pinnedMerchantIds.Contains(m.Id);
+
+            // Ensure default-pinned merchant is in the list (add placeholder if API omitted it)
+            if (merchants.All(m => m.Id != DefaultPinnedMerchantId))
+            {
+                merchants.Insert(0, new Models.Merchant
+                {
+                    Id       = DefaultPinnedMerchantId,
+                    Name     = DefaultPinnedMerchantId,
+                    IsPinned = true,
+                    Status   = 0,
+                });
+            }
+
+            _allMerchants = merchants;
+            _mSortColumn = null;
+            ResetMSortArrows();
+            ApplyMerchantFilter(MerchantSearchBox.Text);
+            OnPropertyChanged(nameof(DashActiveMerchants));
+
+            MerchantSubtitle.Text = $"{merchants.Count} merchant(s) in {envLabel}";
+            MerchantEnvLabel.Text = envLabel;
+
+            if (merchants.Count == 0)
+                MerchantEmptyText.Text = $"No merchants found in {envLabel}.";
+            else
+                MerchantEmptyState.Visibility = Visibility.Collapsed;
+        }
+        catch (Exception ex)
+        {
+            MerchantEmptyText.Text = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            LoadMerchantsBtn.IsEnabled = true;
+            LoadMerchantsBtn.Content   = "⟳  Load Merchants";
+        }
+    }
+
+    private void ApplyMerchantFilter(string? query)
+    {
+        // Status filter
+        var byStatus = _merchantStatusFilter switch
+        {
+            "Active"    => _allMerchants.Where(m => m.Status == 1).ToList(),
+            "Inactive"  => _allMerchants.Where(m => m.Status == 2).ToList(),
+            "Suspended" => _allMerchants.Where(m => m.Status == 3).ToList(),
+            _           => _allMerchants.ToList()
+        };
+
+        // Text search
+        var searched = string.IsNullOrWhiteSpace(query)
+            ? byStatus
+            : byStatus.Where(m =>
+                m.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                m.Id.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                (m.Descriptor?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (m.Email?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false)).ToList();
+
+        // Sort — pinned always at top regardless
+        var pinned = searched.Where(m =>  m.IsPinned).ToList();
+        var rest   = searched.Where(m => !m.IsPinned).ToList();
+
+        IEnumerable<Models.Merchant> sorted = _mSortColumn switch
+        {
+            "DisplayName" => _mSortAscending
+                ? rest.OrderBy(m => m.DisplayName, StringComparer.OrdinalIgnoreCase)
+                : rest.OrderByDescending(m => m.DisplayName, StringComparer.OrdinalIgnoreCase),
+            "Descriptor"  => _mSortAscending
+                ? rest.OrderBy(m => m.Descriptor ?? "", StringComparer.OrdinalIgnoreCase)
+                : rest.OrderByDescending(m => m.Descriptor ?? "", StringComparer.OrdinalIgnoreCase),
+            "Status"      => _mSortAscending ? rest.OrderBy(m => m.Status)            : rest.OrderByDescending(m => m.Status),
+            "KycCode"     => _mSortAscending ? rest.OrderBy(m => m.Kyc?.Status ?? 99) : rest.OrderByDescending(m => m.Kyc?.Status ?? 99),
+            "Created"     => _mSortAscending ? rest.OrderBy(m => m.Created)           : rest.OrderByDescending(m => m.Created),
+            _             => rest
+        };
+
+        var filtered = pinned.Concat(sorted).ToList();
+
+        MerchantList.ItemsSource = filtered;
+        MerchantEmptyState.Visibility = filtered.Count == 0 && _allMerchants.Count > 0
+            ? Visibility.Visible : Visibility.Collapsed;
+        if (filtered.Count == 0 && _allMerchants.Count > 0)
+            MerchantEmptyText.Text = _merchantStatusFilter == "All"
+                ? "No merchants match your search."
+                : $"No {_merchantStatusFilter.ToLower()} merchants found.";
+    }
+
+    // ── Merchant sort ─────────────────────────────────────────────────────────
+
+    private void MSort_Click(object sender, RoutedEventArgs e)
+    {
+        var column = (sender as System.Windows.Controls.Button)?.Tag?.ToString();
+        if (string.IsNullOrEmpty(column)) return;
+
+        if (_mSortColumn == column) _mSortAscending = !_mSortAscending;
+        else { _mSortColumn = column; _mSortAscending = true; }
+
+        ResetMSortArrows();
+        var arrow = _mSortAscending ? " ▲" : " ▼";
+        var btn = column switch
+        {
+            "DisplayName" => MSortName,
+            "Descriptor"  => MSortDescriptor,
+            "Status"      => MSortStatus,
+            "KycCode"     => MSortKyc,
+            "Created"     => MSortCreated,
+            _             => null
+        };
+        if (btn != null)
+        {
+            var label = column switch
+            {
+                "DisplayName" => "NAME", "Descriptor" => "DESCRIPTOR",
+                "Status" => "STATUS", "KycCode" => "KYC", "Created" => "CREATED", _ => column
+            };
+            btn.Content = label + arrow;
+        }
+
+        ApplyMerchantFilter(MerchantSearchBox.Text);
+    }
+
+    private void ResetMSortArrows()
+    {
+        MSortName.Content       = "NAME";
+        MSortDescriptor.Content = "DESCRIPTOR";
+        MSortStatus.Content     = "STATUS";
+        MSortKyc.Content        = "KYC";
+        MSortCreated.Content    = "CREATED";
+    }
+
+    // ── Pin / Unpin ───────────────────────────────────────────────────────────
+
+    private void PinMerchant_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        var id = (sender as System.Windows.Controls.Button)?.Tag?.ToString();
+        if (string.IsNullOrEmpty(id)) return;
+
+        var m = _allMerchants.FirstOrDefault(x => x.Id == id);
+        if (m == null) return;
+
+        m.IsPinned = !m.IsPinned;
+        if (m.IsPinned) _pinnedMerchantIds.Add(id);
+        else            _pinnedMerchantIds.Remove(id);
+
+        // Re-apply so pinned row floats to top immediately
+        ApplyMerchantFilter(MerchantSearchBox.Text);
+        SetStatus(m.IsPinned ? $"📌 Pinned {m.DisplayName}" : $"Unpinned {m.DisplayName}");
+    }
+
+    private void MerchantFilter_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if ((sender as System.Windows.Controls.Border)?.Tag is not string tag) return;
+        _merchantStatusFilter = tag;
+
+        // Reset all pill styles
+        static void Reset(System.Windows.Controls.Border b, System.Windows.Media.Brush bg, System.Windows.Media.Brush border, System.Windows.Media.Brush fg)
+        {
+            b.Background   = bg;
+            b.BorderBrush  = border;
+            if (b.Child is System.Windows.Controls.TextBlock tb) tb.Foreground = fg;
+        }
+
+        var inactiveBg     = (System.Windows.Media.Brush)(TryFindResource("InputBg")    ?? System.Windows.Media.Brushes.Transparent);
+        var inactiveBorder = (System.Windows.Media.Brush)(TryFindResource("CardBorder") ?? System.Windows.Media.Brushes.Gray);
+        var inactiveFg     = (System.Windows.Media.Brush)(TryFindResource("SubText")    ?? System.Windows.Media.Brushes.Gray);
+
+        Reset(MerchantFilterAllBorder,       inactiveBg, inactiveBorder, inactiveFg);
+        Reset(MerchantFilterActiveBorder,    inactiveBg, inactiveBorder, inactiveFg);
+        Reset(MerchantFilterInactiveBorder,  inactiveBg, inactiveBorder, inactiveFg);
+        Reset(MerchantFilterSuspendedBorder, inactiveBg, inactiveBorder, inactiveFg);
+
+        // Highlight the selected pill
+        var (activeBg, activeBorder, activeFg) = tag switch
+        {
+            "Active"    => (new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(34, 197, 94)),
+                            (System.Windows.Media.Brush)new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(22, 163, 74)),
+                            (System.Windows.Media.Brush)System.Windows.Media.Brushes.White),
+            "Inactive"  => (new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(156, 163, 175)),
+                            (System.Windows.Media.Brush)new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(107, 114, 128)),
+                            (System.Windows.Media.Brush)System.Windows.Media.Brushes.White),
+            "Suspended" => (new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(245, 158, 11)),
+                            (System.Windows.Media.Brush)new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(217, 119, 6)),
+                            (System.Windows.Media.Brush)System.Windows.Media.Brushes.White),
+            _           => (new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(79, 70, 229)),
+                            (System.Windows.Media.Brush)new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(67, 56, 202)),
+                            (System.Windows.Media.Brush)System.Windows.Media.Brushes.White),
+        };
+
+        var activePill = tag switch
+        {
+            "Active"    => MerchantFilterActiveBorder,
+            "Inactive"  => MerchantFilterInactiveBorder,
+            "Suspended" => MerchantFilterSuspendedBorder,
+            _           => MerchantFilterAllBorder
+        };
+        activePill.Background  = activeBg;
+        activePill.BorderBrush = activeBorder;
+        if (activePill.Child is System.Windows.Controls.TextBlock atb) atb.Foreground = activeFg;
+
+        ApplyMerchantFilter(MerchantSearchBox.Text);
+    }
+
+    private void MerchantSearch_Changed(object sender, System.Windows.Controls.TextChangedEventArgs e)
+        => ApplyMerchantFilter(MerchantSearchBox.Text);
+
+    private void MerchantRow_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if ((sender as System.Windows.Controls.Border)?.Tag is not Models.Merchant m) return;
+
+        // Deselect previous
+        if (_selectedMerchant != null) _selectedMerchant.IsSelected = false;
+        m.IsSelected = true;
+        _selectedMerchant = m;
+
+        // Populate detail panel
+        MDetailName.Text       = m.DisplayName;
+        MDetailId.Text         = m.Id;
+        MDetailRawName.Text    = !string.IsNullOrWhiteSpace(m.Name) ? m.Name : "—";
+        MDetailDescriptor.Text = m.Descriptor ?? "—";
+        MDetailEmail.Text      = m.Email ?? "—";
+        MDetailPhone.Text      = m.Phone ?? "—";
+        MDetailCurrency.Text   = m.Currency ?? "—";
+        MDetailCreated.Text    = m.CreatedFormatted;
+
+        // Use BrushConverter so both 6-char (#RRGGBB) and 8-char (#AARRGGBB) hex work correctly
+        var bc = new System.Windows.Media.BrushConverter();
+        System.Windows.Media.Brush HexBrush(string hex) =>
+            (System.Windows.Media.Brush?)bc.ConvertFromString(hex)
+            ?? System.Windows.Media.Brushes.Transparent;
+
+        MDetailStatus.Text            = m.StatusLabel;
+        MDetailStatus.Foreground      = HexBrush(m.StatusColor);
+        MDetailStatusBadge.Background = HexBrush(m.StatusBg);
+
+        MDetailKyc.Text             = m.KycLabel;
+        MDetailKyc.Foreground       = HexBrush(m.KycColor);
+        MDetailKycBadge.Background  = HexBrush(m.KycBg);
+
+        MDetailAddress.Text = string.IsNullOrWhiteSpace(m.AddressLine) ? "—" : m.AddressLine;
+
+        MDetailKycStatus.Text = m.KycLabel;
+        MDetailKycMsg.Text    = m.Kyc?.Message ?? "—";
+
+        // Sync detail-panel toggle button
+        MDetailToggleBtn.Content    = m.ToggleStatusLabel;
+        MDetailToggleBtn.Background = m.Status == 1
+            ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(217, 119,  6))  // amber
+            : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb( 59, 130, 246)); // blue
+        MDetailToggleBtn.IsEnabled  = m.ToggleEnabled;
+
+        MerchantDetailEmpty.Visibility  = Visibility.Collapsed;
+        MerchantDetailPanel.Visibility  = Visibility.Visible;
+    }
+
+    private void CopyMerchantId_Click(object sender, RoutedEventArgs e)
+    {
+        var id = (sender as System.Windows.Controls.Button)?.Tag?.ToString();
+        if (!string.IsNullOrEmpty(id))
+        {
+            System.Windows.Clipboard.SetText(id);
+            SetStatus($"Copied: {id}");
+        }
+        e.Handled = true; // prevent row click from also firing
+    }
+
+    /// <summary>Generic copy handler for all detail-panel fields — reads value from Button.Tag.</summary>
+    private void CopyMDetailField_Click(object sender, RoutedEventArgs e)
+    {
+        var text = (sender as System.Windows.Controls.Button)?.Tag?.ToString();
+        if (!string.IsNullOrEmpty(text) && text != "—")
+        {
+            System.Windows.Clipboard.SetText(text);
+            SetStatus($"Copied: {text}");
+        }
+    }
+
+    // Keep old handler name wired to the generic one (backward compat with any remaining references)
+    private void CopyMDetailId_Click(object sender, RoutedEventArgs e)
+        => CopyMDetailField_Click(sender, e);
+
+    // ── Activate / Deactivate — from the row button ───────────────────────────
+
+    private async void ToggleMerchantStatus_Merchants_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        var btn = sender as System.Windows.Controls.Button;
+        var merchantId = btn?.Tag?.ToString();
+        if (string.IsNullOrEmpty(merchantId)) return;
+
+        var m = _allMerchants.FirstOrDefault(x => x.Id == merchantId);
+        if (m == null) return;
+
+        await DoToggleMerchantStatus(m);
+    }
+
+    // ── Activate / Deactivate — from the detail panel button ─────────────────
+
+    private async void ToggleMerchantDetail_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedMerchant == null) return;
+        await DoToggleMerchantStatus(_selectedMerchant);
+    }
+
+    private async System.Threading.Tasks.Task DoToggleMerchantStatus(Models.Merchant m)
+    {
+        var newStatus = m.Status == 1 ? 2 : 1;
+        var verb = newStatus == 1 ? "Activate" : "Deactivate";
+
+        IosAlertDialog.IsDark = _isDarkMode;
+        bool confirm = IosAlertDialog.Show(
+            title:       $"{verb} Merchant",
+            message:     m.ShortId,
+            actionLabel: verb,
+            destructive: newStatus == 2,   // Deactivate is destructive (red button)
+            owner:       this);
+        if (!confirm) return;
+
+        m.ToggleBusy = true;
+
+        // Sync detail panel button if this merchant is currently open
+        if (_selectedMerchant?.Id == m.Id)
+        {
+            MDetailToggleBtn.IsEnabled = false;
+            MDetailToggleBtn.Content   = "Updating…";
+        }
+
+        try
+        {
+            var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+            var env    = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var svc    = new PayrixService(apiKey, env);
+
+            SetStatus("Updating merchant status…");
+            var (updated, rawJson, err) = await svc.UpdateMerchantStatusAsync(m.Id, newStatus);
+
+            if (err != null)
+            {
+                SetStatus($"⚠ Update failed: {err}");
+                // Show the Payrix error + raw response so it's easy to diagnose
+                var detail = $"Error: {err}";
+                if (!string.IsNullOrWhiteSpace(rawJson) && rawJson != "{}")
+                    detail += $"\n\nResponse body:\n{rawJson}";
+                WpfMessageBox.Show(detail, $"Could Not {verb} Merchant",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
+            m.Status = updated?.Status ?? newStatus;
+
+            // Refresh the detail panel badges if this merchant is open
+            if (_selectedMerchant?.Id == m.Id)
+            {
+                var bc = new System.Windows.Media.BrushConverter();
+                System.Windows.Media.Brush HexBrush(string hex) =>
+                    (System.Windows.Media.Brush?)bc.ConvertFromString(hex)
+                    ?? System.Windows.Media.Brushes.Transparent;
+
+                MDetailStatus.Text            = m.StatusLabel;
+                MDetailStatus.Foreground      = HexBrush(m.StatusColor);
+                MDetailStatusBadge.Background = HexBrush(m.StatusBg);
+                MDetailToggleBtn.Content    = m.ToggleStatusLabel;
+                MDetailToggleBtn.Background = m.Status == 1
+                    ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(217, 119,  6))
+                    : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb( 59, 130, 246));
+            }
+
+            OnPropertyChanged(nameof(DashActiveMerchants));
+            SetStatus($"{m.DisplayName} → {m.StatusLabel}");
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"⚠ {ex.Message}");
+        }
+        finally
+        {
+            m.ToggleBusy = false;
+            if (_selectedMerchant?.Id == m.Id)
+                MDetailToggleBtn.IsEnabled = true;
+        }
+    }
+
+    // ── Expand / Collapse All ─────────────────────────────────────────────────
+
+    private void CollapseAll_Click(object sender, RoutedEventArgs e)
+    {
+        foreach (var col in _collections)
+        {
+            col.Expanded = false;
+            // Mark all categories collapsed without touching GroupedRequests (avoids rebuild)
+            foreach (var cat in col.Requests.Select(r => r.Category).Distinct())
+                col.SetGroupExpanded(cat, false);
+            col.RaiseGroupedRequestsChanged();
+        }
+    }
+
+    private void ExpandAll_Click(object sender, RoutedEventArgs e)
+    {
+        foreach (var col in _collections)
+        {
+            col.Expanded = true;
+            foreach (var cat in col.Requests.Select(r => r.Category).Distinct())
+                col.SetGroupExpanded(cat, true);
+            col.RaiseGroupedRequestsChanged();
+        }
+    }
+
+    // ── Recent requests panel ────────────────────────────────────────────────
+
+    private const int RecentMaxItems = 15;
+    private bool _recentExpanded = true;
+
+    /// <summary>
+    /// Reload recent entries from disk and refresh the sidebar panel.
+    /// Call after every send and on window load.
+    /// </summary>
+    private void RefreshRecentPanel()
+    {
+        var entries = Services.RequestLogService.Load()
+                              .Take(RecentMaxItems)
+                              .ToList();
+
+        RecentList.ItemsSource    = entries;
+        RecentCountLabel.Text     = entries.Count.ToString();
+        RecentClearBtn.Visibility = entries.Count > 0
+            ? Visibility.Visible : Visibility.Collapsed;
+
+        // Show/hide the whole panel body based on expand state
+        RecentList.Visibility = _recentExpanded ? Visibility.Visible : Visibility.Collapsed;
+        RecentChevron.Text    = _recentExpanded ? "▼" : "▶";
+
+        // Keep Overview API stats in sync
+        OnPropertyChanged(nameof(OverviewRecentCount));
+    }
+
+    private void RecentHeader_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        _recentExpanded = !_recentExpanded;
+        RecentList.Visibility = _recentExpanded ? Visibility.Visible : Visibility.Collapsed;
+        RecentChevron.Text    = _recentExpanded ? "▼" : "▶";
+    }
+
+    private void RecentClear_Click(object sender, RoutedEventArgs e)
+    {
+        Services.RequestLogService.Save([]);
+        RefreshRecentPanel();
+        e.Handled = true;   // don't bubble to RecentHeader_Click
+    }
+
+    private void RecentItem_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (sender is System.Windows.Controls.Border b &&
+            b.Tag is Models.RequestLogEntry entry)
+        {
+            // Populate URL
+            _suppressUrlSave = true;
+            HttpUrlBox.Text  = entry.Url;
+            _suppressUrlSave = false;
+
+            // Method
+            var methodItem = HttpMethodBox.Items
+                .Cast<System.Windows.Controls.ComboBoxItem>()
+                .FirstOrDefault(i => i.Content?.ToString() == entry.Method);
+            if (methodItem != null) HttpMethodBox.SelectedItem = methodItem;
+
+            // Auth — restore token if it was a bearer call
+            if (entry.AuthType == "Bearer Token" && !string.IsNullOrEmpty(entry.Token))
+            {
+                var bearerItem = HttpAuthTypeBox.Items
+                    .Cast<System.Windows.Controls.ComboBoxItem>()
+                    .FirstOrDefault(i => i.Content?.ToString() == "Bearer Token");
+                if (bearerItem != null) HttpAuthTypeBox.SelectedItem = bearerItem;
+                AuthBearerTokenBox.Text = entry.Token;
+            }
+
+            HttpUrlBox.Focus();
+        }
+    }
+
+    // ── Collection Search ─────────────────────────────────────────────────────
+
+    private void CollectionSearch_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        var query = CollectionSearchBox.Text?.Trim() ?? "";
+
+        // Show/hide clear button
+        CollectionSearchClearBtn.Visibility = string.IsNullOrEmpty(query)
+            ? Visibility.Collapsed : Visibility.Visible;
+
+        ApplyCollectionSearch(query);
+    }
+
+    private void CollectionSearchClear_Click(object sender, RoutedEventArgs e)
+    {
+        CollectionSearchBox.Text = "";
+        CollectionSearchBox.Focus();
+    }
+
+    /// <summary>
+    /// Filters the sidebar to show only collections/requests that match <paramref name="query"/>.
+    /// Matching is case-insensitive against Name, Method, and URL.
+    /// When query is empty, restores the normal _collections source.
+    /// </summary>
+    private void ApplyCollectionSearch(string query)
+    {
+        if (string.IsNullOrEmpty(query))
+        {
+            CollectionsPanel.ItemsSource = _collections;
+            return;
+        }
+
+        var q = query.ToLowerInvariant();
+
+        // Build a temporary filtered list — shallow-clone collections with only matching requests
+        var filtered = new System.Collections.ObjectModel.ObservableCollection<Models.HttpCollection>();
+
+        foreach (var col in _collections)
+        {
+            var matchingRequests = col.Requests
+                .Where(r => r.Name.ToLowerInvariant().Contains(q)
+                         || r.Method.ToLowerInvariant().Contains(q)
+                         || r.Url.ToLowerInvariant().Contains(q))
+                .ToList();
+
+            if (matchingRequests.Count == 0) continue;
+
+            // Clone the collection shell with only matching requests, always expanded
+            var clone = new Models.HttpCollection
+            {
+                Id       = col.Id,
+                Name     = col.Name,
+                Expanded = true,
+            };
+            foreach (var r in matchingRequests)
+                clone.Requests.Add(r);
+
+            filtered.Add(clone);
+        }
+
+        CollectionsPanel.ItemsSource = filtered;
+    }
+
+    // ── New Collection ────────────────────────────────────────────────────────
+
+    private void NewCollection_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new InputDialog("New Collection", "Collection name:", "My Collection") { Owner = this };
+        if (dlg.ShowDialog() != true || string.IsNullOrWhiteSpace(dlg.InputText)) return;
+
+        var col = new Models.HttpCollection { Name = dlg.InputText.Trim() };
+        _collections.Add(col);
+        PersistCollections();
+    }
+
+    // ── Collection header click (expand/collapse) ─────────────────────────────
+
+    private void CollectionHeader_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if ((sender as System.Windows.Controls.Border)?.Tag is Models.HttpCollection col)
+            col.Expanded = !col.Expanded;
+    }
+
+    // ── Collection ⋯ context menu ─────────────────────────────────────────────
+
+    private void CollectionMenu_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as System.Windows.Controls.Button)?.Tag is not Models.HttpCollection col) return;
+
+        var menu = new System.Windows.Controls.ContextMenu();
+
+        var rename = new System.Windows.Controls.MenuItem { Header = "✏️  Rename" };
+        rename.Click += (_, _) =>
+        {
+            var dlg = new InputDialog("Rename Collection", "New name:", col.Name) { Owner = this };
+            if (dlg.ShowDialog() == true && !string.IsNullOrWhiteSpace(dlg.InputText))
+            {
+                col.Name = dlg.InputText.Trim();
+                PersistCollections();
+            }
+        };
+
+        var export = new System.Windows.Controls.MenuItem { Header = "⬇  Export to file" };
+        export.Click += (_, _) => ExportCollection(col);
+
+        var delete = new System.Windows.Controls.MenuItem { Header = "🗑️  Delete collection" };
+        delete.Click += (_, _) => ShowDeleteCollectionConfirm(col);
+
+        var moveUp = new System.Windows.Controls.MenuItem { Header = "⬆  Move Up" };
+        moveUp.Click += (_, _) =>
+        {
+            var idx = _collections.IndexOf(col);
+            if (idx > 0)
+            {
+                _collections.RemoveAt(idx);
+                _collections.Insert(idx - 1, col);
+                PersistCollections();
+            }
+        };
+
+        var moveDown = new System.Windows.Controls.MenuItem { Header = "⬇  Move Down" };
+        moveDown.Click += (_, _) =>
+        {
+            var idx = _collections.IndexOf(col);
+            if (idx < _collections.Count - 1)
+            {
+                _collections.RemoveAt(idx);
+                _collections.Insert(idx + 1, col);
+                PersistCollections();
+            }
+        };
+
+        var fav = new System.Windows.Controls.MenuItem
+        {
+            Header = col.IsFavorite ? "★  Remove from Favourites" : "☆  Add to Favourites"
+        };
+        fav.Click += (_, _) =>
+        {
+            col.IsFavorite = !col.IsFavorite;
+            SortCollectionsByFavourite();
+            PersistCollections();
+            SetStatus(col.IsFavorite ? $"★ '{col.Name}' added to favourites." : $"'{col.Name}' removed from favourites.");
+        };
+
+        menu.Items.Add(fav);
+        menu.Items.Add(new System.Windows.Controls.Separator());
+        menu.Items.Add(rename);
+        menu.Items.Add(new System.Windows.Controls.Separator());
+        menu.Items.Add(moveUp);
+        menu.Items.Add(moveDown);
+        menu.Items.Add(new System.Windows.Controls.Separator());
+        menu.Items.Add(export);
+        menu.Items.Add(new System.Windows.Controls.Separator());
+        menu.Items.Add(delete);
+        menu.IsOpen = true;
+        (sender as System.Windows.Controls.Button)!.ContextMenu = menu;
+        (sender as System.Windows.Controls.Button)!.ContextMenu.IsOpen = true;
+    }
+
+    // ── iOS-style delete confirmation overlay ────────────────────────────────
+
+    private void ShowDeleteCollectionConfirm(Models.HttpCollection col)
+    {
+        // Build overlay on top of the main window
+        var overlay = new System.Windows.Controls.Canvas
+        {
+            Background = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromArgb(120, 0, 0, 0)),
+            IsHitTestVisible = true
+        };
+
+        // Card
+        var card = new System.Windows.Controls.Border
+        {
+            Width           = 300,
+            CornerRadius    = new CornerRadius(16),
+            Background      = (System.Windows.Media.Brush)FindResource("CardBg"),
+            Effect          = new System.Windows.Media.Effects.DropShadowEffect
+                              { BlurRadius = 24, Opacity = 0.3, ShadowDepth = 0 },
+            Padding         = new Thickness(0)
+        };
+
+        var panel = new System.Windows.Controls.StackPanel();
+
+        // Title
+        var title = new System.Windows.Controls.TextBlock
+        {
+            Text              = "Delete Collection",
+            FontSize          = 17,
+            FontWeight        = FontWeights.SemiBold,
+            Foreground        = (System.Windows.Media.Brush)FindResource("PrimaryText"),
+            TextAlignment     = TextAlignment.Center,
+            Margin            = new Thickness(24, 22, 24, 6)
+        };
+
+        // Body
+        var body = new System.Windows.Controls.TextBlock
+        {
+            Text          = $"\"{col.Name}\" and all its {col.Requests.Count} request{(col.Requests.Count == 1 ? "" : "s")} will be permanently deleted.",
+            FontSize      = 13,
+            Foreground    = (System.Windows.Media.Brush)FindResource("SubText"),
+            TextAlignment = TextAlignment.Center,
+            TextWrapping  = System.Windows.TextWrapping.Wrap,
+            Margin        = new Thickness(24, 0, 24, 20)
+        };
+
+        // Divider
+        var div1 = new System.Windows.Controls.Border
+        {
+            Height     = 1,
+            Background = (System.Windows.Media.Brush)FindResource("CardBorder")
+        };
+
+        // Delete button
+        var btnDelete = new System.Windows.Controls.Button
+        {
+            Content    = "Delete",
+            FontSize   = 17,
+            FontWeight = FontWeights.SemiBold,
+            Height     = 50,
+            Background = System.Windows.Media.Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            Foreground = System.Windows.Media.Brushes.IndianRed,
+            Cursor     = System.Windows.Input.Cursors.Hand
+        };
+        btnDelete.Template = MakeFullWidthButtonTemplate(System.Windows.Media.Color.FromArgb(20, 220, 38, 38));
+
+        // Divider
+        var div2 = new System.Windows.Controls.Border
+        {
+            Height     = 1,
+            Background = (System.Windows.Media.Brush)FindResource("CardBorder")
+        };
+
+        // Cancel button
+        var btnCancel = new System.Windows.Controls.Button
+        {
+            Content    = "Cancel",
+            FontSize   = 17,
+            Height     = 50,
+            Background = System.Windows.Media.Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            Foreground = (System.Windows.Media.Brush)FindResource("PrimaryText"),
+            Cursor     = System.Windows.Input.Cursors.Hand
+        };
+        btnCancel.Template = MakeFullWidthButtonTemplate(
+            System.Windows.Media.Color.FromArgb(15, 128, 128, 128),
+            bottomRadius: 16);
+
+        panel.Children.Add(title);
+        panel.Children.Add(body);
+        panel.Children.Add(div1);
+        panel.Children.Add(btnDelete);
+        panel.Children.Add(div2);
+        panel.Children.Add(btnCancel);
+        card.Child = panel;
+
+        // Position card in centre of overlay
+        overlay.Children.Add(card);
+        void PositionCard()
+        {
+            System.Windows.Controls.Canvas.SetLeft(card, (overlay.ActualWidth  - card.Width)  / 2);
+            System.Windows.Controls.Canvas.SetTop (card, (overlay.ActualHeight - 220) / 2);
+        }
+        overlay.SizeChanged += (_, _) => PositionCard();
+
+        // Add overlay to window root
+        var root = (System.Windows.Controls.Grid)Content;
+        root.Children.Add(overlay);
+        System.Windows.Controls.Grid.SetRowSpan(overlay, 99);
+        System.Windows.Controls.Grid.SetColumnSpan(overlay, 99);
+
+        // Wire up after layout
+        overlay.Loaded += (_, _) => PositionCard();
+
+        btnCancel.Click += (_, _) => root.Children.Remove(overlay);
+        overlay.MouseLeftButtonDown += (_, e2) =>
+        {
+            // clicking outside card dismisses
+            var pos = e2.GetPosition(card);
+            if (pos.X < 0 || pos.Y < 0 || pos.X > card.ActualWidth || pos.Y > card.ActualHeight)
+                root.Children.Remove(overlay);
+        };
+        btnDelete.Click += (_, _) =>
+        {
+            root.Children.Remove(overlay);
+            _collections.Remove(col);
+            PersistCollections();
+            SetStatus($"🗑 '{col.Name}' deleted.");
+        };
+    }
+
+    private static System.Windows.Controls.ControlTemplate MakeFullWidthButtonTemplate(
+        System.Windows.Media.Color hoverColor, double bottomRadius = 0)
+    {
+        var tpl = new System.Windows.Controls.ControlTemplate(typeof(System.Windows.Controls.Button));
+        var factory = new System.Windows.FrameworkElementFactory(typeof(System.Windows.Controls.Border));
+        factory.SetValue(System.Windows.Controls.Border.BackgroundProperty,
+            new System.Windows.TemplateBindingExtension(System.Windows.Controls.Control.BackgroundProperty));
+        factory.SetValue(System.Windows.Controls.Border.CornerRadiusProperty,
+            new CornerRadius(0, 0, bottomRadius, bottomRadius));
+        var cp = new System.Windows.FrameworkElementFactory(typeof(System.Windows.Controls.ContentPresenter));
+        cp.SetValue(System.Windows.FrameworkElement.HorizontalAlignmentProperty, System.Windows.HorizontalAlignment.Center);
+        cp.SetValue(System.Windows.FrameworkElement.VerticalAlignmentProperty,   System.Windows.VerticalAlignment.Center);
+        factory.AppendChild(cp);
+        tpl.VisualTree = factory;
+
+        var hover = new System.Windows.Trigger
+        {
+            Property = System.Windows.UIElement.IsMouseOverProperty,
+            Value    = true
+        };
+        hover.Setters.Add(new Setter(
+            System.Windows.Controls.Control.BackgroundProperty,
+            new System.Windows.Media.SolidColorBrush(hoverColor)));
+        tpl.Triggers.Add(hover);
+        return tpl;
+    }
+
+    // ── Favourite toggle (star button) ───────────────────────────────────────
+
+    private void FavoriteCollection_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as System.Windows.Controls.Button)?.Tag is not Models.HttpCollection col) return;
+        col.IsFavorite = !col.IsFavorite;
+        SortCollectionsByFavourite();
+        PersistCollections();
+        SetStatus(col.IsFavorite ? $"★ '{col.Name}' added to favourites." : $"'{col.Name}' removed from favourites.");
+    }
+
+    /// <summary>Moves favourite collections to the top, preserving relative order within each group.</summary>
+    private void SortCollectionsByFavourite()
+    {
+        var favs    = _collections.Where(c => c.IsFavorite).ToList();
+        var nonFavs = _collections.Where(c => !c.IsFavorite).ToList();
+        _collections.Clear();
+        foreach (var c in favs)    _collections.Add(c);
+        foreach (var c in nonFavs) _collections.Add(c);
+    }
+
+    // ── Request ⋯ context menu ────────────────────────────────────────────────
+
+    private void RequestMenu_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as System.Windows.Controls.Button)?.Tag is not Models.SavedHttpRequest req) return;
+
+        // Find parent collection
+        var parentCol = _collections.FirstOrDefault(c => c.Requests.Contains(req));
+
+        var menu = new System.Windows.Controls.ContextMenu();
+
+        var open = new System.Windows.Controls.MenuItem { Header = "▶  Open" };
+        open.Click += (_, _) => LoadRequestIntoEditor(req);
+
+        var rename = new System.Windows.Controls.MenuItem { Header = "✏️  Rename" };
+        rename.Click += (_, _) =>
+        {
+            var dlg = new InputDialog("Rename Request", "New name:", req.Name) { Owner = this };
+            if (dlg.ShowDialog() == true && !string.IsNullOrWhiteSpace(dlg.InputText))
+            {
+                req.Name = dlg.InputText.Trim();
+                PersistCollections();
+            }
+        };
+
+        var duplicate = new System.Windows.Controls.MenuItem { Header = "⎘  Duplicate" };
+        duplicate.Click += (_, _) =>
+        {
+            if (parentCol == null) return;
+            var copy = new Models.SavedHttpRequest
+            {
+                Method  = req.Method,
+                Url     = req.Url,
+                Name    = req.Name + " (copy)",
+                Body    = req.Body,
+                Params  = [.. req.Params],
+                Headers = [.. req.Headers],
+                Form    = [.. req.Form],
+            };
+            var idx = parentCol.Requests.IndexOf(req);
+            parentCol.Requests.Insert(idx + 1, copy);
+            PersistCollections();
+        };
+
+        // Move to another collection (submenu)
+        var moveTo = new System.Windows.Controls.MenuItem { Header = "📦  Move to →" };
+        var otherCols = _collections.Where(c => c != parentCol).ToList();
+        if (otherCols.Count == 0)
+        {
+            moveTo.Items.Add(new System.Windows.Controls.MenuItem
+                { Header = "(no other collections)", IsEnabled = false });
+        }
+        else
+        {
+            foreach (var target in otherCols)
+            {
+                var t = target; // capture loop variable
+                var menuItem = new System.Windows.Controls.MenuItem { Header = t.Name };
+                menuItem.Click += (_, _) =>
+                {
+                    // Re-find source collection at click time (safe against stale capture)
+                    var src = _collections.FirstOrDefault(c => c.Requests.Contains(req));
+                    src?.Requests.Remove(req);
+                    t.Requests.Add(req);
+                    t.Expanded = true;
+                    PersistCollections();
+                    SetStatus($"Moved '{req.Name}' to '{t.Name}'.");
+                };
+                moveTo.Items.Add(menuItem);
+            }
+        }
+
+        var delete = new System.Windows.Controls.MenuItem { Header = "🗑️  Delete" };
+        delete.Click += (_, _) =>
+        {
+            parentCol?.Requests.Remove(req);
+            PersistCollections();
+        };
+
+        menu.Items.Add(open);
+        menu.Items.Add(rename);
+        menu.Items.Add(duplicate);
+        menu.Items.Add(moveTo);
+        menu.Items.Add(new System.Windows.Controls.Separator());
+        menu.Items.Add(delete);
+        (sender as System.Windows.Controls.Button)!.ContextMenu = menu;
+        (sender as System.Windows.Controls.Button)!.ContextMenu.IsOpen = true;
+    }
+
+    // ── Import / Export ───────────────────────────────────────────────────────
+
+    private void CollectionImport_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new Microsoft.Win32.OpenFileDialog
+        {
+            Title  = "Import Collection",
+            Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*"
+        };
+        if (dlg.ShowDialog() != true) return;
+
+        try
+        {
+            var json = File.ReadAllText(dlg.FileName);
+            // Try as HttpCollection first, then as array of SavedHttpRequest
+            Models.HttpCollection? col = null;
+            try
+            {
+                col = System.Text.Json.JsonSerializer.Deserialize<Models.HttpCollection>(json);
+            }
+            catch { /* try array */ }
+
+            if (col == null)
+            {
+                var reqs = System.Text.Json.JsonSerializer.Deserialize<List<Models.SavedHttpRequest>>(json);
+                if (reqs != null)
+                {
+                    col = new Models.HttpCollection
+                    {
+                        Name = System.IO.Path.GetFileNameWithoutExtension(dlg.FileName),
+                    };
+                    foreach (var r in reqs) col.Requests.Add(r);
+                }
+            }
+
+            if (col == null) { WpfMessageBox.Show("Could not parse the file as a collection.", "Import Failed"); return; }
+
+            // If a collection with the same name already exists, merge into it (avoids duplicates)
+            var existing = _collections.FirstOrDefault(c =>
+                string.Equals(c.Name.Trim(), col.Name.Trim(), StringComparison.OrdinalIgnoreCase));
+
+            int added;
+            if (existing != null)
+            {
+                // Track existing Method+URL keys so we only add genuinely new requests
+                var existingKeys = existing.Requests
+                    .Select(r => $"{r.Method}|{r.Url.Trim()}")
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                var newReqs = col.Requests
+                    .Where(r => existingKeys.Add($"{r.Method}|{r.Url.Trim()}"))
+                    .ToList();
+
+                foreach (var r in newReqs) existing.Requests.Add(r);
+                added = newReqs.Count;
+                PersistCollections();
+                SetStatus($"Merged into '{existing.Name}': {added} new request(s) added ({existing.Requests.Count} total).");
+            }
+            else
+            {
+                col.Id = Guid.NewGuid().ToString("N"); // avoid ID collision
+                _collections.Add(col);
+                added = col.Requests.Count;
+                PersistCollections();
+                SetStatus($"Imported collection '{col.Name}' ({added} requests).");
+            }
+        }
+        catch (Exception ex)
+        {
+            WpfMessageBox.Show($"Import failed: {ex.Message}", "Error");
+        }
+    }
+
+    private void ExportCollection(Models.HttpCollection col)
+    {
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Title      = "Export Collection",
+            Filter     = "JSON files (*.json)|*.json",
+            DefaultExt = ".json",
+            FileName   = col.Name.Replace(" ", "_")
+        };
+        if (dlg.ShowDialog() == true)
+        {
+            var json = System.Text.Json.JsonSerializer.Serialize(col, PrettyJson);
+            File.WriteAllText(dlg.FileName, json);
+            SetStatus($"Exported '{col.Name}' to {dlg.FileName}");
+        }
+    }
+
+    // ── Persist helper ────────────────────────────────────────────────────────
+
+    private void PersistCollections()
+    {
+        Services.HttpCollectionService.Save(new Models.HttpCollectionStore
+        {
+            Collections = [.. _collections]
+        });
+        // Notify sidebar to re-group
+        foreach (var col in _collections)
+            col.RaiseGroupedRequestsChanged();
+
+        RefreshApiCount();
+        RefreshRecentPanel();
+    }
+
+    // ── Deduplicate ───────────────────────────────────────────────────────────
+    // Pass 1 — merge collections that share the same name (case-insensitive).
+    //          All requests from the later copy are moved into the first, then
+    //          the later copy is deleted.
+    // Pass 2 — within each (now merged) collection remove any request whose
+    //          Method + URL key has already been seen.
+
+    private (int mergedCols, int removedReqs) DeduplicateAllCollections()
+    {
+        int mergedCols  = 0;
+        int removedReqs = 0;
+
+        // ── Pass 1: merge duplicate collection names ──────────────────────────
+        var seen = new Dictionary<string, Models.HttpCollection>(StringComparer.OrdinalIgnoreCase);
+        var toDeleteCols = new List<Models.HttpCollection>();
+
+        foreach (var col in _collections)
+        {
+            if (seen.TryGetValue(col.Name, out var primary))
+            {
+                // Move all requests from this duplicate into the primary collection
+                foreach (var req in col.Requests)
+                    primary.Requests.Add(req);
+                toDeleteCols.Add(col);
+                mergedCols++;
+            }
+            else
+            {
+                seen[col.Name] = col;
+            }
+        }
+
+        foreach (var col in toDeleteCols)
+            _collections.Remove(col);
+
+        // ── Pass 2: remove duplicate requests (Method + URL) per collection ───
+        foreach (var col in _collections)
+            removedReqs += DeduplicateCollection(col);
+
+        return (mergedCols, removedReqs);
+    }
+
+    private static int DeduplicateCollection(Models.HttpCollection col)
+    {
+        var seen     = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var toRemove = new List<Models.SavedHttpRequest>();
+
+        foreach (var req in col.Requests)
+        {
+            var key = $"{req.Method}|{req.Url.Trim()}";
+            if (!seen.Add(key))
+                toRemove.Add(req);
+        }
+
+        foreach (var dup in toRemove)
+            col.Requests.Remove(dup);
+
+        return toRemove.Count;
+    }
+
+    private void DeduplicateApis_Click(object sender, RoutedEventArgs e)
+    {
+        var (mergedCols, removedReqs) = DeduplicateAllCollections();
+        if (mergedCols == 0 && removedReqs == 0)
+        {
+            WpfMessageBox.Show("No duplicates found — everything is already clean.",
+                "Remove Duplicates", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        PersistCollections();
+
+        var parts = new List<string>();
+        if (mergedCols  > 0) parts.Add($"{mergedCols} duplicate collection{(mergedCols  == 1 ? "" : "s")} merged");
+        if (removedReqs > 0) parts.Add($"{removedReqs} duplicate API{(removedReqs == 1 ? "" : "s")} removed");
+        WpfMessageBox.Show(string.Join(" and ", parts) + ".",
+            "Remove Duplicates", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    // ── Validate / scan for obsolete (dead) endpoints ────────────────────────
+
+    private async void ValidateApis_Click(object sender, RoutedEventArgs e)
+    {
+        // Need a resolved baseUrl to test against
+        var baseUrl = _activeEnvironment?
+            .Variables.FirstOrDefault(v => v.Key == "baseUrl")?.Value?.TrimEnd('/') ?? "";
+
+        if (string.IsNullOrWhiteSpace(baseUrl))
+        {
+            WpfMessageBox.Show(
+                "No active environment with a 'baseUrl' variable found.\n\n" +
+                "Select an environment (e.g. Sandbox or Local) first.",
+                "Validate APIs", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        int total = _collections.Sum(c => c.Requests.Count);
+        if (total == 0) { WpfMessageBox.Show("No API endpoints to validate.", "Validate APIs"); return; }
+
+        if (WpfMessageBox.Show(
+            $"This will send a quick OPTIONS probe to each of the {total} endpoints\n" +
+            $"against:  {baseUrl}\n\n" +
+            "Endpoints that reply with 404 will be listed for removal.\n" +
+            "(Requires the server to be reachable — use Sandbox or Local.)\n\nContinue?",
+            "Validate APIs", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+            return;
+
+        ValidateApisBtn.IsEnabled = false;
+        SetStatus($"Scanning {total} endpoints for dead routes…");
+
+        // Short-timeout client — we're just probing for 404 vs any other response
+        using var http = new System.Net.Http.HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(6)
+        };
+
+        var dead    = new List<(Models.HttpCollection Col, Models.SavedHttpRequest Req)>();
+        var skipped = 0;
+        var tested  = 0;
+
+        // Variable pattern to detect any unresolved {{token}} after env substitution
+        var templateVar = new System.Text.RegularExpressions.Regex(@"\{\{[^}]+\}\}");
+
+        foreach (var col in _collections.ToList())
+        {
+            foreach (var req in col.Requests.ToList())
+            {
+                // Substitute known env variables
+                var url = Interpolate(req.Url);
+
+                // If the URL still contains unresolved template tokens (e.g. {{budgetId}}),
+                // skip it — a 404 on those could be "resource not found", not "route missing".
+                if (templateVar.IsMatch(url)) { skipped++; continue; }
+
+                try
+                {
+                    // OPTIONS is the lightest probe — works on all methods, no body needed.
+                    // Any response other than 404 means the route exists (200, 405, 401, 500…).
+                    var msg  = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Options, url);
+                    var resp = await http.SendAsync(msg, System.Net.Http.HttpCompletionOption.ResponseHeadersRead);
+
+                    if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+                        dead.Add((col, req));
+                }
+                catch (Exception ex) when (ex is System.Net.Http.HttpRequestException
+                                           || ex is TaskCanceledException)
+                {
+                    // Connection refused / timeout — server unreachable, skip
+                    skipped++;
+                }
+
+                tested++;
+                if (tested % 20 == 0)
+                    SetStatus($"Scanning… {tested + skipped}/{total} checked, {dead.Count} dead so far");
+            }
+        }
+
+        ValidateApisBtn.IsEnabled = true;
+
+        if (dead.Count == 0)
+        {
+            SetStatus($"Scan complete — all {tested} tested endpoints are alive ({skipped} skipped with path variables).");
+            WpfMessageBox.Show(
+                $"✅  No dead endpoints found!\n\n" +
+                $"Tested:  {tested}\nSkipped (contain path variables): {skipped}",
+                "Validate APIs — All Clean", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        // Build summary (show up to 30 entries)
+        var lines = dead.Take(30)
+            .Select(d => $"  [{d.Col.Name}]  {d.Req.Method}  {d.Req.Name ?? d.Req.Url}")
+            .ToList();
+        if (dead.Count > 30) lines.Add($"  … and {dead.Count - 30} more");
+
+        var summary =
+            $"Found {dead.Count} obsolete / dead endpoint(s) (HTTP 404):\n\n" +
+            string.Join("\n", lines) +
+            $"\n\nRemove all {dead.Count} dead endpoint(s) from their collections?";
+
+        if (WpfMessageBox.Show(summary, "Validate APIs — Dead Endpoints Found",
+            MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes)
+        {
+            foreach (var (col, req) in dead)
+                col.Requests.Remove(req);
+            PersistCollections();
+            SetStatus($"Removed {dead.Count} dead endpoint(s). {tested - dead.Count} endpoints remain healthy.");
+        }
+        else
+        {
+            SetStatus($"Scan complete — {dead.Count} dead endpoint(s) found (kept).");
+        }
+    }
+
+    // ── Import Collection (toolbar button — mirrors sidebar button) ───────────
+
+    private void ImportCollection_Click(object sender, RoutedEventArgs e)
+        => CollectionImport_Click(sender, e);   // reuse existing handler
+
+    // ── Export All Collections ────────────────────────────────────────────────
+
+    private void ExportAllCollections_Click(object sender, RoutedEventArgs e)
+    {
+        if (_collections.Count == 0) { WpfMessageBox.Show("No collections to export.", "Export"); return; }
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Title      = "Export All Collections",
+            Filter     = "JSON files (*.json)|*.json",
+            DefaultExt = ".json",
+            FileName   = $"collections_{DateTime.Now:yyyyMMdd}"
+        };
+        if (dlg.ShowDialog() != true) return;
+        var store = new Models.HttpCollectionStore { Collections = [.. _collections] };
+        File.WriteAllText(dlg.FileName, System.Text.Json.JsonSerializer.Serialize(store, PrettyJson));
+        SetStatus($"Exported {_collections.Count} collection(s) to {System.IO.Path.GetFileName(dlg.FileName)}.");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ENVIRONMENTS
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private readonly System.Collections.ObjectModel.ObservableCollection<Models.HttpEnvironment> _environments = [];
+    private Models.HttpEnvironment? _activeEnvironment;
+
+    private void InitEnvironments()
+    {
+        var store = Services.HttpEnvironmentService.Load();
+        Services.HttpEnvironmentService.EnsureLocalEnvironment(store); // add Local if missing
+        foreach (var e in store.Environments)
+            _environments.Add(e);
+
+        // Populate EnvSelectorBox  (index 0 = "No Environment" already in XAML)
+        foreach (var env in _environments)
+            EnvSelectorBox.Items.Add(env.Name);
+
+        // Restore last active
+        if (!string.IsNullOrEmpty(store.ActiveId))
+        {
+            var idx = _environments.IndexOf(_environments.FirstOrDefault(e => e.Id == store.ActiveId)!);
+            EnvSelectorBox.SelectedIndex = idx >= 0 ? idx + 1 : 0;
+            _activeEnvironment = idx >= 0 ? _environments[idx] : null;
+        }
+        else
+        {
+            EnvSelectorBox.SelectedIndex = 0;
+        }
+
+        // Prime the auth UI for the initially-selected environment
+        // (EnvSelector_Changed fires but controls may not be ready yet — call explicitly after init)
+        Dispatcher.InvokeAsync(() => LoadEnvAuthIntoUI(_activeEnvironment),
+            System.Windows.Threading.DispatcherPriority.Loaded);
+    }
+
+    private void EnvSelector_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        var idx = EnvSelectorBox.SelectedIndex - 1; // 0 = "No Environment"
+        _activeEnvironment = idx >= 0 && idx < _environments.Count ? _environments[idx] : null;
+
+        if (_activeEnvironment != null)
+        {
+            var count = _activeEnvironment.Variables.Count(v => v.Enabled && !string.IsNullOrWhiteSpace(v.Key));
+            ActiveEnvVarCount.Text    = $"{count} variable{(count != 1 ? "s" : "")}";
+            ActiveEnvChip.Visibility  = Visibility.Visible;
+        }
+        else
+        {
+            ActiveEnvChip.Visibility = Visibility.Collapsed;
+        }
+
+        // Load the environment's saved auth settings into the HTTP Client auth panel
+        LoadEnvAuthIntoUI(_activeEnvironment);
+
+        PersistEnvironments();
+    }
+
+    /// <summary>Populates HTTP Client auth + URL/method controls from the given environment (or clears if null).</summary>
+    private void LoadEnvAuthIntoUI(Models.HttpEnvironment? env)
+    {
+        // Suppress all change handlers while filling fields — prevents half-loaded state
+        // from being written back to the (new) active environment
+        HttpAuthTypeBox.SelectionChanged -= HttpAuthType_Changed;
+        _suppressUrlSave  = true;
+        _suppressAuthSave = true;
+
+        // ── Auth ─────────────────────────────────────────────────────────────
+        HttpAuthTypeBox.SelectedIndex = env?.AuthTypeIndex ?? 0;
+
+        AuthApiKeyNameBox.Text              = env?.AuthApiKeyName     ?? "APIKEY";
+        AuthApiKeyValueBox.Text             = env?.AuthApiKeyValue    ?? "";
+        AuthApiKeyLocationBox.SelectedIndex = env?.AuthApiKeyLocation ?? 0;
+        AuthBearerTokenBox.Text             = env?.AuthBearerToken    ?? "";
+        AuthBasicUserBox.Text               = env?.AuthBasicUser      ?? "";
+        AuthBasicPassBox.Text               = env?.AuthBasicPass      ?? "";
+
+        // Show/hide the correct auth panel
+        AuthApiKeyPanel.Visibility  = (env?.AuthTypeIndex ?? 0) == 1 ? Visibility.Visible : Visibility.Collapsed;
+        AuthBearerPanel.Visibility  = (env?.AuthTypeIndex ?? 0) == 2 ? Visibility.Visible : Visibility.Collapsed;
+        AuthBasicPanel.Visibility   = (env?.AuthTypeIndex ?? 0) == 3 ? Visibility.Visible : Visibility.Collapsed;
+
+        // ── URL + Method ─────────────────────────────────────────────────────
+        // Only update when an actual environment is selected; leave box alone when none.
+        if (env != null)
+        {
+            // Interpolate so {{baseUrl}} etc. resolve to the environment's variable values.
+            // The raw template is preserved in env.LastUrl — only the display is resolved.
+            HttpUrlBox.Text = Interpolate(env.LastUrl ?? "");
+
+            var targetMethod = string.IsNullOrEmpty(env.LastMethod) ? "GET" : env.LastMethod;
+            foreach (System.Windows.Controls.ComboBoxItem item in HttpMethodBox.Items)
+            {
+                if (item.Content?.ToString() == targetMethod)
+                {
+                    HttpMethodBox.SelectedItem = item;
+                    break;
+                }
+            }
+        }
+
+        _suppressAuthSave = false;
+        _suppressUrlSave  = false;
+        HttpAuthTypeBox.SelectionChanged += HttpAuthType_Changed;
+    }
+
+    private void ManageEnvironments_Click(object sender, RoutedEventArgs e)
+    {
+        var before = _environments.Select(x => x.Name).ToList();
+
+        var dlg = new EnvironmentManagerDialog(_environments) { Owner = this };
+        dlg.ShowDialog();
+
+        // Rebuild selector combo to reflect any adds/renames/deletes
+        var activeId = _activeEnvironment?.Id;
+        EnvSelectorBox.Items.Clear();
+        EnvSelectorBox.Items.Add("No Environment");
+        foreach (var env in _environments)
+            EnvSelectorBox.Items.Add(env.Name);
+
+        // Re-select previously active
+        var newIdx = _environments.IndexOf(_environments.FirstOrDefault(x => x.Id == activeId)!);
+        EnvSelectorBox.SelectedIndex = newIdx >= 0 ? newIdx + 1 : 0;
+
+        PersistEnvironments();
+    }
+
+    // ── Token detection ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns true when a string looks like a Bearer token rather than a request body.
+    /// Tokens are long base64-like strings that don't start with JSON structural characters.
+    /// </summary>
+    private static bool IsLikelyBearerToken(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s) || s.Length < 40) return false;
+        // JSON objects/arrays — definitely not a token
+        var trimmed = s.TrimStart();
+        if (trimmed.Length > 0 && trimmed[0] is '{' or '[') return false;
+        // Tokens NEVER contain spaces or line breaks — JSON/text bodies always do
+        if (s.Contains(' ') || s.Contains('\n') || s.Contains('\r') || s.Contains('\t')) return false;
+        // Must consist entirely of base64 / base64url characters (+ padding)
+        return s.All(c => char.IsLetterOrDigit(c) || c is '+' or '/' or '=' or '-' or '_' or '.');
+    }
+
+    // ── Variable substitution ─────────────────────────────────────────────────
+
+    /// <summary>Replaces {{key}} tokens using the active environment, then normalises the URL.</summary>
+    private string Interpolate(string input)
+    {
+        if (string.IsNullOrEmpty(input)) return input;
+
+        // 1. Substitute all {{variable}} tokens.
+        //    For "baseUrl" specifically, strip any trailing slash(es) and trailing /api
+        //    so templates like {{baseUrl}}/api/Foo always produce a clean single /api/Foo
+        //    regardless of how the env variable was typed.
+        var result = _activeEnvironment == null ? input
+            : System.Text.RegularExpressions.Regex.Replace(input, @"\{\{(\w+)\}\}", m =>
+            {
+                var key = m.Groups[1].Value;
+                var val = _activeEnvironment.Resolve(key) ?? m.Value;
+
+                if (string.Equals(key, "baseUrl", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Remove trailing slashes
+                    val = val.TrimEnd('/');
+                    // Remove trailing /api so {{baseUrl}}/api/... never yields /api/api/...
+                    if (val.EndsWith("/api", StringComparison.OrdinalIgnoreCase))
+                        val = val[..^4]; // chop off the /api suffix
+                }
+                return val;
+            });
+
+        // 2. Collapse /api/api/ → /api/ (handles stale saved URLs where baseUrl already contained /api)
+        result = System.Text.RegularExpressions.Regex.Replace(
+            result,
+            @"(/api)(/api)(?=/|$)",
+            "/api");
+
+        // 3. Collapse every double-slash that is NOT the protocol separator (https://)
+        result = System.Text.RegularExpressions.Regex.Replace(
+            result,
+            @"(?<!:)/{2,}",
+            "/");
+
+        return result;
+    }
+
+    private void PersistEnvironments()
+    {
+        Services.HttpEnvironmentService.Save(new Models.HttpEnvironmentStore
+        {
+            ActiveId     = _activeEnvironment?.Id ?? "",
+            Environments = [.. _environments]
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PERFORMANCE TESTER  (Tab 16)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private readonly System.Collections.ObjectModel.ObservableCollection<Models.PerfRequestStat>   _perfStats  = [];
+    private readonly System.Collections.ObjectModel.ObservableCollection<Models.PerfRequestResult> _perfLog    = [];
+    private CancellationTokenSource? _perfCts;
+    private static readonly System.Net.Http.HttpClient _perfHttpClient = new();
+
+    private void InitPerformanceTester()
+    {
+        PerfStatsGrid.ItemsSource = _perfStats;
+        PerfLogGrid.ItemsSource   = _perfLog;
+
+        // Populate collection combo
+        foreach (var c in _collections)
+            PerfCollectionBox.Items.Add(c.Name);
+        if (_collections.Count > 0) PerfCollectionBox.SelectedIndex = 0;
+
+        // Populate environment checklist
+        RefreshPerfEnvList();
+
+        // Keep in sync when collections change
+        _collections.CollectionChanged += (_, _) =>
+        {
+            var sel = PerfCollectionBox.SelectedIndex;
+            PerfCollectionBox.Items.Clear();
+            foreach (var c in _collections) PerfCollectionBox.Items.Add(c.Name);
+            PerfCollectionBox.SelectedIndex = Math.Min(sel, PerfCollectionBox.Items.Count - 1);
+        };
+    }
+
+    private void RefreshPerfEnvList()
+    {
+        PerfEnvCheckList.Items.Clear();
+        foreach (var env in _environments)
+        {
+            var cb = new System.Windows.Controls.CheckBox
+            {
+                Content  = env.Name,
+                Tag      = env,
+                IsChecked = false,
+                Margin   = new Thickness(0, 2, 0, 2),
+                FontSize = 12,
+                Foreground = (System.Windows.Media.Brush)FindResource("PrimaryText")
+            };
+            PerfEnvCheckList.Items.Add(cb);
+        }
+
+        // If no environments, add a "(No environments — create one in HTTP Client)" note
+        if (_environments.Count == 0)
+        {
+            PerfEnvCheckList.Items.Add(new System.Windows.Controls.TextBlock
+            {
+                Text       = "No environments — create one in HTTP Client",
+                FontSize   = 11,
+                Foreground = (System.Windows.Media.Brush)FindResource("SubText"),
+                FontStyle  = System.Windows.FontStyles.Italic
+            });
+        }
+    }
+
+    private void PerfCollection_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e) { }
+
+    // ── Mode toggle ───────────────────────────────────────────────────────────
+
+    private void PerfMode_Changed(object sender, RoutedEventArgs e)
+    {
+        if (PerfCollectionPanel == null) return; // not yet initialized
+        bool isCollection = PerfModeCollection.IsChecked == true;
+        bool isSingleApi  = PerfModeSingleApi.IsChecked  == true;
+        bool isWeb        = PerfModeWeb.IsChecked         == true;
+
+        PerfCollectionPanel.Visibility = isCollection ? Visibility.Visible   : Visibility.Collapsed;
+        PerfSingleApiPanel.Visibility  = isSingleApi  ? Visibility.Visible   : Visibility.Collapsed;
+        PerfWebPanel.Visibility        = isWeb        ? Visibility.Visible   : Visibility.Collapsed;
+    }
+
+    // ── Common config helpers ─────────────────────────────────────────────────
+
+    private (int iterations, int concurrency, int delayMs, int timeoutMs, bool stopOnError,
+             List<Models.HttpEnvironment?> envs) GetPerfConfig()
+    {
+        if (!int.TryParse(PerfIterBox.Text,        out int iterations)  || iterations  < 1) iterations  = 10;
+        if (!int.TryParse(PerfConcurrencyBox.Text,  out int concurrency) || concurrency < 1) concurrency = 1;
+        if (!int.TryParse(PerfDelayBox.Text,        out int delayMs)     || delayMs     < 0) delayMs     = 0;
+        if (!int.TryParse(PerfTimeoutBox.Text,      out int timeoutMs)   || timeoutMs   < 1) timeoutMs   = 10_000;
+        bool stopOnError = PerfStopOnErrorCb.IsChecked == true;
+
+        var envs = PerfEnvCheckList.Items
+            .OfType<System.Windows.Controls.CheckBox>()
+            .Where(cb => cb.IsChecked == true && cb.Tag is Models.HttpEnvironment)
+            .Select(cb => (Models.HttpEnvironment?)cb.Tag)
+            .ToList();
+        if (envs.Count == 0) envs.Add(null); // null = no environment
+
+        return (iterations, concurrency, delayMs, timeoutMs, stopOnError, envs);
+    }
+
+    private void ResetPerfUI(int totalOps)
+    {
+        _perfStats.Clear();
+        _perfLog.Clear();
+        KpiTotal.Text = KpiPassed.Text = KpiFailed.Text = KpiAvg.Text = KpiP95.Text = KpiRps.Text = "—";
+        PerfProgressBar.Value = 0;
+        PerfProgressText.Text = $"0 / {totalOps}";
+        PerfRunBtn.IsEnabled  = false;
+        PerfStopBtn.IsEnabled = true;
+    }
+
+    private void FinishPerfUI(System.Collections.Concurrent.ConcurrentBag<Models.PerfRequestResult> allResults,
+                              System.Diagnostics.Stopwatch sw, bool aborted)
+    {
+        sw.Stop();
+        _perfCts = null;
+        PerfRunBtn.IsEnabled  = true;
+        PerfStopBtn.IsEnabled = false;
+
+        var all = allResults.ToList();
+        if (all.Count > 0)
+        {
+            var times  = all.Where(r => r.Success).Select(r => r.ElapsedMs).OrderBy(x => x).ToList();
+            int passed = all.Count(r => r.Success);
+            int failed = all.Count(r => !r.Success);
+            long avg   = times.Count > 0 ? (long)times.Average() : 0;
+            long p95   = times.Count > 0 ? times[(int)Math.Ceiling(times.Count * 0.95) - 1] : 0;
+            double rps = sw.Elapsed.TotalSeconds > 0 ? passed / sw.Elapsed.TotalSeconds : 0;
+
+            KpiTotal.Text  = all.Count.ToString();
+            KpiPassed.Text = passed.ToString();
+            KpiFailed.Text = failed.ToString();
+            KpiAvg.Text    = $"{avg} ms";
+            KpiP95.Text    = $"{p95} ms";
+            KpiRps.Text    = $"{rps:F2}/s";
+            KpiFailed.Foreground = failed > 0
+                ? System.Windows.Media.Brushes.IndianRed
+                : System.Windows.Media.Brushes.LightGreen;
+        }
+
+        PerfProgressText.Text = aborted ? "Stopped" : "Done";
+        PerfProgressBar.Value = aborted ? PerfProgressBar.Value : 100;
+    }
+
+    // ── Run dispatcher ────────────────────────────────────────────────────────
+
+    private async void PerfRun_Click(object sender, RoutedEventArgs e)
+    {
+        if (PerfModeWeb.IsChecked == true)
+            await RunWebPerfAsync();
+        else if (PerfModeSingleApi.IsChecked == true)
+            await RunSingleApiPerfAsync();
+        else
+            await RunCollectionPerfAsync();
+    }
+
+    // ── Collection mode ───────────────────────────────────────────────────────
+
+    private async Task RunCollectionPerfAsync()
+    {
+        var colIdx = PerfCollectionBox.SelectedIndex;
+        if (colIdx < 0 || colIdx >= _collections.Count)
+        { WpfMessageBox.Show("Select a collection to test.", "Performance"); return; }
+        var collection = _collections[colIdx];
+        if (collection.Requests.Count == 0)
+        { WpfMessageBox.Show("The selected collection has no requests.", "Performance"); return; }
+
+        var (iterations, concurrency, delayMs, timeoutMs, stopOnError, selectedEnvs) = GetPerfConfig();
+        int totalOps = collection.Requests.Count * selectedEnvs.Count * iterations;
+        ResetPerfUI(totalOps);
+
+        _perfCts = new CancellationTokenSource();
+        var token      = _perfCts.Token;
+        var allResults = new System.Collections.Concurrent.ConcurrentBag<Models.PerfRequestResult>();
+        var sw         = System.Diagnostics.Stopwatch.StartNew();
+        bool aborted   = false;
+
+        try
+        {
+            aborted = await RunRequestListAsync(collection.Requests.ToList(), selectedEnvs,
+                iterations, concurrency, delayMs, timeoutMs, stopOnError,
+                allResults, totalOps, token);
+        }
+        catch (OperationCanceledException) { aborted = true; }
+        finally { FinishPerfUI(allResults, sw, aborted); }
+    }
+
+    // ── Single API mode ───────────────────────────────────────────────────────
+
+    private async Task RunSingleApiPerfAsync()
+    {
+        var method = (PerfSingleMethodBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "GET";
+        var url    = PerfSingleUrlBox.Text?.Trim() ?? "";
+        if (string.IsNullOrEmpty(url) || url == "https://")
+        { WpfMessageBox.Show("Enter a URL for the Single API test.", "Performance"); return; }
+
+        var req = new Models.SavedHttpRequest
+        {
+            Name   = $"{method} {url}",
+            Method = method,
+            Url    = url,
+            Body   = PerfSingleBodyBox.Text?.Trim() ?? ""
+        };
+        // Add Content-Type if body present
+        if (!string.IsNullOrEmpty(req.Body))
+            req.Headers.Add(new Models.HttpKeyValueRow { Enabled = true, Key = "Content-Type", Value = "application/json" });
+
+        var (iterations, concurrency, delayMs, timeoutMs, stopOnError, selectedEnvs) = GetPerfConfig();
+        int totalOps = selectedEnvs.Count * iterations;
+        ResetPerfUI(totalOps);
+
+        _perfCts = new CancellationTokenSource();
+        var token      = _perfCts.Token;
+        var allResults = new System.Collections.Concurrent.ConcurrentBag<Models.PerfRequestResult>();
+        var sw         = System.Diagnostics.Stopwatch.StartNew();
+        bool aborted   = false;
+
+        try
+        {
+            aborted = await RunRequestListAsync([req], selectedEnvs,
+                iterations, concurrency, delayMs, timeoutMs, stopOnError,
+                allResults, totalOps, token);
+        }
+        catch (OperationCanceledException) { aborted = true; }
+        finally { FinishPerfUI(allResults, sw, aborted); }
+    }
+
+    // ── Web performance mode ──────────────────────────────────────────────────
+
+    private async Task RunWebPerfAsync()
+    {
+        var rawUrl = PerfWebUrlBox.Text?.Trim() ?? "";
+        if (string.IsNullOrEmpty(rawUrl) || rawUrl == "https://")
+        { WpfMessageBox.Show("Enter a URL for the Web performance test.", "Performance"); return; }
+
+        bool followRedirects = PerfWebFollowRedirects.IsChecked == true;
+        var (iterations, concurrency, delayMs, timeoutMs, stopOnError, selectedEnvs) = GetPerfConfig();
+        int totalOps = selectedEnvs.Count * iterations;
+        ResetPerfUI(totalOps);
+
+        _perfCts = new CancellationTokenSource();
+        var token      = _perfCts.Token;
+        var allResults = new System.Collections.Concurrent.ConcurrentBag<Models.PerfRequestResult>();
+        var sw         = System.Diagnostics.Stopwatch.StartNew();
+        bool aborted   = false;
+        int done       = 0; // local counter for web mode
+
+        // Build a handler that optionally follows redirects
+        var handler = new System.Net.Http.HttpClientHandler
+        {
+            AllowAutoRedirect  = followRedirects,
+            MaxAutomaticRedirections = 10,
+            ServerCertificateCustomValidationCallback =
+                System.Net.Http.HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+        };
+        using var webClient = new System.Net.Http.HttpClient(handler);
+        webClient.Timeout = System.Threading.Timeout.InfiniteTimeSpan;
+
+        try
+        {
+            foreach (var env in selectedEnvs)
+            {
+                if (token.IsCancellationRequested) { aborted = true; break; }
+
+                string envLabel = env?.Name ?? "No Env";
+                string InterpolateWithEnv(string s)
+                {
+                    if (env == null || string.IsNullOrEmpty(s)) return s;
+                    return System.Text.RegularExpressions.Regex.Replace(s, @"\{\{(\w+)\}\}", m =>
+                        env.Resolve(m.Groups[1].Value) ?? m.Value);
+                }
+
+                var resolvedUrl = InterpolateWithEnv(rawUrl);
+                var semaphore   = new SemaphoreSlim(concurrency, concurrency);
+                var tasks       = new List<Task>();
+
+                for (int iter = 1; iter <= iterations; iter++)
+                {
+                    if (token.IsCancellationRequested) { aborted = true; break; }
+                    int capturedIter = iter;
+                    await semaphore.WaitAsync(token);
+
+                    tasks.Add(Task.Run(async () =>
+                    {
+                        try
+                        {
+                            var result = await RunWebRequestAsync(webClient, resolvedUrl, envLabel,
+                                                                   capturedIter, timeoutMs, followRedirects, token);
+                            allResults.Add(result);
+
+                            await Dispatcher.InvokeAsync(() =>
+                            {
+                                _perfLog.Insert(0, result);
+                                while (_perfLog.Count > 1000) _perfLog.RemoveAt(_perfLog.Count - 1);
+                                done++;
+                                PerfProgressBar.Value = done * 100.0 / totalOps;
+                                PerfProgressText.Text = $"{done} / {totalOps}";
+                            });
+
+                            if (stopOnError && !result.Success) _perfCts?.Cancel();
+                        }
+                        finally { semaphore.Release(); }
+                    }, token));
+
+                    if (delayMs > 0) await Task.Delay(delayMs, token);
+                }
+
+                await Task.WhenAll(tasks.Where(t => !t.IsFaulted));
+
+                var bucket = allResults.Where(r => r.Environment == envLabel).ToList();
+                var stat   = Models.PerfRequestStat.FromResults(resolvedUrl, envLabel, bucket);
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    var existing = _perfStats.FirstOrDefault(s => s.RequestName == stat.RequestName && s.Environment == stat.Environment);
+                    if (existing != null) { var idx = _perfStats.IndexOf(existing); _perfStats[idx] = stat; }
+                    else _perfStats.Add(stat);
+                });
+            }
+        }
+        catch (OperationCanceledException) { aborted = true; }
+        finally { FinishPerfUI(allResults, sw, aborted); }
+    }
+
+    private async Task<Models.PerfRequestResult> RunWebRequestAsync(
+        System.Net.Http.HttpClient client, string url, string envLabel,
+        int iteration, int timeoutMs, bool followRedirects, CancellationToken ct)
+    {
+        try
+        {
+            using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts2.CancelAfter(timeoutMs);
+
+            var req = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, url);
+            req.Headers.TryAddWithoutValidation("User-Agent", "PayrixTools/Perf (+https://bqe.com)");
+            req.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,*/*");
+
+            var swTotal = System.Diagnostics.Stopwatch.StartNew();
+            using var resp = await client.SendAsync(req,
+                System.Net.Http.HttpCompletionOption.ResponseHeadersRead, cts2.Token);
+            long ttfbMs = swTotal.ElapsedMilliseconds;
+
+            var bytes = await resp.Content.ReadAsByteArrayAsync(cts2.Token);
+            swTotal.Stop();
+            long downloadMs = swTotal.ElapsedMilliseconds - ttfbMs;
+
+            // Count redirects from the final request URI vs original
+            int redirects = 0;
+            if (followRedirects)
+            {
+                var finalUri  = resp.RequestMessage?.RequestUri?.AbsoluteUri ?? url;
+                if (!string.Equals(finalUri, url, StringComparison.OrdinalIgnoreCase))
+                    redirects = 1; // approximate — HttpClient collapsed them
+            }
+
+            string contentType = resp.Content.Headers.ContentType?.MediaType ?? "";
+
+            return new Models.PerfRequestResult
+            {
+                Iteration     = iteration,
+                Environment   = envLabel,
+                RequestName   = url,
+                Method        = "GET",
+                Url           = url,
+                StatusCode    = (int)resp.StatusCode,
+                ElapsedMs     = swTotal.ElapsedMilliseconds,
+                TtfbMs        = ttfbMs,
+                DownloadMs    = downloadMs,
+                ResponseBytes = bytes.Length,
+                RedirectCount = redirects,
+                ContentType   = contentType,
+                Success       = resp.IsSuccessStatusCode
+            };
+        }
+        catch (Exception ex)
+        {
+            return new Models.PerfRequestResult
+            {
+                Iteration   = iteration,
+                Environment = envLabel,
+                RequestName = url,
+                Method      = "GET",
+                Url         = url,
+                StatusCode  = 0,
+                Success     = false,
+                Error       = ex.Message
+            };
+        }
+    }
+
+    // ── Shared request-list runner (used by Collection + Single API modes) ────
+
+    private async Task<bool> RunRequestListAsync(
+        List<Models.SavedHttpRequest> requests,
+        List<Models.HttpEnvironment?> selectedEnvs,
+        int iterations, int concurrency, int delayMs, int timeoutMs, bool stopOnError,
+        System.Collections.Concurrent.ConcurrentBag<Models.PerfRequestResult> allResults,
+        int totalOps, CancellationToken token)
+    {
+        int done    = 0;
+        bool aborted = false;
+
+        foreach (var env in selectedEnvs)
+        {
+            if (token.IsCancellationRequested) { aborted = true; break; }
+
+            foreach (var savedReq in requests)
+            {
+                if (token.IsCancellationRequested) { aborted = true; break; }
+
+                var semaphore = new SemaphoreSlim(concurrency, concurrency);
+                var tasks     = new List<Task>();
+
+                for (int iter = 1; iter <= iterations; iter++)
+                {
+                    if (token.IsCancellationRequested) { aborted = true; break; }
+                    int capturedIter = iter;
+                    var capturedEnv  = env;
+                    var capturedReq  = savedReq;
+                    await semaphore.WaitAsync(token);
+
+                    tasks.Add(Task.Run(async () =>
+                    {
+                        try
+                        {
+                            var result = await RunSingleRequestAsync(capturedReq, capturedEnv, capturedIter, timeoutMs, token);
+                            allResults.Add(result);
+
+                            await Dispatcher.InvokeAsync(() =>
+                            {
+                                _perfLog.Insert(0, result);
+                                while (_perfLog.Count > 1000) _perfLog.RemoveAt(_perfLog.Count - 1);
+                                int d = System.Threading.Interlocked.Increment(ref done);
+                                PerfProgressBar.Value = d * 100.0 / totalOps;
+                                PerfProgressText.Text = $"{d} / {totalOps}";
+                            });
+
+                            if (stopOnError && !result.Success) _perfCts?.Cancel();
+                        }
+                        finally { semaphore.Release(); }
+                    }, token));
+
+                    if (delayMs > 0) await Task.Delay(delayMs, token);
+                }
+
+                await Task.WhenAll(tasks.Where(t => !t.IsFaulted));
+
+                var envLabel = env?.Name ?? "No Env";
+                var bucket   = allResults
+                    .Where(r => r.RequestName == savedReq.Name && r.Environment == envLabel)
+                    .ToList();
+                var stat = Models.PerfRequestStat.FromResults(savedReq.Name, envLabel, bucket);
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    var existing = _perfStats.FirstOrDefault(s => s.RequestName == stat.RequestName && s.Environment == stat.Environment);
+                    if (existing != null) { var idx = _perfStats.IndexOf(existing); _perfStats[idx] = stat; }
+                    else _perfStats.Add(stat);
+                });
+            }
+        }
+        return aborted;
+    }
+
+    // ── Single request executor ───────────────────────────────────────────────
+
+    private async Task<Models.PerfRequestResult> RunSingleRequestAsync(
+        Models.SavedHttpRequest saved,
+        Models.HttpEnvironment? env,
+        int iteration,
+        int timeoutMs,
+        CancellationToken ct)
+    {
+        string envLabel = env?.Name ?? "No Env";
+        string InterpolateWithEnv(string input)
+        {
+            if (env == null || string.IsNullOrEmpty(input)) return input;
+            return System.Text.RegularExpressions.Regex.Replace(input, @"\{\{(\w+)\}\}", m =>
+                env.Resolve(m.Groups[1].Value) ?? m.Value);
+        }
+
+        var url = InterpolateWithEnv(saved.Url);
+        try
+        {
+            using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts2.CancelAfter(timeoutMs);
+
+            var req = new System.Net.Http.HttpRequestMessage(
+                new System.Net.Http.HttpMethod(saved.Method), url);
+
+            foreach (var h in saved.Headers.Where(h => h.Enabled && !string.IsNullOrWhiteSpace(h.Key)))
+                req.Headers.TryAddWithoutValidation(InterpolateWithEnv(h.Key), InterpolateWithEnv(h.Value));
+
+            if (!string.IsNullOrEmpty(saved.Body) &&
+                saved.Method is "POST" or "PUT" or "PATCH")
+                req.Content = new System.Net.Http.StringContent(
+                    InterpolateWithEnv(saved.Body), System.Text.Encoding.UTF8, "application/json");
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            using var resp = await _perfHttpClient.SendAsync(req,
+                System.Net.Http.HttpCompletionOption.ResponseHeadersRead, cts2.Token);
+            long ttfbMs = sw.ElapsedMilliseconds;
+            var bytes = await resp.Content.ReadAsByteArrayAsync(cts2.Token);
+            sw.Stop();
+            long downloadMs = sw.ElapsedMilliseconds - ttfbMs;
+
+            return new Models.PerfRequestResult
+            {
+                Iteration     = iteration,
+                Environment   = envLabel,
+                RequestName   = saved.Name,
+                Method        = saved.Method,
+                Url           = url,
+                StatusCode    = (int)resp.StatusCode,
+                ElapsedMs     = sw.ElapsedMilliseconds,
+                TtfbMs        = ttfbMs,
+                DownloadMs    = downloadMs,
+                ResponseBytes = bytes.Length,
+                Success       = resp.IsSuccessStatusCode
+            };
+        }
+        catch (Exception ex)
+        {
+            return new Models.PerfRequestResult
+            {
+                Iteration   = iteration,
+                Environment = envLabel,
+                RequestName = saved.Name,
+                Method      = saved.Method,
+                Url         = url,
+                StatusCode  = 0,
+                ElapsedMs   = 0,
+                Success     = false,
+                Error       = ex.Message
+            };
+        }
+    }
+
+    // ── Stop ──────────────────────────────────────────────────────────────────
+
+    private void PerfStop_Click(object sender, RoutedEventArgs e)
+    {
+        _perfCts?.Cancel();
+        PerfProgressText.Text = "Stopping…";
+    }
+
+    // ── Clear log ─────────────────────────────────────────────────────────────
+
+    private void PerfClearLog_Click(object sender, RoutedEventArgs e) => _perfLog.Clear();
+
+    // ── Export CSV ────────────────────────────────────────────────────────────
+
+    private void PerfExportCsv_Click(object sender, RoutedEventArgs e)
+    {
+        if (_perfLog.Count == 0 && _perfStats.Count == 0)
+        { WpfMessageBox.Show("No results to export.", "Performance"); return; }
+
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Title      = "Export Performance Results",
+            Filter     = "CSV files (*.csv)|*.csv",
+            DefaultExt = ".csv",
+            FileName   = $"perf_{DateTime.Now:yyyyMMdd_HHmmss}"
+        };
+        if (dlg.ShowDialog() != true) return;
+
+        var sb = new System.Text.StringBuilder();
+
+        // Summary stats sheet
+        sb.AppendLine("=== AGGREGATE STATS ===");
+        sb.AppendLine("Request,Environment,Iterations,Passed,Failed,Pass%,Avg(ms),TTFB(ms),Min(ms),Max(ms),P95(ms),P99(ms),req/s");
+        foreach (var s in _perfStats)
+            sb.AppendLine($"{CsvQ(s.RequestName)},{CsvQ(s.Environment)},{s.Total},{s.Passed},{s.Failed},{s.PassRate},{s.Avg},{(s.AvgTtfb > 0 ? s.AvgTtfb.ToString() : "")},{s.Min},{s.Max},{s.P95},{s.P99},{s.Rps:F2}");
+
+        sb.AppendLine();
+        sb.AppendLine("=== RAW LOG ===");
+        sb.AppendLine("Iteration,Environment,Request,Method,URL,Status,Total(ms),TTFB(ms),Download(ms),Size(B),Redirects,ContentType,Success,Error");
+        foreach (var r in _perfLog.OrderBy(r => r.Iteration))
+            sb.AppendLine($"{r.Iteration},{CsvQ(r.Environment)},{CsvQ(r.RequestName)},{r.Method},{CsvQ(r.Url)},{r.StatusDisplay},{r.ElapsedMs},{(r.TtfbMs > 0 ? r.TtfbMs.ToString() : "")},{(r.DownloadMs > 0 ? r.DownloadMs.ToString() : "")},{r.ResponseBytes},{(r.RedirectCount > 0 ? r.RedirectCount.ToString() : "")},{CsvQ(r.ContentType)},{r.Success},{CsvQ(r.Error)}");
+
+        File.WriteAllText(dlg.FileName, sb.ToString());
+        SetStatus($"Performance results exported to {System.IO.Path.GetFileName(dlg.FileName)}.");
+    }
+
+    private static string CsvQ(string s) =>
+        s.Contains(',') || s.Contains('"') || s.Contains('\n')
+            ? $"\"{s.Replace("\"", "\"\"")}\"" : s;
+
+    // ── Reports tab ───────────────────────────────────────────────────────────
+
+    private readonly System.Collections.ObjectModel.ObservableCollection<Models.ReportRow>    _reportRows       = [];
+    private readonly System.Collections.ObjectModel.ObservableCollection<Models.FailedTxnRow> _reportFailedRows = [];
+    private string _currentReportType = "By Type";
+    private List<Transaction> _lastReportFiltered = [];
+
+    private static readonly System.Globalization.CultureInfo _reportUsd =
+        System.Globalization.CultureInfo.GetCultureInfo("en-US");
+
+    // Stub event handlers — no auto-generate on filter change; user clicks Generate
+    private void ReportDate_Changed(object sender,
+        System.Windows.Controls.SelectionChangedEventArgs e) { }
+
+    private void ReportType_Changed(object sender,
+        System.Windows.Controls.SelectionChangedEventArgs e) { }
+
+    private async void GenerateReport_Click(object sender, RoutedEventArgs e)
+    {
+        var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            WpfMessageBox.Show("Enter your API key in the Settings tab first.",
+                "Reports", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var from = ReportFromPicker.SelectedDate;
+        var to   = ReportToPicker.SelectedDate;
+
+        // ── Lock UI while fetching ────────────────────────────────────────────
+        GenerateReportBtn.IsEnabled = false;
+        GenerateReportBtn.Content   = "⟳  Loading…";
+        ExportReportBtn.IsEnabled   = false;
+        ReportEmptyState.Visibility  = Visibility.Visible;
+        ReportAggPanel.Visibility    = Visibility.Collapsed;
+        ReportFailedPanel.Visibility = Visibility.Collapsed;
+        ReportKpiTotal.Text    = "…";
+        ReportKpiAmount.Text   = "…";
+        ReportKpiApproved.Text = "…";
+        ReportKpiFailed.Text   = "…";
+
+        try
+        {
+            var env     = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service = new PayrixService(apiKey, env);
+
+            var merchantId = ReportMerchantIdBox.Text.Trim();
+            var progress   = new Progress<string>(msg => SetStatus(msg));
+            var (list, error) = await service.FetchTransactionsForReportAsync(
+                from, to, string.IsNullOrWhiteSpace(merchantId) ? null : merchantId, 200, progress);
+
+            if (error != null)
+                SetStatus($"Report fetch warning: {error}");
+
+            _lastReportFiltered = list;
+            BuildReportFromList(list);
+        }
+        catch (Exception ex)
+        {
+            ReportKpiTotal.Text = ReportKpiAmount.Text = ReportKpiApproved.Text = ReportKpiFailed.Text = "ERR";
+            SetStatus($"Report error: {ex.Message}", error: true);
+        }
+        finally
+        {
+            GenerateReportBtn.IsEnabled = true;
+            GenerateReportBtn.Content   = "⟳  Generate";
+        }
+    }
+
+    private void BuildReportFromList(List<Transaction> list)
+    {
+        // ── KPI cards ────────────────────────────────────────────────────────
+        var totalAmt = list.Sum(t => t.ApprovedDollars);
+        var approved = list.Count(t => t.Status == 1 || t.Status == 3);
+        var failed   = list.Count(t => t.Status == 2 || t.Status == 4 || t.Status == 5);
+
+        ReportKpiTotal.Text    = list.Count.ToString("N0", _reportUsd);
+        ReportKpiAmount.Text   = totalAmt.ToString("C2", _reportUsd);
+        ReportKpiApproved.Text = approved.ToString("N0", _reportUsd);
+        ReportKpiFailed.Text   = failed.ToString("N0", _reportUsd);
+        ReportEnvLabel.Text    = IsSandbox ? "Sandbox" : "Production";
+
+        _reportRows.Clear();
+        _reportFailedRows.Clear();
+
+        var type = (ReportTypeBox.SelectedItem as System.Windows.Controls.ComboBoxItem)
+                       ?.Content?.ToString() ?? "By Type";
+        _currentReportType = type;
+
+        var hasData = list.Count > 0;
+
+        if (type == "Failed / Declined")
+        {
+            foreach (var t in list
+                .Where(t => t.Status == 2 || t.Status == 4 || t.Status == 5)
+                .OrderByDescending(t => t.Created ?? ""))
+            {
+                _reportFailedRows.Add(new Models.FailedTxnRow
+                {
+                    Date         = DateTime.TryParse(t.Created, out var dd)
+                                       ? dd.ToString("MMM d, yyyy") : t.Created ?? "",
+                    ShortId      = t.Id is { Length: > 12 } id ? id[..12] + "…" : t.Id ?? "",
+                    MerchantName = ResolveReportMerchantName(t),
+                    Customer     = t.CustomerName,
+                    TxnType      = t.TypeLabel,
+                    Amount       = t.ApprovedFormatted,
+                    Status       = t.StatusLabel,
+                    StatusColor  = t.Status == 2 ? "#EF4444" : "#F59E0B",
+                    StatusBg     = t.Status == 2 ? "#26EF4444" : "#26F59E0B",
+                });
+            }
+
+            ReportFailedList.ItemsSource = _reportFailedRows;
+            hasData = _reportFailedRows.Count > 0;
+            ReportFailedPanel.Visibility = hasData ? Visibility.Visible : Visibility.Collapsed;
+            ReportAggPanel.Visibility    = Visibility.Collapsed;
+        }
+        else
+        {
+            var grandTotal = list.Sum(t => t.ApprovedDollars);
+            var groups = type switch
+            {
+                "By Status"   => list.GroupBy(t => t.StatusLabel),
+                "By Merchant" => list.GroupBy(t => ResolveReportMerchantName(t)),
+                "Summary"     => list.GroupBy(t => t.IsAch ? "ACH / eCheck" : "Card"),
+                _             => list.GroupBy(t => t.TypeLabel)
+            };
+
+            foreach (var g in groups.OrderByDescending(g => g.Sum(t => t.ApprovedDollars)))
+            {
+                var cnt = g.Count();
+                var amt = g.Sum(t => t.ApprovedDollars);
+                _reportRows.Add(new Models.ReportRow
+                {
+                    Label       = g.Key,
+                    Count       = cnt,
+                    TotalAmount = amt,
+                    AvgAmount   = cnt > 0 ? amt / cnt : 0m,
+                    Share       = grandTotal > 0 ? $"{amt / grandTotal * 100m:F1}%" : "—",
+                    Color       = GetReportLabelColor(g.Key),
+                    BgColor     = GetReportLabelBg(g.Key),
+                });
+            }
+
+            ReportAggList.ItemsSource    = _reportRows;
+            ReportAggPanel.Visibility    = hasData ? Visibility.Visible : Visibility.Collapsed;
+            ReportFailedPanel.Visibility = Visibility.Collapsed;
+        }
+
+        SetStatus($"Report generated: {list.Count} transaction(s).");
+        ReportEmptyState.Visibility = hasData ? Visibility.Collapsed : Visibility.Visible;
+        ExportReportBtn.IsEnabled   = hasData;
+    }
+
+    /// <summary>
+    /// Returns the best available merchant name for a transaction:
+    /// CoreCompanyName (enriched) → Descriptor → raw Merchant ID (truncated).
+    /// </summary>
+    private static string ResolveReportMerchantName(Transaction t) => t.MerchantDisplayName;
+
+    private static string GetReportLabelColor(string label) =>
+        label.ToLowerInvariant() switch
+        {
+            "sale"         or "approved" or "captured" or "settled" => "#22C55E",
+            "card"         or "echeck sale" or "ach / echeck"       => "#3B82F6",
+            "refund"       or "authorize"                            => "#F59E0B",
+            "credit"                                                 => "#8B5CF6",
+            "void"                                                   => "#6B7280",
+            "declined"     or "error" or "returned"                  => "#EF4444",
+            _                                                        => "#6B7280"
+        };
+
+    private static string GetReportLabelBg(string label) =>
+        label.ToLowerInvariant() switch
+        {
+            "sale"         or "approved" or "captured" or "settled" => "#052E16",
+            "card"         or "echeck sale" or "ach / echeck"       => "#001A30",
+            "refund"       or "authorize"                            => "#1C1200",
+            "credit"                                                 => "#140A28",
+            "void"                                                   => "#1A1A1A",
+            "declined"     or "error" or "returned"                  => "#2A0505",
+            _                                                        => "#1A1A1A"
+        };
+
+    private async void ExportReport_Click(object sender, RoutedEventArgs e)
+    {
+        if (_lastReportFiltered.Count == 0 && _reportFailedRows.Count == 0)
+        {
+            WpfMessageBox.Show("No report data to export. Click Generate first.",
+                "Export", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var safeType = _currentReportType
+            .Replace(" / ", "_")
+            .Replace(" ", "_");
+
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Title      = "Export Report",
+            Filter     = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
+            FileName   = $"report_{safeType}_{DateTime.Now:yyyyMMdd_HHmmss}.csv",
+            DefaultExt = ".csv"
+        };
+
+        if (dlg.ShowDialog() != true) return;
+
+        try
+        {
+            ExportReportBtn.IsEnabled = false;
+            var sb = new System.Text.StringBuilder();
+
+            if (_currentReportType == "Failed / Declined")
+            {
+                sb.AppendLine("Date,Txn ID,Merchant,Customer,Type,Amount,Status");
+                foreach (var r in _reportFailedRows)
+                    sb.AppendLine($"{CsvQ(r.Date)},{CsvQ(r.ShortId)},{CsvQ(r.MerchantName)},{CsvQ(r.Customer)},{CsvQ(r.TxnType)},{CsvQ(r.Amount)},{CsvQ(r.Status)}");
+            }
+            else
+            {
+                sb.AppendLine($"Report Type: {_currentReportType}");
+                sb.AppendLine($"Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                sb.AppendLine();
+                sb.AppendLine("Group,Count,Total Amount,Avg Amount,Share");
+                foreach (var r in _reportRows)
+                    sb.AppendLine($"{CsvQ(r.Label)},{r.Count},{r.TotalAmount:F2},{r.AvgAmount:F2},{CsvQ(r.Share)}");
+            }
+
+            await System.IO.File.WriteAllTextAsync(dlg.FileName, sb.ToString());
+            SetStatus($"Report exported → {System.IO.Path.GetFileName(dlg.FileName)}");
+        }
+        catch (Exception ex)
+        {
+            WpfMessageBox.Show($"Export failed: {ex.Message}", "Export Error",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            ExportReportBtn.IsEnabled = true;
+        }
+    }
+
+    // ── Accounts tab ─────────────────────────────────────────────────────────
+
+    // The one merchant ID that is always pinned to row 0 regardless of sort
+    private const string PinnedMerchantId = "t1_bth_6a158b1f22fb126410bcd17";
+
+    // Master list kept for re-sort without re-fetching
+    private List<Models.AccountMerchantRow> _allAccountRows = [];
+
+    // Sort state: column property name → ascending (true) / descending (false) / null = unsorted
+    private string?  _accSortColumn    = null;
+    private bool     _accSortAscending = true;
+
+    private async void LoadAccounts_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+            if (string.IsNullOrWhiteSpace(apiKey))
+            {
+                SetStatus("⚠ No API key — configure one on the Settings tab.");
+                return;
+            }
+
+            LoadAccountsBtn.IsEnabled = false;
+            LoadAccountsBtn.Content   = "⟳  Loading…";
+            AccountEmptyState.Visibility   = Visibility.Collapsed;
+            AccountEntityCard.Visibility   = Visibility.Collapsed;
+            AccountMerchantCard.Visibility = Visibility.Collapsed;
+
+            var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service = new PayrixService(apiKey, environment);
+
+            // ── 1. Entity ───────────────────────────────────────────────────
+            SetStatus("Fetching entity…");
+            var (entityId, entityLogin, entityName, entityCustom, _, entityErr) =
+                await service.GetEntityAsync();
+
+            if (entityErr != null)
+            {
+                AccountEmptyText.Text         = $"Could not load entity: {entityErr}";
+                AccountEmptyState.Visibility  = Visibility.Visible;
+                SetStatus($"⚠ {entityErr}");
+                return;
+            }
+
+            AccEntityId.Text     = entityId     ?? "—";
+            AccEntityName.Text   = entityName   ?? "—";
+            AccEntityLogin.Text  = entityLogin  ?? "—";
+            AccEntityCustom.Text = entityCustom ?? "—";
+            AccountEntityCard.Visibility = Visibility.Visible;
+
+            // ── 2. Merchants (full paginated list) ──────────────────────────
+            SetStatus("Fetching merchant accounts…");
+            var (merchants, _, merchantErr) = await service.GetMerchantsAsync(100);
+
+            if (merchantErr != null)
+            {
+                SetStatus($"⚠ Merchants: {merchantErr}");
+                merchants = [];
+            }
+
+            // ── 3. Cross-reference with loaded transactions ─────────────────
+            var txnLookup = _transactions
+                .GroupBy(t => t.Merchant ?? "")
+                .ToDictionary(
+                    g => g.Key,
+                    g => (Count: g.Count(), Volume: g.Sum(t => t.ApprovedDollars)));
+
+            _allAccountRows = merchants.Select(m =>
+            {
+                txnLookup.TryGetValue(m.Id, out var stats);
+                return new Models.AccountMerchantRow
+                {
+                    MerchantId       = m.Id,
+                    IsPinned         = string.Equals(m.Id, PinnedMerchantId, StringComparison.OrdinalIgnoreCase),
+                    DisplayName      = m.DisplayName,
+                    StatusCode       = m.Status,
+                    KycCode          = m.Kyc?.Status ?? 0,
+                    TxnCount         = stats.Count,
+                    VolumeRaw        = stats.Volume,
+                    Currency         = m.Currency ?? "USD",
+                    CreatedFormatted = m.CreatedFormatted,
+                    CreatedRaw       = m.Created,
+                };
+            }).ToList();
+
+            // Ensure pinned ID always exists in the list (add a placeholder if API didn't return it)
+            if (_allAccountRows.All(r => !r.IsPinned))
+            {
+                _allAccountRows.Insert(0, new Models.AccountMerchantRow
+                {
+                    MerchantId  = PinnedMerchantId,
+                    IsPinned    = true,
+                    DisplayName = PinnedMerchantId,
+                    StatusCode  = 0,
+                });
+            }
+
+            _accSortColumn = null;
+            ResetAccSortArrows();
+            ApplyAccSort();
+
+            AccountSubtitle.Text = merchants.Count == 1
+                ? "1 merchant account"
+                : $"{merchants.Count} merchant accounts";
+
+            AccountMerchantCard.Visibility = Visibility.Visible;
+            SetStatus($"Loaded entity + {merchants.Count} merchant accounts.");
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"⚠ Accounts load error: {ex.Message}");
+            AccountEmptyText.Text        = $"Error: {ex.Message}";
+            AccountEmptyState.Visibility = Visibility.Visible;
+        }
+        finally
+        {
+            LoadAccountsBtn.IsEnabled = true;
+            LoadAccountsBtn.Content   = "⟳  Load Accounts";
+        }
+    }
+
+    // ── Sort ─────────────────────────────────────────────────────────────────
+
+    private void AccSort_Click(object sender, RoutedEventArgs e)
+    {
+        var btn = sender as System.Windows.Controls.Button;
+        var column = btn?.Tag?.ToString();
+        if (string.IsNullOrEmpty(column)) return;
+
+        if (_accSortColumn == column)
+            _accSortAscending = !_accSortAscending;   // flip direction
+        else
+        {
+            _accSortColumn    = column;
+            _accSortAscending = true;
+        }
+
+        ResetAccSortArrows();
+        var arrow = _accSortAscending ? " ▲" : " ▼";
+
+        // Find the clicked button and append arrow to its content
+        var header = column switch
+        {
+            "DisplayName"  => AccSortMerchant,
+            "StatusCode"   => AccSortStatus,
+            "KycCode"      => AccSortKyc,
+            "TxnCount"     => AccSortTxns,
+            "VolumeRaw"    => AccSortVolume,
+            "Currency"     => AccSortCurrency,
+            "CreatedRaw"   => AccSortCreated,
+            _              => null
+        };
+        if (header != null)
+        {
+            var baseLabel = column switch
+            {
+                "DisplayName" => "MERCHANT",
+                "StatusCode"  => "STATUS",
+                "KycCode"     => "KYC",
+                "TxnCount"    => "TXNS",
+                "VolumeRaw"   => "VOL",
+                "Currency"    => "CURRENCY",
+                "CreatedRaw"  => "CREATED",
+                _             => column
+            };
+            header.Content = baseLabel + arrow;
+        }
+
+        ApplyAccSort();
+    }
+
+    private void ResetAccSortArrows()
+    {
+        AccSortMerchant.Content = "MERCHANT";
+        AccSortStatus.Content   = "STATUS";
+        AccSortKyc.Content      = "KYC";
+        AccSortTxns.Content     = "TXNS";
+        AccSortVolume.Content   = "VOL";
+        AccSortCurrency.Content = "CURRENCY";
+        AccSortCreated.Content  = "CREATED";
+    }
+
+    private void ApplyAccSort()
+    {
+        if (_allAccountRows.Count == 0) return;
+
+        var pinned  = _allAccountRows.Where(r =>  r.IsPinned).ToList();
+        var rest    = _allAccountRows.Where(r => !r.IsPinned).ToList();
+
+        IEnumerable<Models.AccountMerchantRow> sorted = _accSortColumn switch
+        {
+            "DisplayName" => _accSortAscending
+                ? rest.OrderBy(r => r.DisplayName, StringComparer.OrdinalIgnoreCase)
+                : rest.OrderByDescending(r => r.DisplayName, StringComparer.OrdinalIgnoreCase),
+            "StatusCode"  => _accSortAscending ? rest.OrderBy(r => r.StatusCode)  : rest.OrderByDescending(r => r.StatusCode),
+            "KycCode"     => _accSortAscending ? rest.OrderBy(r => r.KycCode)     : rest.OrderByDescending(r => r.KycCode),
+            "TxnCount"    => _accSortAscending ? rest.OrderBy(r => r.TxnCount)    : rest.OrderByDescending(r => r.TxnCount),
+            "VolumeRaw"   => _accSortAscending ? rest.OrderBy(r => r.VolumeRaw)   : rest.OrderByDescending(r => r.VolumeRaw),
+            "Currency"    => _accSortAscending
+                ? rest.OrderBy(r => r.Currency, StringComparer.OrdinalIgnoreCase)
+                : rest.OrderByDescending(r => r.Currency, StringComparer.OrdinalIgnoreCase),
+            "CreatedRaw"  => _accSortAscending ? rest.OrderBy(r => r.CreatedRaw)  : rest.OrderByDescending(r => r.CreatedRaw),
+            _             => rest   // no sort — natural order
+        };
+
+        AccountMerchantList.ItemsSource = pinned.Concat(sorted).ToList();
+    }
+
+    // ── Toggle Active / Inactive ──────────────────────────────────────────────
+
+    private async void ToggleMerchantStatus_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        var btn = sender as System.Windows.Controls.Button;
+        var merchantId = btn?.Tag?.ToString();
+        if (string.IsNullOrEmpty(merchantId)) return;
+
+        var row = _allAccountRows.FirstOrDefault(r => r.MerchantId == merchantId);
+        if (row == null) return;
+
+        // Toggle: Active (1) → Inactive (2), anything else → Active (1)
+        var newStatus = row.StatusCode == 1 ? 2 : 1;
+        var label = newStatus == 1 ? "Activate" : "Deactivate";
+
+        IosAlertDialog.IsDark = _isDarkMode;
+        bool confirm = IosAlertDialog.Show(
+            title:       $"{label} Merchant",
+            message:     row.ShortId,
+            actionLabel: label,
+            destructive: newStatus == 2,
+            owner:       this);
+        if (!confirm) return;
+
+        row.ToggleBusy = true;
+        try
+        {
+            var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+            var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service = new PayrixService(apiKey, environment);
+
+            SetStatus($"Updating merchant status…");
+            var (updated, _, err) = await service.UpdateMerchantStatusAsync(merchantId, newStatus);
+
+            if (err != null)
+            {
+                SetStatus($"⚠ Update failed: {err}");
+                WpfMessageBox.Show($"Update failed:\n{err}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
+            // Update the row live — badge + button label refresh via INotifyPropertyChanged
+            row.StatusCode = updated?.Status ?? newStatus;
+            SetStatus($"Merchant {row.DisplayName} → {row.StatusLabel}");
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"⚠ {ex.Message}");
+        }
+        finally
+        {
+            row.ToggleBusy = false;
+        }
+    }
+
+    // ── Copy helpers ──────────────────────────────────────────────────────────
+
+    private void CopyAccField_Click(object sender, RoutedEventArgs e)
+    {
+        var text = (sender as System.Windows.Controls.Button)?.Tag?.ToString();
+        if (!string.IsNullOrEmpty(text) && text != "—")
+        {
+            System.Windows.Clipboard.SetText(text);
+            SetStatus($"Copied: {text}");
+        }
+    }
+
+    private void CopyAccMerchantId_Click(object sender, RoutedEventArgs e)
+    {
+        var id = (sender as System.Windows.Controls.Button)?.Tag?.ToString();
+        if (!string.IsNullOrEmpty(id))
+        {
+            System.Windows.Clipboard.SetText(id);
+            SetStatus($"Copied: {id}");
+        }
+        e.Handled = true;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ── Disbursements Tab ─────────────────────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════════════════
+
+    private readonly ObservableCollection<DisbursementRecord> _disbRecords = [];
+    private readonly ObservableCollection<DisbursementEntry>  _disbDetailEntries = [];
+
+    private async void LoadDisbursements_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+            if (string.IsNullOrWhiteSpace(apiKey))
+            {
+                SetStatus("⚠ No API key — configure one on the Settings tab.");
+                return;
+            }
+
+            DisbLoadBtn.IsEnabled  = false;
+            DisbLoadBtn.Content    = "⟳  Loading…";
+            DisbEmptyState.Visibility  = Visibility.Collapsed;
+            DisbGrid.Visibility        = Visibility.Collapsed;
+            DisbEntryPanel.Visibility  = Visibility.Collapsed;
+            DisbEntryRow.Height        = new System.Windows.GridLength(0);
+            _disbRecords.Clear();
+            _disbDetailEntries.Clear();
+
+            var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service = new PayrixService(apiKey, environment);
+
+            if (!int.TryParse(DisbTabLimitBox.Text.Trim(), out var limit) || limit < 1) limit = 20;
+            if (limit > 200) limit = 200;
+
+            SetStatus($"Fetching up to {limit} disbursements…");
+            var records = await service.GetLatestDisbursementsAsync(limit);
+
+            if (records.Count == 0)
+            {
+                DisbEmptyState.Visibility = Visibility.Visible;
+                SetStatus("No disbursements found.");
+                return;
+            }
+
+            foreach (var r in records) _disbRecords.Add(r);
+
+            DisbGrid.Visibility = Visibility.Visible;
+            SetStatus($"Loaded {records.Count} disbursement(s).");
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"⚠ {ex.Message}");
+            DisbEmptyState.Visibility = Visibility.Visible;
+        }
+        finally
+        {
+            DisbLoadBtn.IsEnabled = true;
+            DisbLoadBtn.Content   = "⟳  Load Disbursements";
+        }
+    }
+
+    private async void DisbGrid_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (DisbGrid.SelectedItem is not DisbursementRecord rec) return;
+        if (string.IsNullOrEmpty(rec.Id)) return;
+
+        try
+        {
+            DisbEntryPanel.Visibility = Visibility.Visible;
+            DisbEntryRow.Height       = new System.Windows.GridLength(220);
+            DisbEntryHeader.Text      = rec.Id;
+            _disbDetailEntries.Clear();
+
+            var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+            if (string.IsNullOrWhiteSpace(apiKey)) return;
+
+            var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+            var service = new PayrixService(apiKey, environment);
+
+            SetStatus($"Fetching entries for {rec.Id}…");
+            var entries = await service.GetDisbursementEntriesAsync(rec.Id);
+
+            foreach (var entry in entries) _disbDetailEntries.Add(entry);
+            SetStatus($"{entries.Count} entr{(entries.Count == 1 ? "y" : "ies")} for {rec.Id}");
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"⚠ {ex.Message}");
+        }
+    }
+
+    private void CloseDisbEntries_Click(object sender, RoutedEventArgs e)
+    {
+        DisbEntryPanel.Visibility = Visibility.Collapsed;
+        DisbEntryRow.Height       = new System.Windows.GridLength(0);
+        DisbGrid.SelectedItem     = null;
+        _disbDetailEntries.Clear();
+    }
+
+    private void CopyDisbField_Click(object sender, RoutedEventArgs e)
+    {
+        var text = (sender as System.Windows.Controls.Button)?.Tag?.ToString();
+        if (!string.IsNullOrEmpty(text))
+        {
+            System.Windows.Clipboard.SetText(text);
+            SetStatus($"Copied: {text}");
+        }
+        e.Handled = true;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  Core DB Utility — Tab 17
+    // ══════════════════════════════════════════════════════════════════════════
+
+    private Microsoft.Data.SqlClient.SqlConnection? _hostConn;
+    private Microsoft.Data.SqlClient.SqlConnection? _coreConn;
+
+    // ── Subscription type package lists ──────────────────────────────────────
+    private static readonly string[] DefaultPackages = {
+        "Core Foundation", "Foundation User", "Accounting", "CRM", "HR",
+        "Premium Support", "CORE-QuickBooks Desktop Integration", "Storage"
+    };
+    private static readonly string[] RoleBasedPackages = {
+        "Core Express", "Core Express Plus", "Core Express CRM", "Core Express HR",
+        "Core Essentials", "Manager", "Billing", "Accounting", "Time Expense",
+        "HR Administrator", "HR Standard", "CRM", "Storage"
+    };
+    // Foundation Based uses the same packages as Default
+    private static readonly string[] FoundationBasedPackages = DefaultPackages;
+
+
+    // ── Connection string helpers ─────────────────────────────────────────────
+    private static string BuildConnStr(string server, string user, string password, string database)
+    {
+        var b = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder
+        {
+            DataSource                 = server,
+            InitialCatalog             = database,
+            TrustServerCertificate     = true,
+            ConnectTimeout             = 10
+        };
+        if (string.IsNullOrWhiteSpace(user))
+        {
+            b.IntegratedSecurity = true;
+        }
+        else
+        {
+            b.UserID   = user;
+            b.Password = password;
+        }
+        return b.ConnectionString;
+    }
+
+    // ── Badge helpers ─────────────────────────────────────────────────────────
+    private static void SetDbBadge(System.Windows.Controls.Border badge,
+                                   System.Windows.Controls.TextBlock label,
+                                   bool ok, string text)
+    {
+        badge.Background = ok
+            ? new WpfBrush(WpfColor.FromRgb(0x1A, 0x3A, 0x1A))
+            : new WpfBrush(WpfColor.FromRgb(0x3A, 0x10, 0x10));
+        badge.BorderBrush = ok
+            ? new WpfBrush(WpfColor.FromRgb(0x30, 0xD1, 0x58))
+            : new WpfBrush(WpfColor.FromRgb(0xFF, 0x45, 0x3A));
+        badge.BorderThickness = new Thickness(1);
+        label.Foreground = ok
+            ? new WpfBrush(WpfColor.FromRgb(0x30, 0xD1, 0x58))
+            : new WpfBrush(WpfColor.FromRgb(0xFF, 0x45, 0x3A));
+        label.Text        = text;
+        badge.Visibility  = System.Windows.Visibility.Visible;
+    }
+
+    private static void SetActionBadge(System.Windows.Controls.Border badge,
+                                       System.Windows.Controls.TextBlock label,
+                                       bool ok, string text)
+    {
+        badge.Background = ok
+            ? new WpfBrush(WpfColor.FromRgb(0x1A, 0x3A, 0x1A))
+            : new WpfBrush(WpfColor.FromRgb(0x3A, 0x10, 0x10));
+        badge.BorderBrush = ok
+            ? new WpfBrush(WpfColor.FromRgb(0x30, 0xD1, 0x58))
+            : new WpfBrush(WpfColor.FromRgb(0xFF, 0x45, 0x3A));
+        badge.BorderThickness = new Thickness(1);
+        label.Foreground = ok
+            ? new WpfBrush(WpfColor.FromRgb(0x30, 0xD1, 0x58))
+            : new WpfBrush(WpfColor.FromRgb(0xFF, 0x45, 0x3A));
+        label.Text       = text;
+        badge.Visibility = System.Windows.Visibility.Visible;
+    }
+
+    // ── Database query filters ────────────────────────────────────────────────
+    /// Only databases whose names contain "host" — filters to BQECoreHost-style DBs.
+    private const string HostDbFilter =
+        "SELECT name FROM sys.databases " +
+        "WHERE name NOT IN ('master','tempdb','model','msdb') " +
+        "  AND LOWER(name) LIKE '%host%' " +
+        "ORDER BY name";
+
+    /// All non-system databases — used for the Core company DB dropdown.
+    private const string AllDbFilter =
+        "SELECT name FROM sys.databases " +
+        "WHERE name NOT IN ('master','tempdb','model','msdb') " +
+        "ORDER BY name";
+
+    // ── SQL Server instance enumeration ───────────────────────────────────────
+    private static async Task<List<string>> EnumerateSqlInstancesAsync()
+    {
+        return await Task.Run(() =>
+        {
+            var set     = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var machine = Environment.MachineName;
+
+            // Try both 64-bit and 32-bit registry views
+            var views = new[]
+            {
+                Microsoft.Win32.RegistryView.Registry64,
+                Microsoft.Win32.RegistryView.Registry32,
+            };
+            var paths = new[]
+            {
+                @"SOFTWARE\Microsoft\Microsoft SQL Server",
+                @"SOFTWARE\WOW6432Node\Microsoft\Microsoft SQL Server",
+            };
+
+            foreach (var view in views)
+            {
+                try
+                {
+                    using var hive = Microsoft.Win32.RegistryKey.OpenBaseKey(
+                        Microsoft.Win32.RegistryHive.LocalMachine, view);
+
+                    foreach (var path in paths)
+                    {
+                        try
+                        {
+                            using var key = hive.OpenSubKey(path);
+                            if (key == null) continue;
+
+                            var insNames = key.GetValue("InstalledInstances") as string[];
+                            if (insNames == null) continue;
+
+                            foreach (var ins in insNames)
+                            {
+                                var entry = ins.Equals("MSSQLSERVER",
+                                    StringComparison.OrdinalIgnoreCase)
+                                    ? machine
+                                    : $@"{machine}\{ins}";
+                                set.Add(entry);
+                            }
+                        }
+                        catch { /* path unavailable */ }
+                    }
+                }
+                catch { /* view unavailable */ }
+            }
+
+            var list = set.OrderBy(x => x).ToList();
+            if (list.Count == 0)
+                list.Add(@"localhost");
+            return list;
+        });
+    }
+
+    // ── Auto-load Host DB list on server change / password Enter ─────────────
+    private void HostServerBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        // Only auto-load if we have credentials ready
+        if (!string.IsNullOrWhiteSpace(HostServerBox.Text))
+            _ = AutoLoadHostDatabases();
+    }
+
+    private void HostServerBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        if (!string.IsNullOrWhiteSpace(HostServerBox.Text))
+            _ = AutoLoadHostDatabases();
+    }
+
+    private void HostPasswordBox_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.Enter)
+            _ = AutoLoadHostDatabases();
+    }
+
+    private async Task AutoLoadHostDatabases()
+    {
+        var server = HostServerBox.Text.Trim();
+        if (string.IsNullOrEmpty(server)) return;
+        try
+        {
+            var cs = BuildConnStr(server, HostUserBox.Text.Trim(),
+                                  HostPasswordBox.Password, "master");
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(cs);
+            await conn.OpenAsync();
+            var dbs = new List<string>();
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(HostDbFilter, conn);
+            await using var rdr = await cmd.ExecuteReaderAsync();
+            while (await rdr.ReadAsync())
+                dbs.Add(rdr.GetString(0));
+            HostDatabaseBox.ItemsSource = dbs;
+            // Pre-select BQECoreHost if present, else first item
+            var preferred = dbs.FirstOrDefault(d =>
+                d.IndexOf("BQECoreHost", StringComparison.OrdinalIgnoreCase) >= 0)
+                ?? dbs.FirstOrDefault();
+            if (preferred != null)
+                HostDatabaseBox.Text = preferred;
+        }
+        catch { /* silent — user hasn't finished typing credentials */ }
+    }
+
+    // ── Section 1: Host DB ────────────────────────────────────────────────────
+    private async void RefreshHostServers_Click(object sender, RoutedEventArgs e)
+    {
+        var btn = (System.Windows.Controls.Button)sender;
+        var prev = btn.Content; btn.Content = "…"; btn.IsEnabled = false;
+        try
+        {
+            var current = HostServerBox.Text.Trim();          // preserve typed text
+            var instances = await EnumerateSqlInstancesAsync();
+            HostServerBox.ItemsSource = instances;
+            // Restore text or fall back to first found instance
+            HostServerBox.Text = !string.IsNullOrEmpty(current) ? current : instances[0];
+            SetDbBadge(HostStatusBadge, HostStatusText, true,
+                $"ℹ  Found {instances.Count} instance(s)");
+        }
+        catch (Exception ex)
+        {
+            SetDbBadge(HostStatusBadge, HostStatusText, false, $"✗  {ex.Message}");
+        }
+        finally { btn.Content = prev; btn.IsEnabled = true; }
+    }
+
+    private async void LoadHostDatabases_Click(object sender, RoutedEventArgs e)
+    {
+        var server = HostServerBox.Text.Trim();
+        if (string.IsNullOrEmpty(server))
+        {
+            SetDbBadge(HostStatusBadge, HostStatusText, false, "✗  Enter a server name first.");
+            return;
+        }
+        var btn = (System.Windows.Controls.Button)sender;
+        var prev = btn.Content; btn.Content = "…"; btn.IsEnabled = false;
+        try
+        {
+            var csb = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(
+                BuildConnStr(server, HostUserBox.Text.Trim(),
+                             HostPasswordBox.Password, "master")) { ConnectTimeout = 8 };
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(csb.ConnectionString);
+            await conn.OpenAsync();
+            var dbs = new List<string>();
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(HostDbFilter, conn);
+            await using var rdr = await cmd.ExecuteReaderAsync();
+            while (await rdr.ReadAsync()) dbs.Add(rdr.GetString(0));
+            HostDatabaseBox.ItemsSource = dbs;
+            var preferred = dbs.FirstOrDefault(d =>
+                d.IndexOf("BQECoreHost", StringComparison.OrdinalIgnoreCase) >= 0)
+                ?? dbs.FirstOrDefault();
+            if (preferred != null)
+                HostDatabaseBox.Text = preferred;
+            SetDbBadge(HostStatusBadge, HostStatusText, true,
+                $"ℹ  {dbs.Count} host database(s) loaded");
+        }
+        catch (Exception ex)
+        {
+            SetDbBadge(HostStatusBadge, HostStatusText, false, $"✗  {ex.Message}");
+        }
+        finally { btn.Content = prev; btn.IsEnabled = true; }
+    }
+
+    // ── Reset handlers ────────────────────────────────────────────────────────
+
+    private void ResetHostDb_Click(object sender, RoutedEventArgs e)
+    {
+        // Disconnect
+        try { _hostConn?.Dispose(); } catch { }
+        _hostConn = null;
+
+        // Clear fields (username + password are intentionally preserved)
+        HostServerBox.Text   = string.Empty;
+        HostDatabaseBox.Text = string.Empty;
+
+        // Hide badges / stats
+        HostStatusBadge.Visibility  = System.Windows.Visibility.Collapsed;
+        if (FindName("HostStatsPanel") is System.Windows.FrameworkElement sp)
+            sp.Visibility = System.Windows.Visibility.Collapsed;
+    }
+
+    private void ResetCoreDb_Click(object sender, RoutedEventArgs e)
+    {
+        // Disconnect
+        try { _coreConn?.Dispose(); } catch { }
+        _coreConn = null;
+
+        // Clear fields (username + password are intentionally preserved)
+        CoreServerBox.Text   = string.Empty;
+        CoreDatabaseBox.Text = string.Empty;
+        CoreDatabaseBox.ItemsSource    = null;
+        SubCoreDatabaseBox.ItemsSource = null;
+        DelDatabaseBox.ItemsSource     = null;
+
+        // Clear Core DB prefilled data (Core users, account users)
+        // NOTE: RestoreEmailBox / _hostAccountAllItems are populated from the HOST DB Account table,
+        //       NOT from the Core DB — do NOT clear them here; they survive Core DB resets.
+        _coreUserAllItems = [];
+        _coreUserEmailMap = new(StringComparer.OrdinalIgnoreCase);
+        if (FindName("CoreUsersBox") is System.Windows.Controls.ComboBox ub) { ub.ItemsSource = null; ub.Text = string.Empty; }
+        if (FindName("AccountUsersBox") is System.Windows.Controls.ComboBox ab) { ab.ItemsSource = null; ab.Text = string.Empty; }
+
+        // Hide badge + lock Actions card
+        CoreStatusBadge.Visibility   = System.Windows.Visibility.Collapsed;
+        CoreActionsCard.IsEnabled    = false;
+        CoreActionsCard.Opacity      = 0.5;
+    }
+
+    private void ResetActions_Click(object sender, RoutedEventArgs e)
+    {
+        ActionResultBadge.Visibility = System.Windows.Visibility.Collapsed;
+        ActionResultText.Text        = string.Empty;
+    }
+
+    private void ResetSubscription_Click(object sender, RoutedEventArgs e)
+    {
+        SubCoreDatabaseBox.SelectedIndex = -1;
+        SubCoreDatabaseBox.Text          = string.Empty;
+        SubUsersBox.Text                 = "1";
+        SubExpiryBox.Text                = DateTime.Now.AddYears(1).ToString("yyyy-MM-dd");
+        SubLicenseTypeBox.SelectedIndex  = 0;
+        SubResultBadge.Visibility        = System.Windows.Visibility.Collapsed;
+        SubResultText.Text               = string.Empty;
+        SubProductBox.SelectedIndex = 0; // Foundation
+    }
+
+
+    private void ResetUnlinkDb_Click(object sender, RoutedEventArgs e)
+    {
+        UnlinkDatabaseBox.SelectedIndex  = -1;
+        UnlinkDatabaseBox.Text           = string.Empty;
+        UnlinkHostCompanyBox.Items.Clear();
+        UnlinkHostCompanyRow.Visibility  = System.Windows.Visibility.Collapsed;
+        UnlinkResultBadge.Visibility     = System.Windows.Visibility.Collapsed;
+        UnlinkResultText.Text            = string.Empty;
+    }
+
+    private void ResetDeleteDb_Click(object sender, RoutedEventArgs e)
+    {
+        DelDatabaseBox.SelectedIndex = -1;
+        DelDatabaseBox.Text          = string.Empty;
+        DelHostCompanyBox.Items.Clear();
+        DelHostCompanyRow.Visibility = System.Windows.Visibility.Collapsed;
+        if (FindName("DelHostRegistryChk") is System.Windows.Controls.CheckBox hc) hc.IsChecked = true;
+        if (FindName("DelDropDbChk")       is System.Windows.Controls.CheckBox dc) dc.IsChecked = false;
+        DelResultBadge.Visibility    = System.Windows.Visibility.Collapsed;
+        DelResultText.Text           = string.Empty;
+    }
+
+    private void ResetMaintenance_Click(object sender, RoutedEventArgs e)
+    {
+        // Exec sub-section
+        ExecDatabaseBox.Text           = string.Empty;
+        ProcPresetBox.SelectedIndex    = 0;
+        ProcScriptBox.Text             = string.Empty;
+        ProcResultBadge.Visibility     = System.Windows.Visibility.Collapsed;
+        ProcResultText.Text            = string.Empty;
+
+        // SQL Connection sub-section
+        MaintServerBox.Text            = string.Empty;
+        MaintUserBox.Text              = string.Empty;
+        MaintPasswordBox.Password      = string.Empty;
+        MaintConnBadge.Visibility      = System.Windows.Visibility.Collapsed;
+        MaintConnText.Text             = string.Empty;
+
+        // Backup sub-section
+        BackupPathBox.Text             = string.Empty;
+        BackupResultBadge.Visibility   = System.Windows.Visibility.Collapsed;
+        BackupResultText.Text          = string.Empty;
+
+        // Restore sub-section
+        RestoreFileBox.Text            = string.Empty;
+        RestoreAsBox.Text              = string.Empty;
+        RestoreResultBadge.Visibility  = System.Windows.Visibility.Collapsed;
+        RestoreResultText.Text         = string.Empty;
+    }
+
+    // ── End reset handlers ─────────────────────────────────────────────────────
+
+    private async void ConnectHostDb_Click(object sender, RoutedEventArgs e)
+    {
+        ConnectHostBtn.IsEnabled = false;
+        HostStatusBadge.Visibility = System.Windows.Visibility.Collapsed;
+        try
+        {
+            _hostConn?.Dispose();
+            var cs = BuildConnStr(
+                HostServerBox.Text.Trim(),
+                HostUserBox.Text.Trim(),
+                HostPasswordBox.Password,
+                HostDatabaseBox.Text.Trim());
+            _hostConn = new Microsoft.Data.SqlClient.SqlConnection(cs);
+            await _hostConn.OpenAsync();
+
+            // Populate DB list and auto-select the connected database
+            await LoadHostDatabasesFromConn(_hostConn);
+            var connectedDb = HostDatabaseBox.Text.Trim();
+            if (!string.IsNullOrEmpty(connectedDb))
+            {
+                // Ensure the connected database is selected in the dropdown
+                var items = HostDatabaseBox.ItemsSource as List<string>;
+                var match = items?.FirstOrDefault(d =>
+                    d.Equals(connectedDb, StringComparison.OrdinalIgnoreCase));
+                if (match != null)
+                    HostDatabaseBox.Text = match;
+            }
+
+            // Pre-fill email from Host DB
+            await TryPrefillEmailFromHostDb(_hostConn);
+
+            // Save credentials immediately
+            SaveSettings();
+
+            SetDbBadge(HostStatusBadge, HostStatusText, true,
+                $"✓  Connected — {HostServerBox.Text.Trim()} / {HostDatabaseBox.Text.Trim()}");
+
+            // Populate dashboard stats (fire-and-forget — non-fatal)
+            _ = RefreshHostStatsAsync();
+        }
+        catch (Exception ex)
+        {
+            _hostConn?.Dispose();
+            _hostConn = null;
+            SetDbBadge(HostStatusBadge, HostStatusText, false, $"✗  {ex.Message}");
+            HostStatsPanel.Visibility = System.Windows.Visibility.Collapsed;
+        }
+        finally
+        {
+            ConnectHostBtn.IsEnabled = true;
+        }
+    }
+
+    private async Task RefreshHostStatsAsync()
+    {
+        try
+        {
+            // Open a fresh connection — _hostConn may be in use
+            var cs = BuildConnStr(
+                HostServerBox.Text.Trim(),
+                HostUserBox.Text.Trim(),
+                HostPasswordBox.Password,
+                HostDatabaseBox.Text.Trim());
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(cs);
+            await conn.OpenAsync();
+
+            // Check Company table exists
+            var hasCo = await new Microsoft.Data.SqlClient.SqlCommand(
+                "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='Company' AND TABLE_SCHEMA='dbo'",
+                conn).ExecuteScalarAsync() != null;
+            if (!hasCo) return;
+
+            // Check which status column name is used
+            var hasCompanyStatus = await new Microsoft.Data.SqlClient.SqlCommand(
+                "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Company' AND COLUMN_NAME='CompanyStatus' AND TABLE_SCHEMA='dbo'",
+                conn).ExecuteScalarAsync() != null;
+            var statusCol = hasCompanyStatus ? "CompanyStatus" : "Status";
+
+            var statSql = $@"
+                SELECT
+                    COUNT(*)                                                          AS Total,
+                    SUM(CASE WHEN [{statusCol}] = 0 THEN 1 ELSE 0 END)               AS Active,
+                    SUM(CASE WHEN [{statusCol}] = 2 THEN 1 ELSE 0 END)               AS Trial,
+                    SUM(CASE WHEN [{statusCol}] IN (3,4) THEN 1 ELSE 0 END)          AS Expired
+                FROM [dbo].[Company]
+                WHERE DatabaseID IS NOT NULL AND LTRIM(RTRIM(DatabaseID)) <> ''";
+
+            int total = 0, active = 0, trial = 0, expired = 0;
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(statSql, conn);
+            await using var rdr = await cmd.ExecuteReaderAsync();
+            if (await rdr.ReadAsync())
+            {
+                total   = rdr.IsDBNull(0) ? 0 : rdr.GetInt32(0);
+                active  = rdr.IsDBNull(1) ? 0 : rdr.GetInt32(1);
+                trial   = rdr.IsDBNull(2) ? 0 : rdr.GetInt32(2);
+                expired = rdr.IsDBNull(3) ? 0 : rdr.GetInt32(3);
+            }
+
+            await Dispatcher.InvokeAsync(() =>
+            {
+                HostStatTotal.Text   = total.ToString("N0");
+                HostStatActive.Text  = active.ToString("N0");
+                HostStatTrial.Text   = trial.ToString("N0");
+                HostStatExpired.Text = expired.ToString("N0");
+                HostStatsPanel.Visibility = System.Windows.Visibility.Visible;
+            });
+        }
+        catch
+        {
+            // Non-fatal — stats just won't show
+        }
+    }
+
+    // ── Section 2: Core DB ────────────────────────────────────────────────────
+    private async void RefreshCoreServers_Click(object sender, RoutedEventArgs e)
+    {
+        var btn = (System.Windows.Controls.Button)sender;
+        var prev = btn.Content; btn.Content = "…"; btn.IsEnabled = false;
+        try
+        {
+            var current = CoreServerBox.Text.Trim();
+            var instances = await EnumerateSqlInstancesAsync();
+            CoreServerBox.ItemsSource = instances;
+            CoreServerBox.Text = !string.IsNullOrEmpty(current) ? current : instances[0];
+            SetDbBadge(CoreStatusBadge, CoreStatusText, true,
+                $"ℹ  Found {instances.Count} instance(s)");
+        }
+        catch (Exception ex)
+        {
+            SetDbBadge(CoreStatusBadge, CoreStatusText, false, $"✗  {ex.Message}");
+        }
+        finally { btn.Content = prev; btn.IsEnabled = true; }
+    }
+
+    private async void LoadCoreDatabases_Click(object sender, RoutedEventArgs e)
+    {
+        var server = CoreServerBox.Text.Trim();
+        if (string.IsNullOrEmpty(server))
+        {
+            SetDbBadge(CoreStatusBadge, CoreStatusText, false, "✗  Enter a server name first.");
+            return;
+        }
+        var btn = (System.Windows.Controls.Button)sender;
+        var prev = btn.Content; btn.Content = "…"; btn.IsEnabled = false;
+        try
+        {
+            var csb = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(
+                BuildConnStr(server, CoreUserBox.Text.Trim(),
+                             CorePasswordBox.Password, "master")) { ConnectTimeout = 8 };
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(csb.ConnectionString);
+            await conn.OpenAsync();
+            var dbs = new List<string>();
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(
+                "SELECT name FROM sys.databases WHERE name NOT IN " +
+                "('master','tempdb','model','msdb') ORDER BY name", conn);
+            await using var rdr = await cmd.ExecuteReaderAsync();
+            while (await rdr.ReadAsync()) dbs.Add(rdr.GetString(0));
+            CoreDatabaseBox.ItemsSource    = dbs;
+            SubCoreDatabaseBox.ItemsSource = dbs;
+            DelDatabaseBox.ItemsSource     = dbs;
+            if (dbs.Count > 0) CoreDatabaseBox.SelectedIndex = 0;
+            SetDbBadge(CoreStatusBadge, CoreStatusText, true,
+                $"ℹ  {dbs.Count} database(s) loaded");
+        }
+        catch (Exception ex)
+        {
+            SetDbBadge(CoreStatusBadge, CoreStatusText, false, $"✗  {ex.Message}");
+        }
+    }
+
+    private async void ConnectCoreDb_Click(object sender, RoutedEventArgs e)
+    {
+        ConnectCoreBtn.IsEnabled = false;
+        CoreStatusBadge.Visibility = System.Windows.Visibility.Collapsed;
+        try
+        {
+            _coreConn?.Dispose();
+            var db = CoreDatabaseBox.Text.Trim();
+            if (string.IsNullOrEmpty(db)) db = "master";
+            var cs = BuildConnStr(
+                CoreServerBox.Text.Trim(),
+                CoreUserBox.Text.Trim(),
+                CorePasswordBox.Password,
+                db);
+            _coreConn = new Microsoft.Data.SqlClient.SqlConnection(cs);
+            await _coreConn.OpenAsync();
+
+            // Always reload database list on explicit Connect (resets stale list after Reset)
+            await LoadCoreDatabasesFromConn(_coreConn);
+
+            // Mirror to all database selector dropdowns
+            SubCoreDatabaseBox.ItemsSource   = CoreDatabaseBox.ItemsSource;
+            UnlinkDatabaseBox.ItemsSource    = CoreDatabaseBox.ItemsSource;
+            DelDatabaseBox.ItemsSource       = CoreDatabaseBox.ItemsSource;
+            if (SubCoreDatabaseBox.Items.Count   > 0 && SubCoreDatabaseBox.SelectedIndex   < 0) SubCoreDatabaseBox.SelectedIndex   = 0;
+            if (UnlinkDatabaseBox.Items.Count    > 0 && UnlinkDatabaseBox.SelectedIndex    < 0) UnlinkDatabaseBox.SelectedIndex    = 0;
+            if (DelDatabaseBox.Items.Count       > 0 && DelDatabaseBox.SelectedIndex       < 0) DelDatabaseBox.SelectedIndex       = 0;
+
+            SetDbBadge(CoreStatusBadge, CoreStatusText, true,
+                $"✓  Connected — {CoreServerBox.Text.Trim()} / {db}");
+
+            // Pre-fill actions fields from connected DB (fresh connection — _coreConn is shared)
+            _ = PrefillFromCoreDbFresh(db);
+
+            // Re-populate email dropdown from Host DB if not already loaded
+            // (covers the case where the app was launched with saved settings — host emails
+            //  were never loaded because ConnectHostDb_Click wasn't explicitly triggered)
+            if (_hostAccountAllItems.Count == 0 &&
+                _hostConn?.State == System.Data.ConnectionState.Open)
+                _ = TryPrefillEmailFromHostDb(_hostConn);
+
+            // Save credentials immediately
+            SaveSettings();
+
+            // Enable actions card
+            CoreActionsCard.IsEnabled = true;
+            CoreActionsCard.Opacity   = 1.0;
+        }
+        catch (Exception ex)
+        {
+            _coreConn?.Dispose();
+            _coreConn = null;
+            SetDbBadge(CoreStatusBadge, CoreStatusText, false, $"✗  {ex.Message}");
+            CoreActionsCard.IsEnabled = false;
+            CoreActionsCard.Opacity   = 0.5;
+        }
+        finally
+        {
+            ConnectCoreBtn.IsEnabled = true;
+        }
+    }
+
+    private async Task LoadHostDatabasesFromConn(Microsoft.Data.SqlClient.SqlConnection conn)
+    {
+        try
+        {
+            var dbs = new List<string>();
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(HostDbFilter, conn);
+            await using var rdr = await cmd.ExecuteReaderAsync();
+            while (await rdr.ReadAsync())
+                dbs.Add(rdr.GetString(0));
+            HostDatabaseBox.ItemsSource = dbs;
+            var bestHost = dbs.FirstOrDefault(d =>
+                d.IndexOf("BQECoreHost", StringComparison.OrdinalIgnoreCase) >= 0)
+                ?? dbs.FirstOrDefault();
+            if (bestHost != null)
+                HostDatabaseBox.Text = bestHost;
+            else if (dbs.Count > 0 && HostDatabaseBox.SelectedIndex < 0)
+                HostDatabaseBox.SelectedIndex = 0;
+        }
+        catch { /* non-fatal */ }
+    }
+
+    /// Loads all emails from the Host DB Account table into RestoreEmailBox as a searchable dropdown.
+    /// Primary source: Account.Email (the canonical host account table).
+    /// Falls back to AccountCompany and other known tables if Account doesn't exist.
+    private async Task TryPrefillEmailFromHostDb(Microsoft.Data.SqlClient.SqlConnection conn)
+    {
+        var collected = new List<string>();
+
+        // ── Primary: Account table (Host DB canonical account store) ─────────
+        try
+        {
+            // Check Account table exists and has Email column
+            var hasAccount = await new Microsoft.Data.SqlClient.SqlCommand(
+                "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='Account' AND TABLE_SCHEMA='dbo'",
+                conn).ExecuteScalarAsync() != null;
+
+            if (hasAccount)
+            {
+                var hasEmail = await new Microsoft.Data.SqlClient.SqlCommand(
+                    "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Account' AND COLUMN_NAME='Email' AND TABLE_SCHEMA='dbo'",
+                    conn).ExecuteScalarAsync() != null;
+
+                if (hasEmail)
+                {
+                    // Load all Account emails — ordered alphabetically for the dropdown
+                    const string acctSql =
+                        "SELECT DISTINCT [Email] FROM [dbo].[Account] " +
+                        "WHERE [Email] IS NOT NULL AND LTRIM(RTRIM([Email])) <> '' " +
+                        "AND [Email] LIKE '%@%' ORDER BY [Email]";
+                    await using var acctCmd = new Microsoft.Data.SqlClient.SqlCommand(acctSql, conn);
+                    acctCmd.CommandTimeout = 30;
+                    await using var acctRdr = await acctCmd.ExecuteReaderAsync();
+                    while (await acctRdr.ReadAsync())
+                    {
+                        var e = acctRdr.GetString(0).Trim();
+                        if (!string.IsNullOrEmpty(e) && !collected.Contains(e, StringComparer.OrdinalIgnoreCase))
+                            collected.Add(e);
+                    }
+                }
+            }
+        }
+        catch { /* Account table not accessible */ }
+
+        // ── Fallback: scan Account-like tables if Account.Email not found ─────
+        if (collected.Count == 0)
+        {
+            var fallback = new[]
+            {
+                ("AccountCompany", "OwnerEmail"),
+                ("AccountCompany", "Email"),
+                ("ServiceEntity",  "OwnerEmail"),
+                ("ServiceEntity",  "Email"),
+                ("BQEAccount",     "Email"),
+                ("AccountInfo",    "OwnerEmail"),
+                ("AccountInfo",    "Email"),
+                ("tblAccount",     "Email"),
+            };
+
+            foreach (var (tbl, col) in fallback)
+            {
+                try
+                {
+                    var chk = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS " +
+                              $"WHERE TABLE_NAME='{tbl}' AND COLUMN_NAME='{col}' AND TABLE_SCHEMA='dbo'";
+                    await using var chkCmd = new Microsoft.Data.SqlClient.SqlCommand(chk, conn);
+                    if (await chkCmd.ExecuteScalarAsync() == null) continue;
+
+                    var sql = $"SELECT DISTINCT [{col}] FROM [dbo].[{tbl}] " +
+                              $"WHERE [{col}] IS NOT NULL AND LTRIM(RTRIM([{col}])) <> '' " +
+                              $"AND [{col}] LIKE '%@%' ORDER BY [{col}]";
+                    await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+                    await using var rdr = await cmd.ExecuteReaderAsync();
+                    while (await rdr.ReadAsync())
+                    {
+                        var e = rdr.GetString(0).Trim();
+                        if (!string.IsNullOrEmpty(e) && !collected.Contains(e, StringComparer.OrdinalIgnoreCase))
+                            collected.Add(e);
+                    }
+                    if (collected.Count > 0) break;
+                }
+                catch { /* try next */ }
+            }
+        }
+
+        if (collected.Count == 0) return;
+
+        // Sort: prefer Firstname.Lastname@domain format first, then alphabetically
+        var sorted = collected
+            .OrderByDescending(e => e.IndexOf('.') >= 0 && e.IndexOf('.') < e.IndexOf('@') ? 1 : 0)
+            .ThenBy(e => e)
+            .ToList();
+
+        await Dispatcher.InvokeAsync(() =>
+        {
+            _hostAccountAllItems = sorted;
+            RestoreEmailBox.ItemsSource = sorted;
+            // Default selection = first/best email
+            RestoreEmailBox.Text = sorted[0];
+        });
+    }
+
+    private async Task LoadCoreDatabasesFromConn(Microsoft.Data.SqlClient.SqlConnection conn)
+    {
+        try
+        {
+            var dbs = new List<string>();
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(
+                "SELECT name FROM sys.databases WHERE name NOT IN " +
+                "('master','tempdb','model','msdb') ORDER BY name", conn);
+            await using var rdr = await cmd.ExecuteReaderAsync();
+            while (await rdr.ReadAsync())
+                dbs.Add(rdr.GetString(0));
+            CoreDatabaseBox.ItemsSource      = dbs;
+            SubCoreDatabaseBox.ItemsSource   = dbs;
+            UnlinkDatabaseBox.ItemsSource    = dbs;
+            DelDatabaseBox.ItemsSource       = dbs;
+            if (dbs.Count > 0 && CoreDatabaseBox.SelectedIndex      < 0) CoreDatabaseBox.SelectedIndex      = 0;
+            if (dbs.Count > 0 && SubCoreDatabaseBox.SelectedIndex   < 0) SubCoreDatabaseBox.SelectedIndex   = 0;
+            if (dbs.Count > 0 && UnlinkDatabaseBox.SelectedIndex    < 0) UnlinkDatabaseBox.SelectedIndex    = 0;
+            if (dbs.Count > 0 && DelDatabaseBox.SelectedIndex       < 0) DelDatabaseBox.SelectedIndex       = 0;
+        }
+        catch { /* non-fatal */ }
+    }
+
+    // ── Section 3: Actions ────────────────────────────────────────────────────
+
+    private async void ExtendExpiry_Click(object sender, RoutedEventArgs e)
+    {
+        if (_hostConn?.State != System.Data.ConnectionState.Open &&
+            _coreConn?.State != System.Data.ConnectionState.Open)
+        {
+            SetActionBadge(ActionResultBadge, ActionResultText, false,
+                "✗  Not connected to Host DB (Section 1) or Core DB (Section 2).");
+            return;
+        }
+
+        var coreDb = CoreDatabaseBox.Text.Trim();
+        var log    = new System.Text.StringBuilder();
+        int total  = 0;
+
+        try
+        {
+            // ── HOST DB path (same logic as AdminPortal ChangePackageDate) ────────
+            // AdminPortal stores the real subscription in:
+            //   Company.TrailExpDate + Company.CompanyStatus   (trial end / status)
+            //   SubscriptionDetail.ExpiresOn                   (subscription expiry)
+            // CoreUtility uses: UPDATE Company SET CompanyStatus=2, TrailExpDate=DATEADD(MONTH,6,GETDATE())
+            if (_hostConn?.State == System.Data.ConnectionState.Open && !string.IsNullOrEmpty(coreDb))
+            {
+                // 1. Get Company.ID from DatabaseID
+                var getIdSql = "SELECT TOP 1 ID FROM [dbo].[Company] WHERE [DatabaseID] = @db";
+                string? companyId = null;
+                await using (var idCmd = new Microsoft.Data.SqlClient.SqlCommand(getIdSql, _hostConn))
+                {
+                    idCmd.Parameters.AddWithValue("@db", coreDb);
+                    var v = await idCmd.ExecuteScalarAsync();
+                    companyId = v?.ToString();
+                }
+
+                if (companyId != null)
+                {
+                    // 2. Update Company.TrailExpDate + CompanyStatus (CoreUtility approach)
+                    var compSql = """
+                        UPDATE [dbo].[Company]
+                        SET [TrailExpDate]   = DATEADD(MONTH, 6, GETUTCDATE()),
+                            [CompanyStatus]  = 2,
+                            [UpdatedOn]      = GETUTCDATE()
+                        WHERE [ID] = @cid
+                        """;
+                    await using var compCmd = new Microsoft.Data.SqlClient.SqlCommand(compSql, _hostConn);
+                    compCmd.Parameters.AddWithValue("@cid", Guid.Parse(companyId));
+                    int compRows = await compCmd.ExecuteNonQueryAsync();
+                    if (compRows > 0)
+                        log.AppendLine($"✓  Company.TrailExpDate extended +6 months, CompanyStatus = Active.");
+
+                    // 3. Update SubscriptionDetail.ExpiresOn (AdminPortal ChangePackageDate approach)
+                    //    Mirrors: UPDATE SD SET ExpiresOn = ..., UpdatedOn = ...
+                    //             FROM SubscriptionDetail SD
+                    //             INNER JOIN CompanySubscription CS ON CS.ID = SD.CompanySubscription_ID
+                    //             WHERE CS.Company_ID = @cid AND SD.Status IN (1=Active, 2=Pending, 3=LicenseAdded)
+                    var sdSql = """
+                        UPDATE SD
+                        SET SD.[ExpiresOn]  = DATEADD(MONTH, 6, GETUTCDATE()),
+                            SD.[UpdatedOn]  = GETUTCDATE()
+                        FROM [dbo].[SubscriptionDetail] SD
+                        INNER JOIN [dbo].[CompanySubscription] CS
+                            ON CS.[ID] = SD.[CompanySubscription_ID]
+                        WHERE CS.[Company_ID] = @cid
+                          AND SD.[Status] IN (1, 2, 3)
+                        """;
+                    await using var sdCmd = new Microsoft.Data.SqlClient.SqlCommand(sdSql, _hostConn);
+                    sdCmd.Parameters.AddWithValue("@cid", Guid.Parse(companyId));
+                    int sdRows = await sdCmd.ExecuteNonQueryAsync();
+                    if (sdRows > 0)
+                        log.AppendLine($"✓  SubscriptionDetail.ExpiresOn extended +6 months ({sdRows} row(s)).");
+                    else
+                        log.AppendLine("ℹ  No active SubscriptionDetail rows found — trial date only.");
+
+                    total += compRows + sdRows;
+                }
+                else
+                {
+                    log.AppendLine($"⚠  Company not found in Host DB for database [{coreDb}].");
+                }
+            }
+
+            // ── CORE DB fallback — extend expiry inside the Core DB itself ────────
+            // Used when Host DB is not connected, or as a belt-and-suspenders extra.
+            if (_coreConn?.State == System.Data.ConnectionState.Open)
+            {
+                // Try the well-known Core DB expiry tables
+                var coreTargets = new (string Table, string[] Cols)[]
+                {
+                    ("Company",          ["TrailExpDate"]),
+                    ("CompanyInfo",      ["ExpiryDate", "TrialEndDate", "LicenseExpiryDate"]),
+                    ("tblCompany",       ["ExpiryDate", "TrialEndDate"]),
+                    ("LicenseInfo",      ["ExpiryDate", "LicenseExpiryDate"]),
+                    ("SubscriptionInfo", ["ExpiryDate", "EndDate", "SubscriptionEndDate"]),
+                    ("AccountInfo",      ["ExpiryDate", "TrialEndDate"]),
+                };
+
+                foreach (var (tbl, cols) in coreTargets)
+                {
+                    var tblChk = "SELECT 1 FROM INFORMATION_SCHEMA.TABLES " +
+                                 $"WHERE TABLE_NAME = '{tbl}' AND TABLE_TYPE = 'BASE TABLE'";
+                    await using var tblCmd = new Microsoft.Data.SqlClient.SqlCommand(tblChk, _coreConn);
+                    if (await tblCmd.ExecuteScalarAsync() == null) continue;
+
+                    var goodCols = new List<string>();
+                    foreach (var col in cols)
+                    {
+                        var colChk = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS " +
+                                     $"WHERE TABLE_NAME = '{tbl}' AND COLUMN_NAME = '{col}'";
+                        await using var colCmd = new Microsoft.Data.SqlClient.SqlCommand(colChk, _coreConn);
+                        if (await colCmd.ExecuteScalarAsync() != null) goodCols.Add(col);
+                    }
+                    if (goodCols.Count == 0) continue;
+
+                    var sets   = string.Join(", ", goodCols.Select(c => $"[{c}] = DATEADD(MONTH, 6, GETUTCDATE())"));
+                    var status = tbl == "Company" ? ", [CompanyStatus] = 2 " : "";
+                    var upSql  = $"UPDATE [dbo].[{tbl}] SET {sets}{status}";
+                    await using var upCmd = new Microsoft.Data.SqlClient.SqlCommand(upSql, _coreConn);
+                    int rows = await upCmd.ExecuteNonQueryAsync();
+                    total += rows;
+                    if (rows > 0)
+                        log.AppendLine($"✓  Core DB [{tbl}] — {string.Join(", ", goodCols)} extended ({rows} row(s)).");
+                }
+
+                // Also update SubscriptionDetail in Core DB (some versions store it there)
+                var coreSubSql = """
+                    IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'SubscriptionDetail')
+                    BEGIN
+                        UPDATE SD
+                        SET SD.[ExpiresOn] = DATEADD(MONTH, 6, GETUTCDATE()),
+                            SD.[UpdatedOn] = GETUTCDATE()
+                        FROM [dbo].[SubscriptionDetail] SD
+                        INNER JOIN [dbo].[CompanySubscription] CS ON CS.[ID] = SD.[CompanySubscription_ID]
+                        WHERE SD.[Status] IN (1, 2, 3)
+                    END
+                    """;
+                try
+                {
+                    await using var coreSubCmd = new Microsoft.Data.SqlClient.SqlCommand(coreSubSql, _coreConn);
+                    int coreSubRows = await coreSubCmd.ExecuteNonQueryAsync();
+                    if (coreSubRows > 0)
+                    {
+                        total += coreSubRows;
+                        log.AppendLine($"✓  Core DB SubscriptionDetail.ExpiresOn extended ({coreSubRows} row(s)).");
+                    }
+                }
+                catch { /* non-fatal — table may not exist in Core DB */ }
+            }
+
+            if (total == 0 && log.Length == 0)
+                SetActionBadge(ActionResultBadge, ActionResultText, false,
+                    "✗  No subscription records found. Ensure Host DB (Section 1) is connected.");
+            else
+                SetActionBadge(ActionResultBadge, ActionResultText, true,
+                    $"✓  Expiry extended +6 months\n{log.ToString().TrimEnd()}");
+        }
+        catch (Exception ex)
+        {
+            SetActionBadge(ActionResultBadge, ActionResultText, false, $"✗  {ex.Message}");
+        }
+    }
+
+    private async void MakeOwner_Click(object sender, RoutedEventArgs e)
+    {
+        if (_coreConn?.State != System.Data.ConnectionState.Open)
+        {
+            SetActionBadge(ActionResultBadge, ActionResultText, false, "✗  Not connected to Core DB.");
+            return;
+        }
+        var db = CoreDatabaseBox.Text.Trim();
+        if (string.IsNullOrEmpty(db))
+        {
+            SetActionBadge(ActionResultBadge, ActionResultText, false, "✗  No database selected.");
+            return;
+        }
+
+        var log = new System.Text.StringBuilder();
+        try
+        {
+            var loginUser  = CoreUserBox.Text.Trim();
+            if (string.IsNullOrEmpty(loginUser)) loginUser = "sa";
+            // RestoreEmailBox holds a raw Host Account email — use as-is
+            var ownerEmail = RestoreEmailBox.Text.Trim();
+
+            // 1. Set SQL Server database owner
+            var ownerSql = $"USE [{db}]; EXEC sp_changedbowner '{loginUser}';";
+            await using (var cmd = new Microsoft.Data.SqlClient.SqlCommand(ownerSql, _coreConn))
+                await cmd.ExecuteNonQueryAsync();
+            log.AppendLine($"✓  SQL owner of [{db}] set to [{loginUser}].");
+
+            // 2. Dynamic user-table discovery (type-safe — no hardcoded column assumptions)
+            string? ut = null; string? ec = null;
+            var allCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            {
+                var dSql = "SELECT TOP 1 TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS " +
+                           "WHERE DATA_TYPE IN ('varchar','nvarchar','char','nchar') AND TABLE_SCHEMA='dbo' " +
+                           "  AND (TABLE_NAME IN ('UserInfo','tblUser','CoreUserInfo','AccountInfo','CoreUser','AppUser','ApplicationUser','Users','tblEmployee','Employee','Staff','Person','Member','Contact','Client','SysUser','tblSysUser','BQEUser','WebUser','PortalUser','AdminUser','AccountUser','CoreAccount') " +
+                    "    OR LOWER(TABLE_NAME) LIKE '%user%' " +
+                    "    OR LOWER(TABLE_NAME) LIKE '%account%' " +
+                    "    OR LOWER(TABLE_NAME) LIKE '%employee%' " +
+                    "    OR LOWER(TABLE_NAME) LIKE '%person%' " +
+                    "    OR LOWER(TABLE_NAME) LIKE '%staff%' " +
+                    "    OR LOWER(TABLE_NAME) LIKE '%member%') " +
+                           "  AND LOWER(COLUMN_NAME) IN ('email','emailid','emailaddress','useremail','loginemail') " +
+                           "ORDER BY CASE TABLE_NAME WHEN 'UserInfo' THEN 1 WHEN 'tblUser' THEN 2 WHEN 'CoreUserInfo' THEN 3 WHEN 'AccountInfo' THEN 4 ELSE 9 END";
+                await using var dc = new Microsoft.Data.SqlClient.SqlCommand(dSql, _coreConn);
+                await using var dr = await dc.ExecuteReaderAsync();
+                if (await dr.ReadAsync()) { ut = dr.GetString(0); ec = dr.GetString(1); }
+            }
+            if (ut != null)
+            {
+                var cSql = $"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{ut}'";
+                await using var cc = new Microsoft.Data.SqlClient.SqlCommand(cSql, _coreConn);
+                await using var cr = await cc.ExecuteReaderAsync();
+                while (await cr.ReadAsync()) allCols.Add(cr.GetString(0));
+            }
+
+            if (!string.IsNullOrEmpty(ownerEmail) && ut != null && ec != null)
+            {
+                // Update flags on existing row
+                var flags = new List<string>();
+                if (allCols.Contains("IsSysAdmin")) flags.Add("[IsSysAdmin] = 1");
+                if (allCols.Contains("IsActive"))   flags.Add("[IsActive] = 1");
+                if (flags.Count > 0)
+                {
+                    var uSql = $"IF EXISTS (SELECT 1 FROM [dbo].[{ut}] WHERE [{ec}] = @oe) " +
+                               $"UPDATE [dbo].[{ut}] SET {string.Join(", ", flags)} WHERE [{ec}] = @oe;";
+                    await using var uc = new Microsoft.Data.SqlClient.SqlCommand(uSql, _coreConn);
+                    uc.Parameters.AddWithValue("@oe", ownerEmail);
+                    await uc.ExecuteNonQueryAsync();
+                }
+
+                // Insert if missing — integer/bit columns only get literals, never the email string
+                var iCols = new List<string> { $"[{ec}]" };
+                var iVals = new List<string> { "@oe" };
+                if (allCols.Contains("IsSysAdmin")) { iCols.Add("[IsSysAdmin]"); iVals.Add("1"); }
+                if (allCols.Contains("IsActive"))   { iCols.Add("[IsActive]");   iVals.Add("1"); }
+                if (allCols.Contains("IsCoreUser")) { iCols.Add("[IsCoreUser]"); iVals.Add("1"); }
+                if (allCols.Contains("CreatedDate")){ iCols.Add("[CreatedDate]"); iVals.Add("GETDATE()"); }
+
+                var iSql = $"IF NOT EXISTS (SELECT 1 FROM [dbo].[{ut}] WHERE [{ec}] = @oe) " +
+                           $"INSERT INTO [dbo].[{ut}] ({string.Join(",", iCols)}) VALUES ({string.Join(",", iVals)});";
+                await using var ic = new Microsoft.Data.SqlClient.SqlCommand(iSql, _coreConn);
+                ic.Parameters.AddWithValue("@oe", ownerEmail);
+                await ic.ExecuteNonQueryAsync();
+                log.AppendLine($"✓  Owner [{ownerEmail}] ensured in [{ut}].");
+            }
+
+            // 3. Update CompanyInfo.OwnerEmail if that column exists
+            try
+            {
+                var chk = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CompanyInfo' AND COLUMN_NAME='OwnerEmail'";
+                await using var chkCmd = new Microsoft.Data.SqlClient.SqlCommand(chk, _coreConn);
+                if (await chkCmd.ExecuteScalarAsync() != null && !string.IsNullOrEmpty(ownerEmail))
+                {
+                    await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(
+                        "UPDATE [dbo].[CompanyInfo] SET [OwnerEmail] = @oe WHERE 1=1;", _coreConn);
+                    cmd.Parameters.AddWithValue("@oe", ownerEmail);
+                    await cmd.ExecuteNonQueryAsync();
+                    log.AppendLine("✓  CompanyInfo.OwnerEmail updated.");
+                }
+            }
+            catch { /* non-fatal */ }
+
+            SetActionBadge(ActionResultBadge, ActionResultText, true, log.ToString().TrimEnd());
+        }
+        catch (Exception ex)
+        {
+            SetActionBadge(ActionResultBadge, ActionResultText, false, $"✗  {ex.Message}\n{log}".TrimEnd());
+        }
+    }
+
+    // ── Sanitize Core DB ──────────────────────────────────────────────────────
+    private static async Task SanitizeCoreDb(
+        Microsoft.Data.SqlClient.SqlConnection conn,
+        System.Text.StringBuilder log)
+    {
+        // Tables whose rows should be fully deleted (auth tokens, session data, notifications)
+        var deleteTables = new[]
+        {
+            "AuthToken", "RefreshToken", "UserToken", "AccessToken",
+            "OAuthToken", "TokenInfo", "tblToken", "tblAuthToken",
+            "SessionInfo", "UserSession", "tblSession",
+            "PushNotification", "NotificationQueue", "EmailQueue",
+            "PasswordResetToken", "VerificationToken", "TwoFactorToken",
+            "ApiKey", "tblApiKey",
+        };
+
+        foreach (var tbl in deleteTables)
+        {
+            try
+            {
+                var existsSql =
+                    $"SELECT 1 FROM INFORMATION_SCHEMA.TABLES " +
+                    $"WHERE TABLE_NAME='{tbl}' AND TABLE_TYPE='BASE TABLE'";
+                await using var existsCmd = new Microsoft.Data.SqlClient.SqlCommand(existsSql, conn);
+                if (await existsCmd.ExecuteScalarAsync() == null) continue;
+
+                await using var delCmd = new Microsoft.Data.SqlClient.SqlCommand(
+                    $"DELETE FROM [dbo].[{tbl}]", conn);
+                int rows = await delCmd.ExecuteNonQueryAsync();
+                if (rows > 0) log.AppendLine($"✓  Deleted {rows} token/session row(s) from [{tbl}].");
+            }
+            catch { /* table may not exist or have FK constraints */ }
+        }
+
+        // ── Mask email addresses in user/account tables ──────────────────────────
+        // Each entry: (table, email-column, id-column-used-for-unique-placeholder)
+        var emailMaskCandidates = new[]
+        {
+            ("UserInfo",    "Email",    "UserID"),
+            ("UserInfo",    "UserName", "UserID"),
+            ("AccountInfo", "Email",    "AccountID"),
+            ("tblUser",     "EmailID",  "UserID"),
+            ("ContactInfo", "Email",    "ContactID"),
+            ("EmployeeInfo","Email",    "EmployeeID"),
+        };
+
+        foreach (var (tbl, col, idCol) in emailMaskCandidates)
+        {
+            try
+            {
+                var chkSql = $"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS " +
+                             $"WHERE TABLE_NAME='{tbl}' AND COLUMN_NAME='{col}'";
+                await using var chk = new Microsoft.Data.SqlClient.SqlCommand(chkSql, conn);
+                if (await chk.ExecuteScalarAsync() == null) continue;
+
+                var maskSql = $"""
+                    UPDATE [dbo].[{tbl}]
+                       SET [{col}] = LOWER(REPLACE(CAST([{idCol}] AS NVARCHAR(50)),'-',''))
+                                     + '@test.bqe.com'
+                     WHERE [{col}] IS NOT NULL
+                       AND [{col}] NOT LIKE '%@test.bqe.com';
+                    """;
+                await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(maskSql, conn);
+                int rows = await cmd.ExecuteNonQueryAsync();
+                if (rows > 0) log.AppendLine($"✓  Masked {rows} email(s) in [{tbl}].[{col}].");
+            }
+            catch { /* non-fatal */ }
+        }
+
+        // ── Mask Employee table (main Core DB employee records) ───────────────────
+        // Masks Email/EMail and name fields.
+        // IMPORTANT: HostAccount_ID is intentionally NOT touched — it is the link
+        // back to the Host DB Account record and must survive sanitize so that the
+        // dropdown can still show eligible users.
+        try
+        {
+            // Discover actual column names — schema varies across Core DB versions
+            async Task<bool> HasCol(string table, string column) =>
+                await new Microsoft.Data.SqlClient.SqlCommand(
+                    $"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' " +
+                    $"AND TABLE_NAME=@t AND COLUMN_NAME=@c", conn)
+                    { Parameters = { new("@t", table), new("@c", column) } }
+                    .ExecuteScalarAsync() != null;
+
+            bool hasEmpTbl   = await HasCol("Employee", "Employee_ID");
+            if (hasEmpTbl)
+            {
+                // Email column (Email or EMail)
+                bool hasEmail  = await HasCol("Employee", "Email");
+                bool hasEMail  = !hasEmail && await HasCol("Employee", "EMail");
+                string? emailCol = hasEmail ? "Email" : hasEMail ? "EMail" : null;
+
+                // Name columns
+                bool hasFirst  = await HasCol("Employee", "FirstName");
+                bool hasLast   = await HasCol("Employee", "LastName");
+
+                // Discover the PK to use as a unique placeholder seed
+                // Try Employee_ID (GUID), then fall back to any int-identity column
+                bool hasPkGuid = await HasCol("Employee", "Employee_ID");
+                string pkExpr  = hasPkGuid
+                    ? "LOWER(REPLACE(CAST([Employee_ID] AS NVARCHAR(50)),'-',''))"
+                    : "CAST(Employee_ID AS NVARCHAR(50))"; // generic fallback
+
+                var setClauses = new List<string>();
+
+                if (emailCol != null)
+                    setClauses.Add($"[{emailCol}] = {pkExpr} + '@test.bqe.com'");
+                if (hasFirst)
+                    setClauses.Add($"[FirstName] = 'User'");
+                if (hasLast)
+                    setClauses.Add($"[LastName]  = {pkExpr}");
+
+                if (setClauses.Count > 0)
+                {
+                    // WHERE guard: skip rows already sanitized (email ends with @test.bqe.com)
+                    string whereGuard = emailCol != null
+                        ? $"WHERE [{emailCol}] IS NULL OR [{emailCol}] NOT LIKE '%@test.bqe.com'"
+                        : "WHERE 1=1";
+
+                    var empMaskSql =
+                        $"UPDATE [dbo].[Employee] SET {string.Join(", ", setClauses)} {whereGuard}";
+                    await using var empCmd = new Microsoft.Data.SqlClient.SqlCommand(empMaskSql, conn);
+                    int empRows = await empCmd.ExecuteNonQueryAsync();
+                    log.AppendLine($"✓  Employee: masked {empRows} row(s) (email/name only — HostAccount_ID preserved).");
+                }
+            }
+        }
+        catch (Exception ex) { log.AppendLine($"⚠  Employee mask skipped: {ex.Message}"); }
+
+        // Mask payment card data
+        try
+        {
+            const string paymentSql = """
+                IF OBJECT_ID('dbo.PaymentInfo','U') IS NOT NULL
+                    UPDATE [dbo].[PaymentInfo]
+                       SET [CardNumber] = '0000000000000000',
+                           [CVV]        = '000',
+                           [CardToken]  = NULL
+                     WHERE 1=1;
+
+                IF OBJECT_ID('dbo.CreditCardInfo','U') IS NOT NULL
+                    UPDATE [dbo].[CreditCardInfo]
+                       SET [CardNumber] = '0000000000000000',
+                           [CVV]        = '000'
+                     WHERE 1=1;
+                """;
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(paymentSql, conn);
+            await cmd.ExecuteNonQueryAsync();
+            log.AppendLine("✓  Payment card data masked.");
+        }
+        catch { /* non-fatal */ }
+
+        // Mask passwords
+        try
+        {
+            const string pwdSql = """
+                IF OBJECT_ID('dbo.UserInfo','U') IS NOT NULL
+                    UPDATE [dbo].[UserInfo]
+                       SET [Password]     = NULL,
+                           [PasswordHash] = NULL,
+                           [PasswordSalt] = NULL
+                     WHERE 1=1;
+
+                IF OBJECT_ID('dbo.tblUser','U') IS NOT NULL
+                    UPDATE [dbo].[tblUser]
+                       SET [Password]     = NULL,
+                           [PasswordHash] = NULL
+                     WHERE 1=1;
+                """;
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(pwdSql, conn);
+            await cmd.ExecuteNonQueryAsync();
+            log.AppendLine("✓  Password hashes cleared.");
+        }
+        catch { /* non-fatal */ }
+    }
+
+    // ── CoreDatabaseBox selection → auto-prefill fields from selected DB ──────
+    private void CoreDatabaseBox_SelectionChanged(object sender,
+        System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        var db = CoreDatabaseBox.SelectedItem as string ?? CoreDatabaseBox.Text.Trim();
+        if (string.IsNullOrEmpty(db)) return;
+        // Always create a fresh connection — don't rely on _coreConn which may be on a different DB
+        _ = PrefillFromCoreDbFresh(db);
+    }
+
+    private async Task PrefillFromCoreDbFresh(string dbName)
+    {
+        var server = CoreServerBox.Text.Trim();
+        var user   = CoreUserBox.Text.Trim();
+        var pass   = CorePasswordBox.Password;
+        if (string.IsNullOrEmpty(server)) return;
+        try
+        {
+            var csb = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(
+                BuildConnStr(server, user, pass, dbName)) { ConnectTimeout = 15 };
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(csb.ConnectionString);
+            await conn.OpenAsync();
+            await PrefillFromCoreDb(dbName, conn);
+        }
+        catch (Exception ex)
+        {
+            await Dispatcher.InvokeAsync(() =>
+                CoreUsersBox.Text = $"(connect error: {ex.Message})");
+        }
+    }
+
+    /// <summary>
+    /// Queries the Core DB for company name (→ NewCompanyBox) and full-access users (→ CoreUsersBox).
+    /// Called both after Connect and on dropdown selection change.
+    /// </summary>
+    private async Task PrefillFromCoreDb(string dbName,
+        Microsoft.Data.SqlClient.SqlConnection conn)
+    {
+        try
+        {
+            // ── 1. Company name ───────────────────────────────────────────────
+            string? companyName = null;
+            int     dbId        = 0;
+
+            // Get numeric DB ID from master (connection is already on dbName so use sys.databases)
+            try
+            {
+                await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(
+                    "SELECT DB_ID(DB_NAME())", conn);
+                var v = await cmd.ExecuteScalarAsync();
+                if (v != null && v != DBNull.Value) dbId = Convert.ToInt32(v);
+            }
+            catch { /* non-fatal */ }
+
+            var nameCandidates = new[]
+            {
+                ("CompanyInfo", "CompanyName"),
+                ("CompanyInfo", "Name"),
+                ("tblCompany",  "CompanyName"),
+                ("tblCompany",  "Name"),
+                ("Company",     "CompanyName"),
+                ("Company",     "Name"),
+                ("AccountInfo", "CompanyName"),
+                ("AccountInfo", "Name"),
+            };
+
+            foreach (var (tbl, col) in nameCandidates)
+            {
+                try
+                {
+                    var chkSql = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS " +
+                                 $"WHERE TABLE_NAME='{tbl}' AND COLUMN_NAME='{col}'";
+                    await using var chk = new Microsoft.Data.SqlClient.SqlCommand(chkSql, conn);
+                    if (await chk.ExecuteScalarAsync() == null) continue;
+
+                    await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(
+                        $"SELECT TOP 1 [{col}] FROM [dbo].[{tbl}] " +
+                        $"WHERE [{col}] IS NOT NULL AND LTRIM(RTRIM([{col}])) <> '' " +
+                        $"ORDER BY LEN([{col}]) DESC", conn);          // longest name = most likely real
+                    var v = await cmd.ExecuteScalarAsync();
+                    if (v is string s && !string.IsNullOrWhiteSpace(s))
+                    {
+                        companyName = s.Trim();
+                        break;
+                    }
+                }
+                catch { /* try next */ }
+            }
+
+            // Fallback: parse company name from DB name pattern "CompanyName_MMDDYYYY_UniqueID"
+            if (string.IsNullOrEmpty(companyName))
+            {
+                // Strip trailing _8digits and _longdigits patterns
+                var parsed = System.Text.RegularExpressions.Regex.Replace(
+                    dbName, @"_\d{8,}$", "");
+                parsed = System.Text.RegularExpressions.Regex.Replace(
+                    parsed, @"_\d{6,8}$", "");
+                if (parsed.Length > 2 && parsed != dbName)
+                    companyName = parsed;
+                else
+                    companyName = dbName;
+            }
+
+            NewCompanyBox.Text = dbId > 0 ? $"[{dbId}] {companyName}" : companyName;
+
+            // ── 2. Users ─────────────────────────────────────────────────────────────
+            // Same approach as the original CoreUtility tool:
+            //   1. Host DB: find Company by DatabaseID = <db name>
+            //   2. Host DB: AccountCompany JOIN Account → get all linked account emails
+            //   3. Core DB: Employee JOIN Security JOIN SecurityTemplate → permission level
+            //      (matched by Employee.HostAccount_ID = Account.ID)
+            // Fallback: legacy Core DB tables for older DBs that predate HostAccount_ID.
+            var adminEmails = new List<string>();
+            var allEmails   = new List<string>();
+            string tableSearched = "none";
+
+            // Stores email → security template name for display in dropdown
+            var emailSecurityMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            bool gotFromEmployee = false;
+            var diagLog = new System.Text.StringBuilder();
+            try
+            {
+                // ── CoreUtility approach ─────────────────────────────────────────────
+                // Step 1: open a fresh Host DB connection
+                var hostServer = "";
+                var hostUser   = "";
+                var hostPass   = "";
+                var hostDb     = "";
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    hostServer = HostServerBox.Text.Trim();
+                    hostUser   = HostUserBox.Text.Trim();
+                    hostPass   = HostPasswordBox.Password;
+                    hostDb     = HostDatabaseBox.Text.Trim();
+                });
+
+                if (!string.IsNullOrEmpty(hostServer) && !string.IsNullOrEmpty(hostDb))
+                {
+                    var hostCsb = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(
+                        BuildConnStr(hostServer, hostUser, hostPass, hostDb))
+                        { ConnectTimeout = 15 };
+                    await using var hostConn = new Microsoft.Data.SqlClient.SqlConnection(hostCsb.ConnectionString);
+                    await hostConn.OpenAsync();
+
+                    // Step 2: find Company_ID
+                    // Primary: read it from the Core DB's own Company table (single row,
+                    //   same GUID as Host DB Company.ID — most reliable regardless of DatabaseID mismatch)
+                    // Fallback: Host DB Company WHERE DatabaseID = db name (works when already linked)
+                    Guid? companyId = null;
+
+                    // 2a: Core DB Company table — PK is Company_ID (not ID)
+                    //     Source: BQECoreDataAccess/BQESQL/Company.cs UpdateQuery uses Company_ID
+                    try
+                    {
+                        var hasCoreCompany = await new Microsoft.Data.SqlClient.SqlCommand(
+                            "SELECT 1 FROM INFORMATION_SCHEMA.TABLES " +
+                            "WHERE TABLE_NAME='Company' AND TABLE_SCHEMA='dbo'", conn)
+                            .ExecuteScalarAsync() != null;
+
+                        if (hasCoreCompany)
+                        {
+                            // Try Company_ID first (standard Core DB), then ID (some older schemas)
+                            var pkCol = "Company_ID";
+                            var hasPk = await new Microsoft.Data.SqlClient.SqlCommand(
+                                "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS " +
+                                "WHERE TABLE_NAME='Company' AND COLUMN_NAME='Company_ID' AND TABLE_SCHEMA='dbo'", conn)
+                                .ExecuteScalarAsync() != null;
+                            if (!hasPk) pkCol = "ID";
+
+                            await using var cidCmd = new Microsoft.Data.SqlClient.SqlCommand(
+                                $"SELECT TOP 1 [{pkCol}] FROM [dbo].[Company]", conn);
+                            var cidVal = await cidCmd.ExecuteScalarAsync();
+                            if (cidVal is Guid g) companyId = g;
+                            diagLog.Append($"Company_ID from CoreDB.{pkCol}={companyId}; ");
+                        }
+                    }
+                    catch (Exception ex) { diagLog.Append($"CoreDB Company lookup failed: {ex.Message}; "); }
+
+                    // 2b: fallback — Host DB Company WHERE DatabaseID = db name
+                    if (!companyId.HasValue)
+                    {
+                        try
+                        {
+                            await using var cidCmd2 = new Microsoft.Data.SqlClient.SqlCommand(
+                                "SELECT TOP 1 ID FROM [dbo].[Company] WHERE DatabaseID = @db", hostConn);
+                            cidCmd2.Parameters.AddWithValue("@db", dbName);
+                            var cidVal2 = await cidCmd2.ExecuteScalarAsync();
+                            if (cidVal2 is Guid g2) companyId = g2;
+                            diagLog.Append($"Company_ID from HostDB.DatabaseID={companyId}; ");
+                        }
+                        catch (Exception ex) { diagLog.Append($"HostDB DatabaseID lookup failed: {ex.Message}; "); }
+                    }
+
+                    // ── Step 3: Query Core DB Employee table directly — ALL employees ──────
+                    // This is the primary source. Starting from AccountCompany only shows
+                    // users already linked to this company — we need everyone.
+                    tableSearched = "Core DB: Employee + Security + SecurityTemplate";
+                    try
+                    {
+                        // Discover column names dynamically
+                        var colCheck = async (string tbl, string col) =>
+                            await new Microsoft.Data.SqlClient.SqlCommand(
+                                $"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{tbl}' AND COLUMN_NAME='{col}' AND TABLE_SCHEMA='dbo'",
+                                conn).ExecuteScalarAsync() != null;
+
+                        // Discover the Employee PK column name (varies by DB version).
+                        // Try Employee-specific names first; fall back to generic EF "Id"/"ID".
+                        string empPkCol = "";
+                        foreach (var candidate in new[] { "Employee_ID", "EmployeeID", "Id", "ID" })
+                        {
+                            if (await colCheck("Employee", candidate))
+                            { empPkCol = candidate; break; }
+                        }
+                        bool hasEmpTable = !string.IsNullOrEmpty(empPkCol);
+                        if (!hasEmpTable) goto skipDirectQuery;
+                        diagLog.Append($"empPkCol={empPkCol}; ");
+
+                        bool hasFirst       = await colCheck("Employee", "FirstName");
+                        bool hasLast        = await colCheck("Employee", "LastName");
+                        bool hasFullName    = !hasFirst && await colCheck("Employee", "FullName");
+                        bool hasHostAccId   = await colCheck("Employee", "HostAccount_ID");
+
+                        // Discover the human-readable EmployeeID column (may be separate from the PK).
+                        // e.g. Employee_ID = GUID (PK), EmployeeID = integer display ID.
+                        // Only use it when it's a different column from the PK.
+                        string empDisplayIdCol = "";
+                        if (!empPkCol.Equals("EmployeeID", StringComparison.OrdinalIgnoreCase)
+                            && await colCheck("Employee", "EmployeeID"))
+                            empDisplayIdCol = "EmployeeID";
+                        diagLog.Append($"empDisplayIdCol={empDisplayIdCol}; ");
+
+                        // Discover email column — try all common names used across Core DB versions
+                        string empEmailCol = "";
+                        foreach (var candidate in new[] { "Email", "EMail", "WorkEmail", "BusinessEmail",
+                                                          "EmailAddress", "EMailAddress", "OfficeEmail",
+                                                          "PrimaryEmail", "ContactEmail" })
+                        {
+                            if (await colCheck("Employee", candidate))
+                            { empEmailCol = candidate; break; }
+                        }
+                        bool empHasEmail = !string.IsNullOrEmpty(empEmailCol);
+                        diagLog.Append($"empEmailCol={empEmailCol}; ");
+
+                        // ── Single JOIN query — mirrors CoreUtility exactly ───────────────
+                        // Employee → Security → SecurityTemplate in one shot.
+                        // col 0 = Employee PK (guid or int)
+                        // col 1 = email (or '' when no email column exists)
+                        // col 2 = DisplayName
+                        // col 3 = HostAccount_ID (guid or NULL)
+                        // col 4 = SecurityTemplateName (string or NULL when no Security row)
+                        //
+                        // Name priority: FirstName+LastName > FullName > Email > EmployeeID > PK cast
+                        string idFallback = !string.IsNullOrEmpty(empDisplayIdCol)
+                            ? $"CAST(e.[{empDisplayIdCol}] AS NVARCHAR(50))"   // human-readable e.g. "1042"
+                            : $"CAST(e.[{empPkCol}] AS NVARCHAR(50))";         // GUID fallback
+
+                        string nameExpr = hasFirst && hasLast
+                            ? "LTRIM(RTRIM(ISNULL(e.FirstName,'') + ' ' + ISNULL(e.LastName,'')))"
+                            : hasFullName ? "ISNULL(e.FullName,'')"
+                            : empHasEmail ? $"ISNULL(NULLIF(LTRIM(RTRIM(e.[{empEmailCol}])),''), {idFallback})"
+                            : idFallback;
+                        string hostAccIdExpr = hasHostAccId ? "e.HostAccount_ID" : "NULL";
+                        // Email expression: use the discovered column; fall back to empty string so col 1 is always present
+                        string emailExpr = empHasEmail ? $"e.[{empEmailCol}]" : "''";
+                        // WHERE clause: filter to valid emails only when we have an email column
+                        string emailWhere = empHasEmail
+                            ? $"e.[{empEmailCol}] IS NOT NULL " +
+                              $"  AND LTRIM(RTRIM(e.[{empEmailCol}])) <> '' " +
+                              $"  AND CAST(e.[{empEmailCol}] AS NVARCHAR(500)) LIKE '%@%'"
+                            : "1=1";  // no email column — return all employees
+
+                        // Discover Security → Employee FK column name independently of empPkCol.
+                        // Always check the known Employee-specific FK names first so that even
+                        // when empPkCol resolved to a generic "Id" the JOIN condition is correct.
+                        string secEmpFkCol = "";
+                        foreach (var candidate in new[] { "Employee_ID", "EmployeeID", empPkCol })
+                        {
+                            if (await colCheck("Security", candidate))
+                            { secEmpFkCol = candidate; break; }
+                        }
+                        if (string.IsNullOrEmpty(secEmpFkCol)) secEmpFkCol = empPkCol; // last resort
+                        diagLog.Append($"secEmpFkCol={secEmpFkCol}; ");
+
+                        // Use LEFT JOINs so employees without a Security record still appear.
+                        var joinSql =
+                            $"SELECT e.[{empPkCol}], {emailExpr} AS Email, {nameExpr} AS DisplayName, " +
+                            $"  {hostAccIdExpr} AS HostAccountID, " +
+                            "  ISNULL(NULLIF(LTRIM(RTRIM(st.[SecurityTemplateName])), ''), '') AS SecurityTemplateName " +
+                            "FROM [dbo].[Employee] e " +
+                            $"LEFT JOIN [dbo].[Security] s  ON s.[{secEmpFkCol}] = e.[{empPkCol}] " +
+                            "LEFT JOIN [dbo].[SecurityTemplate] st ON st.[SecurityTemplate_ID] = s.[SecurityTemplate_ID] " +
+                            $"WHERE {emailWhere} " +
+                            $"ORDER BY DisplayName";
+
+                        // employee email → { HostAccount_ID, DisplayName, SecurityProfile }
+                        // An employee can have multiple Security rows (one per profile); keep the highest-access one.
+                        var empRowsRaw = new Dictionary<string, (string DisplayName, Guid? HostAccId, string SecProfile)>(
+                            StringComparer.OrdinalIgnoreCase);
+                        int rawCount = 0;
+                        try
+                        {
+                            await using var jCmd = new Microsoft.Data.SqlClient.SqlCommand(joinSql, conn);
+                            jCmd.CommandTimeout = 30;
+                            await using var jRdr = await jCmd.ExecuteReaderAsync();
+                            while (await jRdr.ReadAsync())
+                            {
+                                rawCount++;
+                                var em  = jRdr.IsDBNull(1) ? "" : jRdr.GetString(1).Trim();
+                                // When no email column: synthesise from HostAccount_ID or Employee_ID so we have a unique key
+                                if (string.IsNullOrEmpty(em))
+                                {
+                                    // Try to derive from HostAccount_ID later; for now use Employee_ID as placeholder
+                                    if (!jRdr.IsDBNull(0) && jRdr.GetFieldType(0) == typeof(Guid))
+                                        em = $"__empid_{jRdr.GetGuid(0)}";
+                                    else continue;
+                                }
+                                var nm  = jRdr.IsDBNull(2) ? "" : jRdr.GetString(2).Trim();
+                                Guid? hid = (!jRdr.IsDBNull(3) && jRdr.GetFieldType(3) == typeof(Guid))
+                                    ? jRdr.GetGuid(3) : (Guid?)null;
+                                var prof = jRdr.IsDBNull(4) ? "" : jRdr.GetString(4).Trim();
+
+                                if (!empRowsRaw.TryGetValue(em, out var existing))
+                                {
+                                    empRowsRaw[em] = (nm, hid, prof);
+                                }
+                                else
+                                {
+                                    // Multiple Security rows for same employee — keep highest-access profile
+                                    bool newHigh = prof.IndexOf("Full Access", StringComparison.OrdinalIgnoreCase) >= 0
+                                               || prof.IndexOf("Admin",       StringComparison.OrdinalIgnoreCase) >= 0;
+                                    bool oldHigh = existing.SecProfile.IndexOf("Full Access", StringComparison.OrdinalIgnoreCase) >= 0
+                                               || existing.SecProfile.IndexOf("Admin",       StringComparison.OrdinalIgnoreCase) >= 0;
+                                    if (newHigh && !oldHigh)
+                                        empRowsRaw[em] = (nm, hid, prof);
+                                    else if (string.IsNullOrEmpty(existing.SecProfile) && !string.IsNullOrEmpty(prof))
+                                        empRowsRaw[em] = (nm, hid, prof);
+                                }
+                            }
+                        }
+                        catch (Exception joinEx) { diagLog.Append($"JOIN query err:{joinEx.Message}; "); }
+
+                        var empRows = empRowsRaw
+                            .Select(kv => (EmpEmail: kv.Key, kv.Value.DisplayName, kv.Value.HostAccId, SecProfile: kv.Value.SecProfile))
+                            .ToList();
+                        diagLog.Append($"empRows={empRows.Count}(rawRows={rawCount},withProfile={empRows.Count(r => !string.IsNullOrEmpty(r.SecProfile))}); ");
+
+                        // Build HostAccount_ID → Host Account email map (for downstream ops that need the Host email)
+                        // Only do this if we have HostAccount_IDs to resolve
+                        var hostAccIdToEmail = new Dictionary<Guid, string>();
+                        var hostIds = empRows.Where(r => r.HostAccId.HasValue)
+                                             .Select(r => r.HostAccId!.Value)
+                                             .Distinct().ToList();
+                        if (hostIds.Count > 0)
+                        {
+                            for (int bi = 0; bi < hostIds.Count; bi += 500)
+                            {
+                                var chunk = hostIds.Skip(bi).Take(500);
+                                var idList = string.Join(",", chunk.Select(g => $"'{g}'"));
+                                try
+                                {
+                                    await using var haCmd = new Microsoft.Data.SqlClient.SqlCommand(
+                                        "SELECT ID, Email FROM [dbo].[Account] " +
+                                        $"WHERE ID IN ({idList}) AND Email IS NOT NULL AND Email LIKE '%@%'",
+                                        hostConn);
+                                    await using var haRdr = await haCmd.ExecuteReaderAsync();
+                                    while (await haRdr.ReadAsync())
+                                    {
+                                        if (!haRdr.IsDBNull(0) && !haRdr.IsDBNull(1))
+                                            hostAccIdToEmail[haRdr.GetGuid(0)] = haRdr.GetString(1).Trim();
+                                    }
+                                }
+                                catch { /* non-fatal */ }
+                            }
+                            diagLog.Append($"HostAccount emails resolved={hostAccIdToEmail.Count}/{hostIds.Count}; ");
+                        }
+
+                        // Build localEmailMap: display label → canonical email
+                        // Canonical email = Host Account email (if resolvable) else Employee email
+                        static string NameFromEmail(string em)
+                        {
+                            var local = em.Contains('@') ? em[..em.IndexOf('@')] : em;
+                            var parts = local.Split(new[] { '.', '_', '-', '+' },
+                                StringSplitOptions.RemoveEmptyEntries);
+                            return string.Join(" ", parts.Select(p =>
+                                p.Length > 0 ? char.ToUpper(p[0]) + p[1..].ToLower() : p));
+                        }
+
+                        // ── Pass 1: strict — only users with HostAccount_ID AND SecurityProfile ──
+                        // These are "fully eligible" users for the main use-case (existing linked DB).
+                        var localEmailMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                        void AddToMap(string empEmail, string dispName2, Guid? hostAccId2, string secProfile2)
+                        {
+                            // Resolve canonical email: prefer Host Account email, else Employee email.
+                            // __empid_ prefix means the Employee table had no email column — no email to show.
+                            bool noEmail = empEmail.StartsWith("__empid_", StringComparison.Ordinal);
+                            var canonEmail2 = (!noEmail && hostAccId2.HasValue && hostAccIdToEmail.TryGetValue(hostAccId2.Value, out var he2))
+                                ? he2 : (noEmail ? "" : empEmail);
+
+                            var displayName2 = !string.IsNullOrEmpty(dispName2) ? dispName2
+                                : (!string.IsNullOrEmpty(canonEmail2) ? NameFromEmail(canonEmail2) : "Employee");
+
+                            // Format: "John Smith (john@host.com) — Full Access"
+                            // When no email available, omit the (email) part entirely.
+                            string displayItem2;
+                            if (!string.IsNullOrEmpty(canonEmail2))
+                                displayItem2 = !string.IsNullOrEmpty(secProfile2)
+                                    ? $"{displayName2} ({canonEmail2}) — {secProfile2}"
+                                    : $"{displayName2} ({canonEmail2})";
+                            else
+                                displayItem2 = !string.IsNullOrEmpty(secProfile2)
+                                    ? $"{displayName2} — {secProfile2}"
+                                    : displayName2;
+
+                            var key2 = displayItem2; var ctr2 = 2;
+                            while (localEmailMap.ContainsKey(key2)) key2 = $"{displayItem2} #{ctr2++}";
+
+                            // Store real email as map value; fall back to empEmail (__empid_ key) when no email column
+                            var mapValue = !string.IsNullOrEmpty(canonEmail2) ? canonEmail2 : empEmail;
+                            localEmailMap[key2] = mapValue;
+                            if (!emailSecurityMap.ContainsKey(mapValue))
+                                emailSecurityMap[mapValue] = secProfile2;
+
+                            bool isAdmin2 = secProfile2.IndexOf("Full Access", StringComparison.OrdinalIgnoreCase) >= 0
+                                         || secProfile2.IndexOf("Admin", StringComparison.OrdinalIgnoreCase) >= 0;
+                            if (isAdmin2 && !adminEmails.Contains(mapValue)) adminEmails.Add(mapValue);
+                            if (!allEmails.Contains(mapValue)) allEmails.Add(mapValue);
+                        }
+
+                        foreach (var (empEmail, dispName, hostAccId, secProfile) in empRows)
+                        {
+                            if (!hostAccId.HasValue) continue;           // must have Host Account
+                            if (string.IsNullOrWhiteSpace(secProfile)) continue; // must have profile
+                            AddToMap(empEmail, dispName, hostAccId, secProfile);
+                        }
+
+                        // ── Pass 2: fallback — if NO eligible users found (e.g. sanitized/fresh DB
+                        //   that hasn't been linked yet) show ALL employees so the tool remains usable.
+                        //   Indicate fallback mode in the label so the operator knows.
+                        bool usingFallback = localEmailMap.Count == 0;
+                        if (usingFallback)
+                        {
+                            diagLog.Append("fallback=allEmployees; ");
+                            foreach (var (empEmail, dispName, hostAccId, secProfile) in empRows)
+                                AddToMap(empEmail, dispName, hostAccId, secProfile);
+                        }
+
+                        await Dispatcher.InvokeAsync(() => { _coreUserEmailMap = localEmailMap; });
+                        gotFromEmployee = allEmails.Count > 0;
+                        diagLog.Append($"final users={allEmails.Count}(fallback={usingFallback}); ");
+                    }
+                    catch (Exception de) { diagLog.Append($"Direct Employee query error: {de.Message}; "); }
+                    skipDirectQuery:;
+                }
+                else
+                {
+                    diagLog.Append("Host DB credentials not set; ");
+                }
+            }
+            catch (Exception empEx)
+            {
+                diagLog.Append($"Host path error: {empEx.Message}; ");
+                /* fall through to legacy path */
+            }
+
+            // ── Supplemental: ALWAYS scan Core DB Employee table directly ─────────
+            // Catches users who are in Core DB but not linked in Host DB AccountCompany
+            // (e.g. full-access users whose HostAccount_ID has no matching Account row).
+            try
+            {
+                // Find email + name + security profile columns in the Core DB user/employee table
+                var knownEmpPairs = new (string Tbl, string EmailCol)[]
+                {
+                    ("Employee",     "Email"),
+                    ("Employee",     "EMail"),
+                    ("tblEmployee",  "Email"),
+                    ("UserInfo",     "Email"),
+                    ("CoreUserInfo", "Email"),
+                };
+                foreach (var (eTbl, eCol) in knownEmpPairs)
+                {
+                    var chkSql = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS " +
+                                 $"WHERE TABLE_NAME='{eTbl}' AND COLUMN_NAME='{eCol}' AND TABLE_SCHEMA='dbo'";
+                    await using var chkCmd = new Microsoft.Data.SqlClient.SqlCommand(chkSql, conn);
+                    if (await chkCmd.ExecuteScalarAsync() == null) continue;
+
+                    // Discover name columns
+                    var hasFirst = await new Microsoft.Data.SqlClient.SqlCommand(
+                        $"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{eTbl}' AND COLUMN_NAME='FirstName' AND TABLE_SCHEMA='dbo'", conn).ExecuteScalarAsync() != null;
+                    var hasLast  = await new Microsoft.Data.SqlClient.SqlCommand(
+                        $"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{eTbl}' AND COLUMN_NAME='LastName' AND TABLE_SCHEMA='dbo'", conn).ExecuteScalarAsync() != null;
+                    var hasFull  = !hasFirst && await new Microsoft.Data.SqlClient.SqlCommand(
+                        $"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{eTbl}' AND COLUMN_NAME='FullName' AND TABLE_SCHEMA='dbo'", conn).ExecuteScalarAsync() != null;
+
+                    // Discover IsFullAccess / IsAdmin columns
+                    var hasFullAcc = await new Microsoft.Data.SqlClient.SqlCommand(
+                        $"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{eTbl}' AND COLUMN_NAME='IsFullAccess' AND TABLE_SCHEMA='dbo'", conn).ExecuteScalarAsync() != null;
+                    var hasIsAdmin = !hasFullAcc && await new Microsoft.Data.SqlClient.SqlCommand(
+                        $"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{eTbl}' AND COLUMN_NAME='IsAdmin' AND TABLE_SCHEMA='dbo'", conn).ExecuteScalarAsync() != null;
+
+                    var nameExpr  = hasFirst && hasLast ? $"LTRIM(RTRIM(ISNULL(FirstName,'') + ' ' + ISNULL(LastName,'')))"
+                                  : hasFull             ? "FullName"
+                                  :                       $"[{eCol}]";
+                    var adminExpr = hasFullAcc ? "IsFullAccess" : hasIsAdmin ? "IsAdmin" : "NULL";
+
+                    var suppSql =
+                        $"SELECT [{eCol}], {nameExpr}, CAST({adminExpr} AS BIT) " +
+                        $"FROM [dbo].[{eTbl}] " +
+                        $"WHERE [{eCol}] IS NOT NULL AND LTRIM(RTRIM([{eCol}])) <> '' " +
+                        $"  AND CAST([{eCol}] AS NVARCHAR(500)) LIKE '%@%' " +
+                        $"ORDER BY {nameExpr}";
+
+                    await using var suppCmd = new Microsoft.Data.SqlClient.SqlCommand(suppSql, conn);
+                    await using var suppRdr = await suppCmd.ExecuteReaderAsync();
+                    while (await suppRdr.ReadAsync())
+                    {
+                        var em      = suppRdr.IsDBNull(0) ? "" : suppRdr.GetString(0).Trim();
+                        var nm      = suppRdr.IsDBNull(1) ? "" : suppRdr.GetString(1).Trim();
+                        var isAdmin = !suppRdr.IsDBNull(2) && suppRdr.GetBoolean(2);
+                        if (string.IsNullOrEmpty(em)) continue;
+
+                        // Skip if already present — check both allEmails AND _coreUserEmailMap values.
+                        // The main query stores canonEmail (Host Account email) in allEmails; Employee.Email
+                        // may differ.  If _coreUserEmailMap already has a label pointing to the same person
+                        // (matched by Employee email appearing as a map value) skip to avoid duplicates.
+                        bool alreadySeen = allEmails.Contains(em, StringComparer.OrdinalIgnoreCase)
+                            || _coreUserEmailMap.Values.Contains(em, StringComparer.OrdinalIgnoreCase);
+                        if (!alreadySeen)
+                        {
+                            // Use same format as main query: "Name (email) — Profile"
+                            var dispNameS = !string.IsNullOrEmpty(nm) ? nm : (em.Contains('@')
+                                ? string.Join(" ", em[..em.IndexOf('@')].Split(new[] { '.', '_', '-', '+' },
+                                    StringSplitOptions.RemoveEmptyEntries)
+                                    .Select(p => p.Length > 0 ? char.ToUpper(p[0]) + p[1..].ToLower() : p))
+                                : em);
+                            var sec = emailSecurityMap.TryGetValue(em, out var s) ? s : "";
+                            var dispItemS = !string.IsNullOrEmpty(sec)
+                                ? $"{dispNameS} ({em}) — {sec}"
+                                : $"{dispNameS} ({em})";
+
+                            var keyS = dispItemS; var ctrS = 2;
+                            while (_coreUserEmailMap.ContainsKey(keyS)) keyS = $"{dispItemS} #{ctrS++}";
+
+                            _coreUserEmailMap[keyS] = em;
+                            allEmails.Add(em);
+                            if (isAdmin && !adminEmails.Contains(em)) adminEmails.Add(em);
+                            diagLog.Append($"+supp:{em}; ");
+                        }
+                    }
+                    break; // found the employee table — no need to check others
+                }
+            }
+            catch (Exception suppEx) { diagLog.Append($"supp scan err: {suppEx.Message}; "); }
+
+            // ── Extra: when Host DB lookup gave 0 emails — scan Core DB directly for any email data ──
+            // Handles: Core DB linked to different Host DB, or no AccountCompany records yet.
+            if (!gotFromEmployee)
+            {
+                try
+                {
+                    // Find ALL tables in this Core DB that have an email-like column
+                    const string coreEmailDiscoverSql =
+                        "SELECT t.TABLE_NAME, c.COLUMN_NAME " +
+                        "FROM INFORMATION_SCHEMA.TABLES t " +
+                        "JOIN INFORMATION_SCHEMA.COLUMNS c " +
+                        "  ON c.TABLE_NAME = t.TABLE_NAME AND c.TABLE_SCHEMA = t.TABLE_SCHEMA " +
+                        "WHERE t.TABLE_TYPE = 'BASE TABLE' AND t.TABLE_SCHEMA = 'dbo' " +
+                        "  AND LOWER(c.COLUMN_NAME) LIKE '%email%' " +
+                        "ORDER BY " +
+                        // Prefer tables that sound like user/employee/account records
+                        "  CASE WHEN LOWER(t.TABLE_NAME) LIKE '%employee%' THEN 0 " +
+                        "       WHEN LOWER(t.TABLE_NAME) LIKE '%user%'     THEN 1 " +
+                        "       WHEN LOWER(t.TABLE_NAME) LIKE '%account%'  THEN 2 " +
+                        "       WHEN LOWER(t.TABLE_NAME) LIKE '%contact%'  THEN 3 " +
+                        "       WHEN LOWER(t.TABLE_NAME) LIKE '%person%'   THEN 4 " +
+                        "       ELSE 9 END, t.TABLE_NAME, c.COLUMN_NAME";
+
+                    var coreEmailCols = new List<(string Tbl, string Col)>();
+                    await using (var cedc = new Microsoft.Data.SqlClient.SqlCommand(coreEmailDiscoverSql, conn))
+                    await using (var cedr = await cedc.ExecuteReaderAsync())
+                    {
+                        while (await cedr.ReadAsync())
+                            coreEmailCols.Add((cedr.GetString(0), cedr.GetString(1)));
+                    }
+                    diagLog.Append($"CoreDB email cols found={coreEmailCols.Count}({string.Join(",", coreEmailCols.Select(x => $"{x.Tbl}.{x.Col}"))}); ");
+
+                    foreach (var (tbl, col) in coreEmailCols)
+                    {
+                        try
+                        {
+                            // Try active-only filter if IsActive/Status column exists
+                            var hasIsActive = await new Microsoft.Data.SqlClient.SqlCommand(
+                                $"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS " +
+                                $"WHERE TABLE_NAME='{tbl}' AND COLUMN_NAME='IsActive' AND TABLE_SCHEMA='dbo'",
+                                conn).ExecuteScalarAsync() != null;
+                            var hasStatus = !hasIsActive && await new Microsoft.Data.SqlClient.SqlCommand(
+                                $"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS " +
+                                $"WHERE TABLE_NAME='{tbl}' AND COLUMN_NAME='Status' AND TABLE_SCHEMA='dbo'",
+                                conn).ExecuteScalarAsync() != null;
+                            var activeFilter = hasIsActive ? "IsActive = 1 AND " : hasStatus ? "Status = 1 AND " : "";
+
+                            var scanSql =
+                                $"SELECT DISTINCT [{col}] FROM [dbo].[{tbl}] " +
+                                $"WHERE {activeFilter}[{col}] IS NOT NULL " +
+                                $"AND LTRIM(RTRIM([{col}])) <> '' AND CAST([{col}] AS NVARCHAR(500)) LIKE '%@%' " +
+                                $"ORDER BY [{col}]";
+                            await using (var sc = new Microsoft.Data.SqlClient.SqlCommand(scanSql, conn))
+                            await using (var sr = await sc.ExecuteReaderAsync())
+                            {
+                                while (await sr.ReadAsync())
+                                {
+                                    var em = sr.GetString(0).Trim();
+                                    if (!string.IsNullOrEmpty(em))
+                                    {
+                                        if (!allEmails.Contains(em))   allEmails.Add(em);
+                                        if (!adminEmails.Contains(em)) adminEmails.Add(em);
+                                    }
+                                }
+                            }
+                            if (allEmails.Count > 0)
+                            {
+                                tableSearched = $"{tbl}.{col} (CoreDB scan)";
+                                diagLog.Append($"Found {allEmails.Count} in {tbl}.{col}; ");
+                                break;
+                            }
+                        }
+                        catch (Exception scEx) { diagLog.Append($"{tbl}.{col} scan err: {scEx.Message}; "); }
+                    }
+
+                    if (allEmails.Count > 0) gotFromEmployee = true;
+                }
+                catch (Exception coreDiscEx) { diagLog.Append($"CoreDB email scan error: {coreDiscEx.Message}; "); }
+            }
+
+            // ── Fallback: legacy tables for older DBs without HostAccount_ID ──────
+            if (!gotFromEmployee)
+            {
+                var knownPairs = new (string Table, string Col)[]
+                {
+                    ("UserInfo",     "Email"),
+                    ("tblUser",      "EmailID"),
+                    ("CoreUserInfo", "Email"),
+                    ("AccountInfo",  "Email"),
+                    ("tblEmployee",  "Email"),
+                    ("tblEmployee",  "EMail"),
+                    ("Employee",     "Email"),
+                    ("Employee",     "EMail"),       // BQE Core naming convention (capital M)
+                    ("Employee",     "EmailID"),
+                    ("Employee",     "WorkEmail"),
+                    ("Employee",     "EmailAddress"),
+                    ("EmployeeInfo", "Email"),
+                    ("EmployeeInfo", "EMail"),
+                    ("user_table",   "actEmail"),
+                    ("AccountTable", "actEmail"),
+                    ("BQUsers",      "Email"),
+                    ("Account",      "Email"),      // some DBs mirror the host Account table
+                };
+
+                var tableColPairs = new List<(string Table, string Col)>();
+                foreach (var (tbl, col) in knownPairs)
+                {
+                    try
+                    {
+                        var existsSql =
+                            "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS " +
+                            $"WHERE TABLE_NAME='{tbl}' AND COLUMN_NAME='{col}' AND TABLE_SCHEMA='dbo'";
+                        await using var exCmd = new Microsoft.Data.SqlClient.SqlCommand(existsSql, conn);
+                        if (await exCmd.ExecuteScalarAsync() != null)
+                            tableColPairs.Add((tbl, col));
+                    }
+                    catch { }
+                }
+
+                var adminFilters = new[]
+                {
+                    "IsSysAdmin = 1", "IsFullAccess = 1", "IsAccountAdmin = 1",
+                    "IsAdmin = 1", "UserType IN ('Full','Admin','SuperAdmin','FullAccess','4','3')",
+                };
+
+                foreach (var (tbl, col) in tableColPairs)
+                {
+                    var localAdmin = new List<string>();
+                    var localAll   = new List<string>();
+
+                    // Pass 1 — admin/full-access
+                    foreach (var af in adminFilters)
+                    {
+                        var flagCol = af.Split(' ')[0];
+                        try
+                        {
+                            var chkFlag = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS " +
+                                          $"WHERE TABLE_NAME='{tbl}' AND COLUMN_NAME='{flagCol}'";
+                            await using var chkCmd = new Microsoft.Data.SqlClient.SqlCommand(chkFlag, conn);
+                            if (await chkCmd.ExecuteScalarAsync() == null) continue;
+
+                            var sql = $"SELECT DISTINCT [{col}] FROM [dbo].[{tbl}] " +
+                                      $"WHERE {af} AND [{col}] IS NOT NULL " +
+                                      $"AND LTRIM(RTRIM([{col}])) <> '' AND [{col}] LIKE '%@%' " +
+                                      $"ORDER BY [{col}]";
+                            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+                            await using var rdr = await cmd.ExecuteReaderAsync();
+                            while (await rdr.ReadAsync())
+                            {
+                                var em = rdr.GetString(0).Trim();
+                                if (!string.IsNullOrEmpty(em) && !localAdmin.Contains(em))
+                                    localAdmin.Add(em);
+                            }
+                        }
+                        catch { }
+                    }
+
+                    // Pass 2 — all users
+                    try
+                    {
+                        var chkActive = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS " +
+                                        $"WHERE TABLE_NAME='{tbl}' AND COLUMN_NAME='IsActive'";
+                        await using var chkActCmd = new Microsoft.Data.SqlClient.SqlCommand(chkActive, conn);
+                        var hasActive = await chkActCmd.ExecuteScalarAsync() != null;
+
+                        var activeFilter = hasActive ? "IsActive = 1 AND " : "";
+                        var sql2 = $"SELECT DISTINCT [{col}] FROM [dbo].[{tbl}] " +
+                                   $"WHERE {activeFilter}[{col}] IS NOT NULL " +
+                                   $"AND LTRIM(RTRIM([{col}])) <> '' AND [{col}] LIKE '%@%' " +
+                                   $"ORDER BY [{col}]";
+                        await using var cmd2 = new Microsoft.Data.SqlClient.SqlCommand(sql2, conn);
+                        await using var rdr2 = await cmd2.ExecuteReaderAsync();
+                        while (await rdr2.ReadAsync())
+                        {
+                            var em = rdr2.GetString(0).Trim();
+                            if (!string.IsNullOrEmpty(em) && !localAll.Contains(em))
+                                localAll.Add(em);
+                        }
+                    }
+                    catch { }
+
+                    foreach (var em in localAdmin)
+                        if (!adminEmails.Contains(em)) adminEmails.Add(em);
+                    foreach (var em in localAll)
+                        if (!allEmails.Contains(em)) allEmails.Add(em);
+
+                    if (adminEmails.Count > 0 || allEmails.Count > 0)
+                    {
+                        tableSearched = $"{tbl}.{col}";
+                        break;
+                    }
+                }
+            }
+
+            // ── Build dropdown: "Name (SecurityProfile)" ordered admins first ──────
+            // Use _coreUserEmailMap if it was populated (Host DB path); fall back to email-only.
+            var dropdownItems = new List<string>();
+
+            // Collect display labels for admin emails first, then the rest
+            // _coreUserEmailMap is keyed by display label → email (populated in Step 6 above)
+            // For the legacy/Core-DB-scan paths _coreUserEmailMap may be empty — use email directly.
+            // Derive readable name from email: "john.doe@co.com" → "John Doe"
+            static string NameFromEmailOuter(string em)
+            {
+                var local = em.Contains('@') ? em[..em.IndexOf('@')] : em;
+                var parts = local.Split(new[] { '.', '_', '-', '+' },
+                    StringSplitOptions.RemoveEmptyEntries);
+                return string.Join(" ", parts.Select(p =>
+                    p.Length > 0 ? char.ToUpper(p[0]) + p[1..].ToLower() : p));
+            }
+
+            Func<string, string> labelFor = email =>
+            {
+                // Find the display label that maps to this email
+                foreach (var kv in _coreUserEmailMap)
+                    if (string.Equals(kv.Value, email, StringComparison.OrdinalIgnoreCase))
+                        return kv.Key;
+                // Fallback: derive name from email — never show raw email address
+                var sec = emailSecurityMap.TryGetValue(email, out var s) && !string.IsNullOrEmpty(s) ? $" ({s})" : "";
+                return $"{NameFromEmailOuter(email)}{sec}";
+            };
+
+            // Build dropdown — admins first, then the rest.
+            // Guard against duplicate labels: same person can appear via multiple paths
+            // (e.g. once with Host Account email, once with Employee email).
+            var seenLabels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var e in adminEmails)
+            {
+                var lbl = labelFor(e);
+                if (seenLabels.Add(lbl)) dropdownItems.Add(lbl);
+            }
+            foreach (var e in allEmails)
+            {
+                if (adminEmails.Contains(e, StringComparer.OrdinalIgnoreCase)) continue;
+                var lbl = labelFor(e);
+                if (seenLabels.Add(lbl)) dropdownItems.Add(lbl);
+            }
+
+            await Dispatcher.InvokeAsync(() =>
+            {
+                // Store the full list so live-search can filter it without losing entries
+                _coreUserAllItems = dropdownItems.Count > 0 ? new List<string>(dropdownItems) : [];
+
+                // Default selection = first admin, or first user
+                var defaultEmail = adminEmails.Count > 0 ? adminEmails[0] : allEmails.FirstOrDefault() ?? "";
+                var defaultLabel = dropdownItems.Count > 0 ? labelFor(defaultEmail) : "";
+                var noUsersMsg   = $"(no eligible users — {tableSearched} | {diagLog.ToString().TrimEnd(' ', ';')})";
+
+                // ── CoreUsersBox ─────────────────────────────────────────────────────
+                var diagTip = $"Loaded {dropdownItems.Count} user(s) — {diagLog.ToString().TrimEnd(' ', ';')}";
+                CoreUsersBox.ItemsSource = dropdownItems.Count > 0 ? dropdownItems : null;
+                CoreUsersBox.Text = dropdownItems.Count > 0 ? defaultLabel : noUsersMsg;
+                CoreUsersBox.ToolTip = dropdownItems.Count > 0
+                    ? $"Type to filter. {diagTip}"
+                    : noUsersMsg;
+
+                // ── AccountUsersBox — same list, no default selection ────────────────
+                AccountUsersBox.ItemsSource = dropdownItems.Count > 0 ? dropdownItems : null;
+                AccountUsersBox.Text = string.Empty;
+
+                // RestoreEmailBox is populated from the Host DB Account table (TryPrefillEmailFromHostDb)
+                // — do NOT overwrite it here with the Core DB user list.
+            });
+        }
+        catch (Exception ex)
+        {
+            await Dispatcher.InvokeAsync(() =>
+                CoreUsersBox.Text = $"(error loading users: {ex.Message})");
+        }
+    }
+
+    // ── CoreUsersBox ─────────────────────────────────────────────────────────
+
+    private void CoreUsersBox_DropDownClosed(object sender, EventArgs e)
+    {
+        // DropDownClosed fires AFTER the dropdown is gone — safe to null SelectedItem here.
+        // Set Text AFTER the null so our value wins over WPF's internal clear.
+        if (CoreUsersBox.SelectedItem is not string label) return;
+        CoreUsersBox.SelectedItem = null;
+        CoreUsersBox.Text = label;
+        CoreUsersBox.ItemsSource = _coreUserAllItems.Count > 0 ? _coreUserAllItems : null;
+    }
+
+    /// <summary>
+    /// Live search: filter CoreUsersBox items by the typed text.
+    /// Matches against display label (name + email + security profile) — case-insensitive.
+    /// </summary>
+    private void CoreUsersBox_KeyUp(object sender,
+        System.Windows.Input.KeyEventArgs e)
+    {
+        // Let navigation keys (arrows, Enter, Escape) pass through without filtering
+        if (e.Key is System.Windows.Input.Key.Down or System.Windows.Input.Key.Up
+                  or System.Windows.Input.Key.Enter or System.Windows.Input.Key.Escape
+                  or System.Windows.Input.Key.Tab) return;
+
+        var typed = CoreUsersBox.Text;
+        if (string.IsNullOrEmpty(typed))
+        {
+            CoreUsersBox.ItemsSource = _coreUserAllItems.Count > 0 ? _coreUserAllItems : null;
+        }
+        else
+        {
+            // Match label text OR the mapped email
+            var filtered = _coreUserAllItems
+                .Where(item => item.IndexOf(typed, StringComparison.OrdinalIgnoreCase) >= 0
+                    || (_coreUserEmailMap.TryGetValue(item, out var em)
+                        && em.IndexOf(typed, StringComparison.OrdinalIgnoreCase) >= 0))
+                .ToList();
+            CoreUsersBox.ItemsSource = filtered.Count > 0 ? filtered : (IEnumerable<string>?)null;
+        }
+
+        CoreUsersBox.IsDropDownOpen = CoreUsersBox.ItemsSource != null;
+    }
+
+    // ── AccountUsersBox ──────────────────────────────────────────────────────
+
+    private void AccountUsersBox_DropDownClosed(object sender, EventArgs e)
+    {
+        if (AccountUsersBox.SelectedItem is not string label) return;
+        AccountUsersBox.SelectedItem = null;
+        AccountUsersBox.Text = label;
+        AccountUsersBox.ItemsSource = _coreUserAllItems.Count > 0 ? _coreUserAllItems : null;
+    }
+
+    private void AccountUsersBox_KeyUp(object sender,
+        System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key is System.Windows.Input.Key.Down or System.Windows.Input.Key.Up
+                  or System.Windows.Input.Key.Enter or System.Windows.Input.Key.Escape
+                  or System.Windows.Input.Key.Tab) return;
+
+        var typed = AccountUsersBox.Text;
+        if (string.IsNullOrEmpty(typed))
+        {
+            AccountUsersBox.ItemsSource = _coreUserAllItems.Count > 0 ? _coreUserAllItems : null;
+        }
+        else
+        {
+            var filtered = _coreUserAllItems
+                .Where(item => item.IndexOf(typed, StringComparison.OrdinalIgnoreCase) >= 0
+                    || (_coreUserEmailMap.TryGetValue(item, out var em)
+                        && em.IndexOf(typed, StringComparison.OrdinalIgnoreCase) >= 0))
+                .ToList();
+            AccountUsersBox.ItemsSource = filtered.Count > 0 ? filtered : (IEnumerable<string>?)null;
+        }
+
+        AccountUsersBox.IsDropDownOpen = AccountUsersBox.ItemsSource != null;
+    }
+
+    // ── RestoreEmailBox ──────────────────────────────────────────────────────
+
+    private void RestoreEmailBox_DropDownClosed(object sender, EventArgs e)
+    {
+        // Populated from Host DB Account table — independent of Core user list.
+        if (RestoreEmailBox.SelectedItem is not string label) return;
+        RestoreEmailBox.SelectedItem = null;
+        RestoreEmailBox.Text = label;
+        RestoreEmailBox.ItemsSource = _hostAccountAllItems.Count > 0 ? _hostAccountAllItems : null;
+    }
+
+    private void RestoreEmailBox_KeyUp(object sender,
+        System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key is System.Windows.Input.Key.Down or System.Windows.Input.Key.Up
+                  or System.Windows.Input.Key.Enter or System.Windows.Input.Key.Escape
+                  or System.Windows.Input.Key.Tab) return;
+
+        var typed = RestoreEmailBox.Text;
+        if (string.IsNullOrEmpty(typed))
+        {
+            RestoreEmailBox.ItemsSource = _hostAccountAllItems.Count > 0 ? _hostAccountAllItems : null;
+        }
+        else
+        {
+            var filtered = _hostAccountAllItems
+                .Where(item => item.IndexOf(typed, StringComparison.OrdinalIgnoreCase) >= 0)
+                .ToList();
+            RestoreEmailBox.ItemsSource = filtered.Count > 0 ? filtered : (IEnumerable<string>?)null;
+        }
+
+        RestoreEmailBox.IsDropDownOpen = RestoreEmailBox.ItemsSource != null;
+    }
+
+    // ── Section 4: Subscription ───────────────────────────────────────────────
+    private void SubBillingOption_Checked(object sender, RoutedEventArgs e)
+    {
+        if (CardInfoPanel == null) return;
+        CardInfoPanel.Visibility = SubBillingNewCard.IsChecked == true
+            ? System.Windows.Visibility.Visible
+            : System.Windows.Visibility.Collapsed;
+    }
+
+    private void SubAddOneYear_Click(object sender, RoutedEventArgs e)
+    {
+        if (DateTime.TryParse(SubExpiryBox.Text, out var dt))
+            SubExpiryBox.Text = dt.AddYears(1).ToString("yyyy-MM-dd");
+        else
+            SubExpiryBox.Text = DateTime.Now.AddYears(1).ToString("yyyy-MM-dd");
+    }
+
+    private async void AddSubscription_Click(object sender, RoutedEventArgs e)
+    {
+        SubResultBadge.Visibility = System.Windows.Visibility.Collapsed;
+
+        var targetDb = SubCoreDatabaseBox.Text.Trim();
+        if (string.IsNullOrEmpty(targetDb))
+        {
+            SetActionBadge(SubResultBadge, SubResultText, false, "✗  Select a Core Database.");
+            return;
+        }
+
+        if (_hostConn?.State != System.Data.ConnectionState.Open)
+        {
+            SetActionBadge(SubResultBadge, SubResultText, false,
+                "✗  Not connected to Host DB (Section 1). Connect first.");
+            return;
+        }
+
+        if (!int.TryParse(SubUsersBox.Text.Trim(), out int seats) || seats < 1)
+            seats = 1;
+
+        if (!DateTime.TryParse(SubExpiryBox.Text.Trim(), out DateTime expiry))
+            expiry = DateTime.UtcNow.AddYears(1);
+
+        var licenseType = (SubLicenseTypeBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString()
+                          ?? "Full";
+
+        // CompanyStatus: Active=0, Trial=2
+        // Adding a subscription always means the company is Active — ignore license type for status
+        int companyStatus = 0;
+
+        // Billing option — mirrors portal's NoCreditCard / AlreadyPaid / NewCard paths.
+        // NoCard + AlreadyPaid → system placeholder CCInfo card (no real charge).
+        // NewCard → real CCInfo row created from entered card details.
+        // Action suffix: (A) = no-card/admin, (AP) = already paid, (C) = new card.
+        string billingMode   = SubBillingAlreadyPaid.IsChecked == true ? "AlreadyPaid"
+                             : SubBillingNewCard.IsChecked     == true ? "NewCard"
+                             : "NoCard"; // default
+
+        // Card detail fields — only used when billingMode == "NewCard"
+        string cardNumber    = CardNumberBox.Text.Trim().Replace(" ", "").Replace("-", "");
+        string cardName      = CardNameBox.Text.Trim();
+        string cardExpiry    = CardExpiryBox.Text.Trim();   // MM/YY
+        string cardCvv       = CardCvvBox.Text.Trim();
+
+        if (billingMode == "NewCard")
+        {
+            if (cardNumber.Length < 13)
+            { SetActionBadge(SubResultBadge, SubResultText, false, "✗  Card number must be at least 13 digits."); return; }
+            if (string.IsNullOrEmpty(cardName))
+            { SetActionBadge(SubResultBadge, SubResultText, false, "✗  Cardholder name is required."); return; }
+            if (!System.Text.RegularExpressions.Regex.IsMatch(cardExpiry, @"^\d{2}/\d{2}$"))
+            { SetActionBadge(SubResultBadge, SubResultText, false, "✗  Expiry must be in MM/YY format."); return; }
+        }
+
+        // Mask card number — store only last 4 digits (portal convention)
+        string cardLast4     = cardNumber.Length >= 4 ? cardNumber[^4..] : cardNumber;
+        // Detect brand from first digit
+        string cardBrand     = cardNumber.Length > 0
+            ? cardNumber[0] switch { '4' => "Visa", '5' => "MasterCard", '3' => "Amex", '6' => "Discover", _ => "Other" }
+            : "Other";
+        // Parse expiry → full date (last day of expiry month)
+        DateTime cardExpiryDate = DateTime.UtcNow.AddYears(3);
+        if (System.Text.RegularExpressions.Regex.IsMatch(cardExpiry, @"^\d{2}/\d{2}$"))
+        {
+            int mm = int.Parse(cardExpiry[..2]);
+            int yy = 2000 + int.Parse(cardExpiry[3..]);
+            cardExpiryDate = new DateTime(yy, mm, DateTime.DaysInMonth(yy, mm), 23, 59, 59, DateTimeKind.Utc);
+        }
+
+        bool isNew = SubModeNew.IsChecked == true;
+
+        // Product/Module dropdown → subscription type + package list
+        var selItem = (SubProductBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Default";
+        int      csSubType  = 0; // always 0 — SubscriptionType is determined per-package in SQL (PackageType=4 → Complementary=1)
+        string subTypeLabel = selItem;
+        // Each mode uses an explicit named package list (never "ALL") so only the
+        // intended packages are subscribed regardless of what else is in the Package table.
+        string[] pkgList = selItem == "Role Based"       ? RoleBasedPackages
+                         : selItem == "Foundation Based" ? FoundationBasedPackages
+                         :                                 DefaultPackages;           // "Default"
+        string packageFilter = string.Join("|", pkgList);
+        string packageName   = "ALL";
+
+        var log = new System.Text.StringBuilder();
+        try
+        {
+            SetActionBadge(SubResultBadge, SubResultText, true,
+                isNew ? "⏳  Creating new subscription…" : "⏳  Updating existing subscription…");
+            SubResultBadge.Visibility = System.Windows.Visibility.Visible;
+
+            // ── Resolve Company_ID — try every available server credential set ──────
+            string? companyId = null;
+
+            // Build candidate connection strings: Core server first, then Host server
+            // (sanitized DBs often live on the Host server, not the Core server)
+            var candidateCs = new List<string>();
+            var coreServer = CoreServerBox.Text.Trim();
+            var hostServer = HostServerBox.Text.Trim();
+            if (!string.IsNullOrEmpty(coreServer))
+                candidateCs.Add(BuildConnStr(coreServer, CoreUserBox.Text.Trim(), CorePasswordBox.Password, targetDb));
+            if (!string.IsNullOrEmpty(hostServer) && hostServer != coreServer)
+                candidateCs.Add(BuildConnStr(hostServer, HostUserBox.Text.Trim(), HostPasswordBox.Password, targetDb));
+
+            foreach (var cs in candidateCs)
+            {
+                if (!string.IsNullOrEmpty(companyId)) break;
+                try
+                {
+                    await using var tryConn = new Microsoft.Data.SqlClient.SqlConnection(cs);
+                    await tryConn.OpenAsync();
+
+                    // Attempt 1: Setting table — known CompanyId key variants
+                    if (await new Microsoft.Data.SqlClient.SqlCommand(
+                            "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='Setting'",
+                            tryConn).ExecuteScalarAsync() != null)
+                    {
+                        await using var s1 = new Microsoft.Data.SqlClient.SqlCommand("""
+                            SELECT TOP 1 CAST([Value] AS NVARCHAR(64))
+                            FROM [dbo].[Setting]
+                            WHERE [Key] IN ('CompanyId','CompanyID','Company_ID','companyId','companyID')
+                              AND [Value] IS NOT NULL AND LEN([Value]) > 0
+                            ORDER BY CASE [Key] WHEN 'CompanyId' THEN 1 WHEN 'CompanyID' THEN 2 ELSE 3 END
+                            """, tryConn);
+                        var v1 = await s1.ExecuteScalarAsync();
+                        companyId = v1?.ToString()?.Trim();
+
+                        // Attempt 2: Scan ALL Setting rows whose Value looks like a GUID
+                        if (string.IsNullOrEmpty(companyId))
+                        {
+                            await using var s2 = new Microsoft.Data.SqlClient.SqlCommand("""
+                                SELECT TOP 1 CAST([Value] AS NVARCHAR(64))
+                                FROM [dbo].[Setting]
+                                WHERE [Value] IS NOT NULL
+                                  AND LEN([Value]) = 36
+                                  AND [Value] LIKE '[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]-[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]-[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]-[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]-[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]'
+                                  AND TRY_CAST([Value] AS UNIQUEIDENTIFIER) IS NOT NULL
+                                ORDER BY CASE
+                                    WHEN LOWER([Key]) LIKE '%company%' THEN 1
+                                    ELSE 2 END
+                                """, tryConn);
+                            var v2 = await s2.ExecuteScalarAsync();
+                            companyId = v2?.ToString()?.Trim();
+                        }
+                    }
+
+                    // NOTE: Attempt 3 (reading Company.ID from the Core DB's own Company table) was
+                    // removed — the Core DB's per-company Company table has a DIFFERENT ID from the
+                    // Host DB's Company table. Using the Core DB ID would insert CompanySubscription
+                    // with the wrong Company_ID, so subscriptions would never appear in the portal.
+                    // Only the Setting table (Attempts 1/2) or Host DB lookup (Attempt 4) give the
+                    // correct portal Company_ID.
+
+                    // Attempt 4: Look up in Host DB Company table by database name (exact + prefix)
+                    if (string.IsNullOrEmpty(companyId) && _hostConn?.State == System.Data.ConnectionState.Open)
+                    {
+                        await using var s4a = new Microsoft.Data.SqlClient.SqlCommand(
+                            "SELECT TOP 1 CAST(ID AS NVARCHAR(64)) FROM [dbo].[Company] WHERE DatabaseID = @db",
+                            _hostConn);
+                        s4a.Parameters.AddWithValue("@db", targetDb);
+                        var v4a = await s4a.ExecuteScalarAsync();
+                        if (v4a != null && v4a != DBNull.Value)
+                        {
+                            companyId = v4a.ToString()?.Trim();
+                        }
+                        else
+                        {
+                            // Strip sanitized suffix and try LIKE
+                            var baseName = System.Text.RegularExpressions.Regex.Replace(
+                                targetDb, @"[-_](Sanitized|Backup|Copy|Restore|sanitized|backup|copy|restore).*$", "");
+                            if (baseName != targetDb)
+                            {
+                                await using var s4b = new Microsoft.Data.SqlClient.SqlCommand(
+                                    "SELECT TOP 1 CAST(ID AS NVARCHAR(64)) FROM [dbo].[Company] WHERE DatabaseID LIKE @pat",
+                                    _hostConn);
+                                s4b.Parameters.AddWithValue("@pat", baseName + "%");
+                                var v4b = await s4b.ExecuteScalarAsync();
+                                if (v4b != null && v4b != DBNull.Value)
+                                    companyId = v4b.ToString()?.Trim();
+                            }
+                        }
+                    }
+                }
+                catch { /* try next candidate */ }
+            }
+
+            if (string.IsNullOrEmpty(companyId))
+            {
+                SetActionBadge(SubResultBadge, SubResultText, false,
+                    $"✗  Could not resolve Company_ID for [{targetDb}].\n" +
+                    "Checked: Setting table (all key variants), Company table in Core DB, Host DB Company table.\n" +
+                    "Ensure Section 1 (Host DB) and Section 2 (Core DB) credentials are connected.");
+                return;
+            }
+
+            // ── Shared SQL preamble: resolve Company, Package, Plan, Settings ──────
+            // Used by both New and Update paths.
+            // @packageFilter is always a pipe-delimited list of package names (never "ALL").
+            // The loop in newBodyAll/updateBodyAll matches packages by Name IN the list.
+            const string preamble = """
+                -- ── Resolve Company (from Setting table via C# pre-query) ──────────
+                DECLARE @CompanyID UNIQUEIDENTIFIER = TRY_CAST(@cidParam AS UNIQUEIDENTIFIER);
+                IF @CompanyID IS NULL
+                    RAISERROR('Invalid or missing Company_ID — could not parse [%s] as UNIQUEIDENTIFIER.',
+                              16, 1, @cidParam);
+
+                -- ── Resolve Package ───────────────────────────────────────────────
+                -- ALL mode: Foundation (PackageType=3).  Specific mode: match Name column.
+                DECLARE @PkgID UNIQUEIDENTIFIER =
+                    CASE WHEN @packageName = N'ALL'
+                         THEN (SELECT TOP 1 ID FROM [dbo].[Package] WHERE PackageType = 3 AND IsActive = 1)
+                         ELSE (SELECT TOP 1 ID FROM [dbo].[Package]
+                               WHERE Name = @packageName AND IsActive = 1)
+                    END;
+                -- Note: @PkgID may be NULL for specific-package lookups whose Name doesn't
+                -- match the Package table — this is harmless; the loop body uses @packageFilter
+                -- (STRING_SPLIT) directly and raises a clear error if nothing matches.
+
+                DECLARE @MonthMultiplier INT;
+                DECLARE @PlanID UNIQUEIDENTIFIER =
+                    CASE WHEN @packageName = N'ALL'
+                         THEN (SELECT TOP 1 PlanInfo.ID FROM [dbo].[PlanInfo]
+                               INNER JOIN [dbo].[Package] ON Package.ID = PlanInfo.Package_ID
+                                   AND Package.PackageType = 3
+                               WHERE PlanInfo.EffectiveDate  < GETUTCDATE()
+                                 AND PlanInfo.ExpirationDate > GETUTCDATE()
+                                 AND PlanInfo.IsActive = 1
+                               ORDER BY PlanInfo.MonthMultiplier DESC, PlanInfo.EffectiveDate DESC)
+                         ELSE (SELECT TOP 1 PlanInfo.ID FROM [dbo].[PlanInfo]
+                               WHERE PlanInfo.Package_ID = @PkgID
+                                 AND PlanInfo.EffectiveDate  < GETUTCDATE()
+                                 AND PlanInfo.ExpirationDate > GETUTCDATE()
+                                 AND PlanInfo.IsActive = 1
+                               ORDER BY PlanInfo.MonthMultiplier DESC, PlanInfo.EffectiveDate DESC)
+                    END;
+                SET @MonthMultiplier = (SELECT MonthMultiplier FROM [dbo].[PlanInfo] WHERE ID = @PlanID);
+
+                -- ── Complementary User Package (PackageType=4) — ALL mode only ────
+                DECLARE @UserPkgID  UNIQUEIDENTIFIER =
+                    CASE WHEN @packageName = N'ALL'
+                         THEN (SELECT TOP 1 ID FROM [dbo].[Package] WHERE PackageType = 4 AND IsActive = 1)
+                         ELSE NULL END;
+                DECLARE @UserPlanID UNIQUEIDENTIFIER =
+                    CASE WHEN @packageName = N'ALL'
+                         THEN (SELECT TOP 1 PlanInfo.ID FROM [dbo].[PlanInfo]
+                               INNER JOIN [dbo].[Package] ON Package.ID = PlanInfo.Package_ID
+                                   AND Package.PackageType = 4
+                               WHERE PlanInfo.MonthMultiplier = @MonthMultiplier
+                                 AND PlanInfo.EffectiveDate  < GETUTCDATE()
+                                 AND PlanInfo.ExpirationDate > GETUTCDATE()
+                                 AND PlanInfo.IsActive = 1
+                               ORDER BY PlanInfo.EffectiveDate DESC)
+                         ELSE NULL END;
+
+                DECLARE @GraceDays SMALLINT = ISNULL(
+                    (SELECT TOP 1 CAST([Value] AS SMALLINT) FROM [dbo].[Setting]
+                     WHERE [Key] = 'SubscriptionGraceDays'), 30);
+                DECLARE @GSTPercent DECIMAL(5,2) = (
+                    SELECT TOP 1 TRY_CAST([Value] AS DECIMAL(5,2)) FROM [dbo].[Setting]
+                    WHERE [Key] = 'GSTPercent');
+                DECLARE @CompLicenses INT = ISNULL(
+                    (SELECT TOP 1 TRY_CAST([Value] AS INT) FROM [dbo].[Setting]
+                     WHERE [Key] = CONCAT('ComplementaryUsers_', CAST(@PkgID AS NVARCHAR(50)), '_', @MonthMultiplier)), 1);
+
+                -- ── Schema flags (shared) ────────────────────────────────────────
+                DECLARE @csHasUpdOn BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CompanySubscription' AND COLUMN_NAME='UpdatedOn' AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @csHasUpdBy BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CompanySubscription' AND COLUMN_NAME='UpdatedBy' AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @csHasCreOn BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CompanySubscription' AND COLUMN_NAME='CreatedOn' AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @csHasCreBy BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CompanySubscription' AND COLUMN_NAME='CreatedBy' AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @sdHasUpdOn BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='SubscriptionDetail' AND COLUMN_NAME='UpdatedOn' AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @sdHasUpdBy BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='SubscriptionDetail' AND COLUMN_NAME='UpdatedBy' AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @sdHasCreOn BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='SubscriptionDetail' AND COLUMN_NAME='CreatedOn' AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @sdHasCreBy BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='SubscriptionDetail' AND COLUMN_NAME='CreatedBy' AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @sdHasTxn   BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='SubscriptionDetail' AND COLUMN_NAME='TransactionInfo_ID' AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @sdHasPromo BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='SubscriptionDetail' AND COLUMN_NAME='Promotion_ID' AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @sdHasParent BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='SubscriptionDetail' AND COLUMN_NAME='ParentDetail_ID' AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                -- ── Admin Account ID for CreatedBy / UpdatedBy ──────────────────
+                -- Portal uses HelperFunction.Account_ID (logged-in admin).
+                -- Resolve: AccountCompany for this company → any Account row as fallback.
+                -- NOTE: IsActive column is NOT queried directly — it may not exist on all schemas.
+                --       Use AccountCompany (always has Account_ID) then fall back to first Account row.
+                DECLARE @AdminAccountID UNIQUEIDENTIFIER =
+                    ISNULL(
+                        (SELECT TOP 1 ac.Account_ID FROM [dbo].[AccountCompany] ac
+                         WHERE ac.Company_ID = @CompanyID ORDER BY (SELECT NULL)),
+                        (SELECT TOP 1 ID FROM [dbo].[Account] ORDER BY (SELECT NULL)));
+                -- @billingMode passed from C#: 'NoCard' | 'AlreadyPaid' | 'NewCard'
+                -- @cardLast4 / @cardBrand / @cardName / @cardCvv / @cardExpiryDate — card fields (NewCard only)
+                -- Used in txnInsert to create CCInfo row and set TransactionInfo.Action suffix.
+                DECLARE @RowsInserted INT = 0;
+                """;
+
+            // ── Shared helper: TransactionInfo insert (NoCreditCard/Admin path) ──
+            // Used in both New and Update modes.
+            // Mirrors portal CompanySubscriptionManager.TransactionWithNoCreditCard:
+            //   • Action = 'NewSubscription(A)', Amount = 0, InvoiceNumber auto-incremented
+            //   • CreditCard_ID: looked up safely (IsSystem check guarded by column existence)
+            //     NOT inserted as a dummy NEWID() — that would violate the FK constraint.
+            //   • All columns guarded by INFORMATION_SCHEMA existence checks.
+            //   • TRY/CATCH captures error text into @TxnErrMsg so callers can log it.
+            const string txnInsert = """
+                DECLARE @TxnID      UNIQUEIDENTIFIER = NULL;
+                DECLARE @TxnErrMsg  NVARCHAR(500)    = NULL;
+                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='TransactionInfo' AND TABLE_SCHEMA='dbo')
+                BEGIN
+                    -- Next sequential invoice number
+                    DECLARE @NextInvoice NVARCHAR(50);
+                    BEGIN TRY
+                        SET @NextInvoice = (
+                            SELECT CAST(CAST(ISNULL(MAX(TRY_CAST(InvoiceNumber AS BIGINT)),0) AS BIGINT)+1 AS NVARCHAR(50))
+                            FROM [dbo].[TransactionInfo]);
+                    END TRY BEGIN CATCH END CATCH
+                    IF @NextInvoice IS NULL
+                        SET @NextInvoice = REPLACE(CONVERT(NVARCHAR,GETUTCDATE(),120),'-','');
+
+                    -- ── Resolve / create CCInfo row ─────────────────────────────────
+                    -- NewCard  → insert a real card row from user-supplied details
+                    -- NoCard / AlreadyPaid → system placeholder card (Number='XXXX', Brand='System')
+                    DECLARE @SysCCID UNIQUEIDENTIFIER = NULL;
+                    IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='CCInfo' AND TABLE_SCHEMA='dbo')
+                    BEGIN
+                        IF @billingMode = N'NewCard'
+                        BEGIN
+                            -- Insert the entered card as a new CCInfo row (last-4 stored, no raw PAN)
+                            SET @SysCCID = NEWID();
+                            DECLARE @ccCols NVARCHAR(MAX) = N'[ID],[Number],[Brand],[FirstName],[CSVCode],[IsActive],[IsReusable],[Company_ID]';
+                            DECLARE @ccVals NVARCHAR(MAX) = N'@ccid,@cardLast4,@cardBrand,@cardName,'''',1,1,@CompanyID'; -- CSVCode: never store raw CVV (portal pattern)
+                            DECLARE @ccSQL  NVARCHAR(MAX);
+                            IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CCInfo' AND COLUMN_NAME='ExpiresOn'  AND TABLE_SCHEMA='dbo') BEGIN SET @ccCols=@ccCols+N',[ExpiresOn]';  SET @ccVals=@ccVals+N',@cardExpiryDate'; END
+                            IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CCInfo' AND COLUMN_NAME='CreatedOn'  AND TABLE_SCHEMA='dbo') BEGIN SET @ccCols=@ccCols+N',[CreatedOn]';  SET @ccVals=@ccVals+N',GETUTCDATE()'; END
+                            IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CCInfo' AND COLUMN_NAME='UpdatedOn'  AND TABLE_SCHEMA='dbo') BEGIN SET @ccCols=@ccCols+N',[UpdatedOn]';  SET @ccVals=@ccVals+N',GETUTCDATE()'; END
+                            IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CCInfo' AND COLUMN_NAME='CreatedBy'  AND TABLE_SCHEMA='dbo') BEGIN SET @ccCols=@ccCols+N',[CreatedBy]';  SET @ccVals=@ccVals+N',@AdminAccountID'; END
+                            IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CCInfo' AND COLUMN_NAME='UpdatedBy'  AND TABLE_SCHEMA='dbo') BEGIN SET @ccCols=@ccCols+N',[UpdatedBy]';  SET @ccVals=@ccVals+N',@AdminAccountID'; END
+                            SET @ccSQL = N'INSERT INTO [dbo].[CCInfo]('+@ccCols+N') VALUES('+@ccVals+N')';
+                            BEGIN TRY
+                                EXEC sp_executesql @ccSQL,
+                                    N'@ccid UNIQUEIDENTIFIER,@cardLast4 NVARCHAR(4),@cardBrand NVARCHAR(50),@cardName NVARCHAR(200),@cardCvv NVARCHAR(10),@CompanyID UNIQUEIDENTIFIER,@cardExpiryDate DATETIME,@AdminAccountID UNIQUEIDENTIFIER',
+                                    @ccid=@SysCCID,@cardLast4=@cardLast4,@cardBrand=@cardBrand,@cardName=@cardName,@cardCvv=@cardCvv,@CompanyID=@CompanyID,@cardExpiryDate=@cardExpiryDate,@AdminAccountID=@AdminAccountID;
+                            END TRY
+                            BEGIN CATCH SET @SysCCID=NULL; SET @TxnErrMsg = N'CCInfo insert failed: ' + LEFT(ERROR_MESSAGE(),400); END CATCH
+                        END
+                        ELSE
+                        BEGIN
+                            -- System placeholder card (NoCard / AlreadyPaid paths)
+                            SET @SysCCID = (SELECT TOP 1 ID FROM [dbo].[CCInfo]
+                                            WHERE Number='XXXX' AND Brand='System' ORDER BY (SELECT NULL));
+                            IF @SysCCID IS NULL
+                            BEGIN
+                                SET @SysCCID = NEWID();
+                                DECLARE @sysCols NVARCHAR(MAX) = N'[ID],[Number],[Brand],[FirstName],[CSVCode],[IsActive],[IsReusable]';
+                                DECLARE @sysVals NVARCHAR(MAX) = N'@ccid,''XXXX'',''System'',''System'',''Sys'',1,0';
+                                DECLARE @sysSQL  NVARCHAR(MAX);
+                                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CCInfo' AND COLUMN_NAME='CreatedOn'  AND TABLE_SCHEMA='dbo') BEGIN SET @sysCols=@sysCols+N',[CreatedOn]';  SET @sysVals=@sysVals+N',GETUTCDATE()'; END
+                                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CCInfo' AND COLUMN_NAME='UpdatedOn'  AND TABLE_SCHEMA='dbo') BEGIN SET @sysCols=@sysCols+N',[UpdatedOn]';  SET @sysVals=@sysVals+N',GETUTCDATE()'; END
+                                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CCInfo' AND COLUMN_NAME='CreatedBy'  AND TABLE_SCHEMA='dbo') BEGIN SET @sysCols=@sysCols+N',[CreatedBy]';  SET @sysVals=@sysVals+N',@AdminAccountID'; END
+                                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CCInfo' AND COLUMN_NAME='UpdatedBy'  AND TABLE_SCHEMA='dbo') BEGIN SET @sysCols=@sysCols+N',[UpdatedBy]';  SET @sysVals=@sysVals+N',@AdminAccountID'; END
+                                SET @sysSQL = N'INSERT INTO [dbo].[CCInfo]('+@sysCols+N') VALUES('+@sysVals+N')';
+                                BEGIN TRY
+                                    EXEC sp_executesql @sysSQL,
+                                        N'@ccid UNIQUEIDENTIFIER,@AdminAccountID UNIQUEIDENTIFIER',
+                                        @ccid=@SysCCID,@AdminAccountID=@AdminAccountID;
+                                END TRY
+                                BEGIN CATCH SET @SysCCID=NULL; END CATCH
+                            END
+                        END
+                    END
+
+                    BEGIN TRY
+                        SET @TxnID = NEWID();
+                        -- Action: (A)=no-card/admin, (AP)=already paid, (C)=new card
+                        DECLARE @txnAction NVARCHAR(50) = CASE @billingMode
+                            WHEN N'AlreadyPaid' THEN N'NewSubscription(AP)'
+                            WHEN N'NewCard'     THEN N'NewSubscription(C)'
+                            ELSE N'NewSubscription(A)' END;
+                        DECLARE @txnCols NVARCHAR(MAX) = N'[ID],[Amount],[Action],[InvoiceNumber]';
+                        DECLARE @txnVals NVARCHAR(MAX) = N'@TxnID,0,@txnAction,@NextInvoice';
+                        DECLARE @txnSQL  NVARCHAR(MAX);
+                        -- CreditCard_ID: only include when column exists in TransactionInfo AND we resolved a real CCInfo row ID
+                        IF @SysCCID IS NOT NULL AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='TransactionInfo' AND COLUMN_NAME='CreditCard_ID' AND TABLE_SCHEMA='dbo')
+                            BEGIN SET @txnCols=@txnCols+N',[CreditCard_ID]'; SET @txnVals=@txnVals+N',@SysCCID'; END
+                        -- CC_ID alternate column name (some schema versions)
+                        ELSE IF @SysCCID IS NOT NULL AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='TransactionInfo' AND COLUMN_NAME='CC_ID' AND TABLE_SCHEMA='dbo')
+                            BEGIN SET @txnCols=@txnCols+N',[CC_ID]'; SET @txnVals=@txnVals+N',@SysCCID'; END
+                        -- Date column (mapped as TransactionDate in some schemas, Date in others)
+                        IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='TransactionInfo' AND COLUMN_NAME='TransactionDate' AND TABLE_SCHEMA='dbo') BEGIN SET @txnCols=@txnCols+N',[TransactionDate]'; SET @txnVals=@txnVals+N',GETUTCDATE()'; END
+                        ELSE IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='TransactionInfo' AND COLUMN_NAME='Date'            AND TABLE_SCHEMA='dbo') BEGIN SET @txnCols=@txnCols+N',[Date]';             SET @txnVals=@txnVals+N',GETUTCDATE()'; END
+                        IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='TransactionInfo' AND COLUMN_NAME='CreatedOn'        AND TABLE_SCHEMA='dbo') BEGIN SET @txnCols=@txnCols+N',[CreatedOn]';        SET @txnVals=@txnVals+N',GETUTCDATE()'; END
+                        IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='TransactionInfo' AND COLUMN_NAME='UpdatedOn'        AND TABLE_SCHEMA='dbo') BEGIN SET @txnCols=@txnCols+N',[UpdatedOn]';        SET @txnVals=@txnVals+N',GETUTCDATE()'; END
+                        IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='TransactionInfo' AND COLUMN_NAME='CreatedBy'        AND TABLE_SCHEMA='dbo') BEGIN SET @txnCols=@txnCols+N',[CreatedBy]';        SET @txnVals=@txnVals+N',@AdminAccountID'; END
+                        IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='TransactionInfo' AND COLUMN_NAME='UpdatedBy'        AND TABLE_SCHEMA='dbo') BEGIN SET @txnCols=@txnCols+N',[UpdatedBy]';        SET @txnVals=@txnVals+N',@AdminAccountID'; END
+                        IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='TransactionInfo' AND COLUMN_NAME='Parent_ID'        AND TABLE_SCHEMA='dbo') BEGIN SET @txnCols=@txnCols+N',[Parent_ID]';        SET @txnVals=@txnVals+N',NULL'; END
+                        IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='TransactionInfo' AND COLUMN_NAME='CCAuthorizationCode' AND TABLE_SCHEMA='dbo') BEGIN SET @txnCols=@txnCols+N',[CCAuthorizationCode]'; SET @txnVals=@txnVals+N',NULL'; END
+                        ELSE IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='TransactionInfo' AND COLUMN_NAME='AuthorizationCode' AND TABLE_SCHEMA='dbo') BEGIN SET @txnCols=@txnCols+N',[AuthorizationCode]'; SET @txnVals=@txnVals+N',NULL'; END
+                        IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='TransactionInfo' AND COLUMN_NAME='TransactionID'    AND TABLE_SCHEMA='dbo') BEGIN SET @txnCols=@txnCols+N',[TransactionID]';     SET @txnVals=@txnVals+N',NULL'; END
+                        IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='TransactionInfo' AND COLUMN_NAME='GSTPercent'       AND TABLE_SCHEMA='dbo') BEGIN SET @txnCols=@txnCols+N',[GSTPercent]';        SET @txnVals=@txnVals+N',@GSTPercent'; END
+                        IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='TransactionInfo' AND COLUMN_NAME='Company_ID'       AND TABLE_SCHEMA='dbo') BEGIN SET @txnCols=@txnCols+N',[Company_ID]';        SET @txnVals=@txnVals+N',@CompanyID'; END
+                        SET @txnSQL = N'INSERT [dbo].[TransactionInfo]('+@txnCols+N') VALUES('+@txnVals+N')';
+                        EXEC sp_executesql @txnSQL,
+                            N'@TxnID UNIQUEIDENTIFIER,@NextInvoice NVARCHAR(50),@GSTPercent DECIMAL(5,2),@CompanyID UNIQUEIDENTIFIER,@SysCCID UNIQUEIDENTIFIER,@AdminAccountID UNIQUEIDENTIFIER,@txnAction NVARCHAR(50),@cardLast4 NVARCHAR(4),@cardBrand NVARCHAR(50),@cardName NVARCHAR(200),@cardCvv NVARCHAR(10),@cardExpiryDate DATETIME',
+                            @TxnID=@TxnID,@NextInvoice=@NextInvoice,@GSTPercent=@GSTPercent,@CompanyID=@CompanyID,@SysCCID=@SysCCID,@AdminAccountID=@AdminAccountID,@txnAction=@txnAction,@cardLast4=@cardLast4,@cardBrand=@cardBrand,@cardName=@cardName,@cardCvv=@cardCvv,@cardExpiryDate=@cardExpiryDate;
+                    END TRY
+                    BEGIN CATCH
+                        SET @TxnErrMsg = LEFT(ERROR_MESSAGE(), 500);
+                        SET @TxnID = NULL;
+                    END CATCH
+                END
+                """;
+
+            // ════════════════════════════════════════════════════════════════════
+            // NEW — loop every selected package (@packageFilter drives which ones).
+            //       "ALL" → every active package.  Pipe-list → only those names.
+            //       Packages whose Name doesn't match are silently skipped, but if
+            //       the whole list yields nothing an error is raised before inserting.
+            // ════════════════════════════════════════════════════════════════════
+            const string newBodyAll = """
+                -- ── Step 1: Company status ──────────────────────────────────────
+                DECLARE @compUpdSQL NVARCHAR(MAX)=N'UPDATE [dbo].[Company] SET [CompanyStatus]=@cs,[TrailExpDate]=@ex';
+                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Company' AND COLUMN_NAME='Mode'             AND TABLE_SCHEMA='dbo') SET @compUpdSQL=@compUpdSQL+N',[Mode]=0';
+                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Company' AND COLUMN_NAME='CloudFeedsAccess' AND TABLE_SCHEMA='dbo') SET @compUpdSQL=@compUpdSQL+N',[CloudFeedsAccess]=1';
+                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Company' AND COLUMN_NAME='UpdatedOn'        AND TABLE_SCHEMA='dbo') SET @compUpdSQL=@compUpdSQL+N',[UpdatedOn]=GETUTCDATE()';
+                SET @compUpdSQL=@compUpdSQL+N' WHERE [ID]=@cid';
+                EXEC sp_executesql @compUpdSQL,N'@cs INT,@ex DATETIME,@cid UNIQUEIDENTIFIER',
+                    @cs=@companyStatus,@ex=@expiry,@cid=@CompanyID;
+
+                -- ── Step 2+: Loop every active package ──────────────────────────
+                DECLARE @IterPkgID      UNIQUEIDENTIFIER;
+                DECLARE @IterPkgType    INT;               -- Package.PackageType for current iteration
+                DECLARE @IterSubType    INT;               -- SubscriptionType: 0 (None) for paid packages; 1 (Complementary) for Foundation User (PackageType=4)
+                DECLARE @IterPlanID     UNIQUEIDENTIFIER;
+                DECLARE @IterPlanPrice  DECIMAL(10,2) = 0;
+                DECLARE @IterSubID      UNIQUEIDENTIFIER;
+                DECLARE @IterDetID      UNIQUEIDENTIFIER;
+                DECLARE @iCsInsCols     NVARCHAR(MAX);
+                DECLARE @iCsInsVals     NVARCHAR(MAX);
+                DECLARE @iCsInsSQL      NVARCHAR(MAX);
+                DECLARE @iSdInsCols     NVARCHAR(MAX);
+                DECLARE @iSdInsVals     NVARCHAR(MAX);
+                DECLARE @iSdInsSQL      NVARCHAR(MAX);
+                -- Portal pattern: complementary package SDs reference the foundation SD via ParentDetail_ID.
+                -- Track the first successfully-inserted SubscriptionDetail ID here.
+                DECLARE @FoundationDetID    UNIQUEIDENTIFIER = NULL;
+                DECLARE @IterMonthMultiplier INT           = 1;    -- PlanInfo.MonthMultiplier for current iteration
+                DECLARE @IterSdAmount        DECIMAL(10,2) = 0;    -- Amount = MonthlyPrice × MonthMultiplier × seats
+                DECLARE @TotalAmount         DECIMAL(10,2) = 0;    -- Accumulated across all packages for TransactionInfo
+
+                -- ── Step 1b: Deduplicate — for every package that has more than one
+                --           CompanySubscription row for this company, delete the extras
+                --           (keeping the row with the latest StartsOn; ties → highest ID).
+                --           Child SubscriptionDetail rows are deleted first to satisfy FK.
+                DECLARE @DupIDs TABLE (ID UNIQUEIDENTIFIER);
+
+                INSERT INTO @DupIDs
+                SELECT cs.ID
+                FROM [dbo].[CompanySubscription] cs
+                WHERE cs.Company_ID = @CompanyID
+                  AND cs.ID NOT IN (
+                      SELECT keeper.ID
+                      FROM (
+                          SELECT ID,
+                                 ROW_NUMBER() OVER (
+                                     PARTITION BY Company_ID, Package_ID
+                                     ORDER BY StartsOn DESC, ID DESC) AS rn
+                          FROM [dbo].[CompanySubscription]
+                          WHERE Company_ID = @CompanyID
+                      ) keeper
+                      WHERE keeper.rn = 1
+                  );
+
+                -- Delete child detail rows first (FK constraint)
+                DELETE FROM [dbo].[SubscriptionDetail]
+                WHERE CompanySubscription_ID IN (SELECT ID FROM @DupIDs);
+
+                -- Now safe to delete the duplicate parent rows
+                DELETE FROM [dbo].[CompanySubscription]
+                WHERE ID IN (SELECT ID FROM @DupIDs);
+
+                -- Table variable — batch-scoped, never survives connection reuse
+                DECLARE @PkgList TABLE (ID UNIQUEIDENTIFIER);
+                IF @packageFilter = N'ALL'
+                    INSERT INTO @PkgList SELECT ID FROM [dbo].[Package] WHERE IsActive = 1;
+                ELSE
+                    INSERT INTO @PkgList
+                    SELECT p.ID FROM [dbo].[Package] p
+                    WHERE p.IsActive = 1
+                      AND p.Name IN (
+                          SELECT LTRIM(RTRIM(n.value('.','NVARCHAR(200)')))
+                          FROM (SELECT CAST('<x>' + REPLACE(@packageFilter,'|','</x><x>') + '</x>' AS XML) x) t
+                          CROSS APPLY t.x.nodes('x') r(n));
+
+                IF NOT EXISTS (SELECT 1 FROM @PkgList)
+                    RAISERROR('None of the selected packages were found active in the Package table. The Name column values in the Package table may differ from the labels shown in the tool — check the Package table directly.',16,1);
+
+                WHILE EXISTS (SELECT 1 FROM @PkgList)
+                BEGIN
+                    SELECT TOP 1 @IterPkgID = ID FROM @PkgList;
+                    DELETE FROM @PkgList WHERE ID = @IterPkgID;
+
+                    -- Portal (NoCreditCard/AdminPortal path): SubscriptionType.None(0) for all paid packages;
+                    -- SubscriptionType.Complementary(1) only for Foundation User package (PackageType=4).
+                    SET @IterPkgType = ISNULL((SELECT TOP 1 PackageType FROM [dbo].[Package] WHERE ID = @IterPkgID), 0);
+                    SET @IterSubType = CASE WHEN @IterPkgType = 4 THEN 1 ELSE 0 END;
+
+                    SET @IterPlanID           = NULL;
+                    SET @IterPlanPrice        = 0;
+                    SET @IterMonthMultiplier  = 1;
+                    SELECT TOP 1
+                        @IterPlanID          = ID,
+                        @IterPlanPrice       = ISNULL(MonthlyPrice, 0),
+                        @IterMonthMultiplier = ISNULL(MonthMultiplier, 1)
+                    FROM [dbo].[PlanInfo]
+                    WHERE Package_ID = @IterPkgID
+                      AND EffectiveDate  < GETUTCDATE()
+                      AND ExpirationDate > GETUTCDATE()
+                      AND IsActive = 1
+                    ORDER BY MonthMultiplier DESC, EffectiveDate DESC;
+                    -- Portal formula: Amount = MonthlyPrice × MonthMultiplier × NumberOfLicense
+                    SET @IterSdAmount = @IterPlanPrice * @IterMonthMultiplier * @seats;
+
+                    -- Skip if ANY subscription for this package already exists for the company (any type)
+                    IF @IterPlanID IS NOT NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM [dbo].[CompanySubscription]
+                        WHERE Company_ID = @CompanyID
+                          AND Package_ID = @IterPkgID)
+                    BEGIN
+                        SET @IterSubID = NEWID();
+                        SET @IterDetID = NEWID();
+
+                        -- CompanySubscription
+                        -- SubscriptionType: 0 (None) for paid packages (portal NoCreditCard pattern); 1 (Complementary) for Foundation User (PackageType=4)
+                        SET @iCsInsCols = N'[ID],[Package_ID],[Company_ID],[NumberOfLicense],[StartsOn],[GraceDays],[AutoRenew],[SubscriptionType]';
+                        SET @iCsInsVals = N'@isid,@ipkg,@CompanyID,@seats,GETUTCDATE(),@gd,0,@iterSubType';
+                        IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CompanySubscription' AND COLUMN_NAME='IsActive'    AND TABLE_SCHEMA='dbo') BEGIN SET @iCsInsCols=@iCsInsCols+N',[IsActive]';    SET @iCsInsVals=@iCsInsVals+N',1'; END
+                        IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CompanySubscription' AND COLUMN_NAME='Status'      AND TABLE_SCHEMA='dbo') BEGIN SET @iCsInsCols=@iCsInsCols+N',[Status]';      SET @iCsInsVals=@iCsInsVals+N',0'; END -- 0=Active
+                        IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CompanySubscription' AND COLUMN_NAME='IsDeleted'   AND TABLE_SCHEMA='dbo') BEGIN SET @iCsInsCols=@iCsInsCols+N',[IsDeleted]';   SET @iCsInsVals=@iCsInsVals+N',0'; END
+                        IF @csHasCreOn=1 BEGIN SET @iCsInsCols=@iCsInsCols+N',[CreatedOn]'; SET @iCsInsVals=@iCsInsVals+N',GETUTCDATE()'; END
+                        IF @csHasUpdOn=1 BEGIN SET @iCsInsCols=@iCsInsCols+N',[UpdatedOn]'; SET @iCsInsVals=@iCsInsVals+N',GETUTCDATE()'; END
+                        IF @csHasCreBy=1 BEGIN SET @iCsInsCols=@iCsInsCols+N',[CreatedBy]'; SET @iCsInsVals=@iCsInsVals+N',@acctId'; END
+                        IF @csHasUpdBy=1 BEGIN SET @iCsInsCols=@iCsInsCols+N',[UpdatedBy]'; SET @iCsInsVals=@iCsInsVals+N',@acctId'; END
+                        SET @iCsInsSQL = N'INSERT INTO [dbo].[CompanySubscription]('+@iCsInsCols+N') VALUES('+@iCsInsVals+N')';
+                        EXEC sp_executesql @iCsInsSQL,
+                            N'@isid UNIQUEIDENTIFIER,@ipkg UNIQUEIDENTIFIER,@CompanyID UNIQUEIDENTIFIER,@seats INT,@gd SMALLINT,@iterSubType INT,@acctId UNIQUEIDENTIFIER',
+                            @isid=@IterSubID,@ipkg=@IterPkgID,@CompanyID=@CompanyID,@seats=@seats,@gd=@GraceDays,@iterSubType=@IterSubType,@acctId=@AdminAccountID;
+                        SET @RowsInserted = @RowsInserted + 1;
+
+                        -- ── AccountCompanySubscription: link every AccountCompany for this company to the new CompanySubscription ──
+                        -- The Core authorizer traverses: AccountCompany → AccountCompanySubscription → CompanySubscription → SubscriptionDetail.
+                        -- Without this row the subscription is invisible to the app even if CompanySubscription + SubscriptionDetail exist.
+                        IF OBJECT_ID('dbo.AccountCompanySubscription','U') IS NOT NULL
+                        AND OBJECT_ID('dbo.AccountCompany','U') IS NOT NULL
+                        BEGIN
+                            EXEC sp_executesql
+                                N'INSERT INTO [dbo].[AccountCompanySubscription]([ID],[AccountCompany_ID],[Subscription_ID])
+                                  SELECT NEWID(), ac.[ID], @sid
+                                  FROM [dbo].[AccountCompany] ac
+                                  WHERE ac.[Company_ID] = @cid
+                                    AND NOT EXISTS (
+                                        SELECT 1 FROM [dbo].[AccountCompanySubscription] acs2
+                                        WHERE acs2.[AccountCompany_ID] = ac.[ID]
+                                          AND acs2.[Subscription_ID]   = @sid)',
+                                N'@sid UNIQUEIDENTIFIER,@cid UNIQUEIDENTIFIER',
+                                @sid=@IterSubID,@cid=@CompanyID;
+                        END
+
+                        -- SubscriptionDetail
+                        SET @iSdInsCols = N'[ID],[CompanySubscription_ID],[Plan_ID],[Status],[StartsOn],[ExpiresOn],[Amount],[NumberOfLicense]';
+                        -- Status=1 (SubscriptionStatus.Active) — Core authorizer checks sd.Status IN (1,2).
+                        -- StartsOn=NULL for foundation sub; GETUTCDATE() for complementary subs (ParentDetail_ID set).
+                        SET @iSdInsVals = N'@idid,@IterSubID,@IterPlanID,1,CASE WHEN @pfid IS NULL THEN NULL ELSE GETUTCDATE() END,@ex,@sdamt,@seats';
+                        -- ParentDetail_ID: NULL for first (foundation) package; @FoundationDetID for all subsequent ones.
+                        IF @sdHasParent=1 BEGIN SET @iSdInsCols=@iSdInsCols+N',[ParentDetail_ID]'; SET @iSdInsVals=@iSdInsVals+N',@pfid'; END
+                        IF @sdHasTxn=1 AND @TxnID IS NOT NULL BEGIN SET @iSdInsCols=@iSdInsCols+N',[TransactionInfo_ID]'; SET @iSdInsVals=@iSdInsVals+N',@txn'; END
+                        IF @sdHasPromo=1 BEGIN SET @iSdInsCols=@iSdInsCols+N',[Promotion_ID]'; SET @iSdInsVals=@iSdInsVals+N',''00000000-0000-0000-0000-000000000000'''; END -- portal stores Guid.Empty, not NULL
+                        IF @sdHasCreOn=1 BEGIN SET @iSdInsCols=@iSdInsCols+N',[CreatedOn]'; SET @iSdInsVals=@iSdInsVals+N',GETUTCDATE()'; END
+                        IF @sdHasUpdOn=1 BEGIN SET @iSdInsCols=@iSdInsCols+N',[UpdatedOn]'; SET @iSdInsVals=@iSdInsVals+N',GETUTCDATE()'; END
+                        IF @sdHasCreBy=1 BEGIN SET @iSdInsCols=@iSdInsCols+N',[CreatedBy]'; SET @iSdInsVals=@iSdInsVals+N',@acctId'; END
+                        IF @sdHasUpdBy=1 BEGIN SET @iSdInsCols=@iSdInsCols+N',[UpdatedBy]'; SET @iSdInsVals=@iSdInsVals+N',@acctId'; END
+                        SET @iSdInsSQL = N'INSERT INTO [dbo].[SubscriptionDetail]('+@iSdInsCols+N') VALUES('+@iSdInsVals+N')';
+                        BEGIN TRY
+                            EXEC sp_executesql @iSdInsSQL,
+                                N'@idid UNIQUEIDENTIFIER,@IterSubID UNIQUEIDENTIFIER,@IterPlanID UNIQUEIDENTIFIER,@ex DATETIME,@seats INT,@txn UNIQUEIDENTIFIER,@acctId UNIQUEIDENTIFIER,@pfid UNIQUEIDENTIFIER,@sdamt DECIMAL(10,2)',
+                                @idid=@IterDetID,@IterSubID=@IterSubID,@IterPlanID=@IterPlanID,@ex=@expiry,@seats=@seats,@txn=@TxnID,@acctId=@AdminAccountID,@pfid=@FoundationDetID,@sdamt=@IterSdAmount;
+                            -- First successful insert becomes the foundation; all subsequent are complementary.
+                            IF @FoundationDetID IS NULL SET @FoundationDetID = @IterDetID;
+                            -- Accumulate total for TransactionInfo.Amount
+                            SET @TotalAmount = @TotalAmount + @IterSdAmount;
+                        END TRY
+                        BEGIN CATCH
+                            IF @TxnErrMsg IS NULL SET @TxnErrMsg = N'SubscriptionDetail insert failed: ' + LEFT(ERROR_MESSAGE(),400);
+                        END CATCH
+                    END
+                END
+
+                -- ── Post-loop: update TransactionInfo.Amount with real total ──────
+                -- Portal calculates Amount = sum of (MonthlyPrice × MonthMultiplier × seats) per package.
+                IF @TxnID IS NOT NULL AND @TotalAmount > 0
+                AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='TransactionInfo' AND TABLE_SCHEMA='dbo')
+                BEGIN
+                    EXEC sp_executesql
+                        N'UPDATE [dbo].[TransactionInfo] SET [Amount]=@amt WHERE [ID]=@tid',
+                        N'@amt DECIMAL(10,2),@tid UNIQUEIDENTIFIER',
+                        @amt=@TotalAmount,@tid=@TxnID;
+                END
+
+                """;
+
+            // ════════════════════════════════════════════════════════════════════
+            // UPDATE — loop every matching existing CompanySubscription.
+            //          "ALL" → every subscription for this company.
+            //          Pipe-list → only subscriptions whose Package.Name matches.
+            // ════════════════════════════════════════════════════════════════════
+            const string updateBodyAll = """
+                -- ── Step 1: Company status ──────────────────────────────────────
+                DECLARE @compUpdSQL NVARCHAR(MAX)=N'UPDATE [dbo].[Company] SET [CompanyStatus]=@cs,[TrailExpDate]=@ex';
+                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Company' AND COLUMN_NAME='Mode'             AND TABLE_SCHEMA='dbo') SET @compUpdSQL=@compUpdSQL+N',[Mode]=0';
+                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Company' AND COLUMN_NAME='CloudFeedsAccess' AND TABLE_SCHEMA='dbo') SET @compUpdSQL=@compUpdSQL+N',[CloudFeedsAccess]=1';
+                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Company' AND COLUMN_NAME='UpdatedOn'        AND TABLE_SCHEMA='dbo') SET @compUpdSQL=@compUpdSQL+N',[UpdatedOn]=GETUTCDATE()';
+                SET @compUpdSQL=@compUpdSQL+N' WHERE [ID]=@cid';
+                EXEC sp_executesql @compUpdSQL,N'@cs INT,@ex DATETIME,@cid UNIQUEIDENTIFIER',
+                    @cs=@companyStatus,@ex=@expiry,@cid=@CompanyID;
+
+                -- ── Step 1b: Deduplicate — remove extra CompanySubscription rows
+                --           keeping only the row with the latest StartsOn per Company+Package
+                DECLARE @DupIDs TABLE (ID UNIQUEIDENTIFIER);
+
+                INSERT INTO @DupIDs
+                SELECT cs.ID
+                FROM [dbo].[CompanySubscription] cs
+                WHERE cs.Company_ID = @CompanyID
+                  AND cs.ID NOT IN (
+                      SELECT keeper.ID
+                      FROM (
+                          SELECT ID,
+                                 ROW_NUMBER() OVER (
+                                     PARTITION BY Company_ID, Package_ID
+                                     ORDER BY StartsOn DESC, ID DESC) AS rn
+                          FROM [dbo].[CompanySubscription]
+                          WHERE Company_ID = @CompanyID
+                      ) keeper
+                      WHERE keeper.rn = 1
+                  );
+
+                DELETE FROM [dbo].[SubscriptionDetail]
+                WHERE CompanySubscription_ID IN (SELECT ID FROM @DupIDs);
+
+                DELETE FROM [dbo].[CompanySubscription]
+                WHERE ID IN (SELECT ID FROM @DupIDs);
+
+                -- ── Step 2+: Loop every existing CompanySubscription ─────────────
+                DECLARE @UpdSubID    UNIQUEIDENTIFIER;
+                DECLARE @UpdDetID    UNIQUEIDENTIFIER;  -- current (parent) SD row
+                DECLARE @UpdPlanID   UNIQUEIDENTIFIER;  -- plan from existing SD
+                DECLARE @UpdParentID UNIQUEIDENTIFIER;  -- = @UpdDetID, used as ParentDetail_ID
+                DECLARE @NewDetID    UNIQUEIDENTIFIER;  -- new SD row ID
+                DECLARE @updCsSQL    NVARCHAR(MAX);
+                DECLARE @updSdSQL    NVARCHAR(MAX);
+                DECLARE @iSdInsCols  NVARCHAR(MAX);
+                DECLARE @iSdInsVals  NVARCHAR(MAX);
+                DECLARE @iSdInsSQL   NVARCHAR(MAX);
+
+                -- Table variable — batch-scoped, never survives connection reuse
+                -- 'ALL' → every subscription for this company (no package-name filter)
+                -- Pipe-list → only subscriptions whose Package.Name is in the list
+                DECLARE @SubList TABLE (ID UNIQUEIDENTIFIER);
+                IF @packageFilter = N'ALL'
+                    INSERT INTO @SubList
+                    SELECT cs.ID FROM [dbo].[CompanySubscription] cs
+                    WHERE cs.Company_ID = @CompanyID;
+                ELSE
+                    INSERT INTO @SubList
+                    SELECT cs.ID FROM [dbo].[CompanySubscription] cs
+                    INNER JOIN [dbo].[Package] p ON p.ID = cs.Package_ID
+                    WHERE cs.Company_ID = @CompanyID
+                      AND p.Name IN (
+                              SELECT LTRIM(RTRIM(n.value('.','NVARCHAR(200)')))
+                              FROM (SELECT CAST('<x>' + REPLACE(@packageFilter,'|','</x><x>') + '</x>' AS XML) x) t
+                              CROSS APPLY t.x.nodes('x') r(n));
+
+                IF NOT EXISTS (SELECT 1 FROM @SubList)
+                    RAISERROR('No existing subscriptions found for this company — use New Subscription mode instead.',16,1);
+
+                WHILE EXISTS (SELECT 1 FROM @SubList)
+                BEGIN
+                    SELECT TOP 1 @UpdSubID = ID FROM @SubList;
+                    DELETE FROM @SubList WHERE ID = @UpdSubID;
+
+                    -- ── Update CompanySubscription (seats, grace days, status) ────
+                    -- SubscriptionType: portal always uses 0 (None) for paid packages; 1 (Complementary) for Foundation User (PackageType=4)
+                    DECLARE @UpdPkgType INT = ISNULL((SELECT TOP 1 p.PackageType FROM [dbo].[Package] p
+                        INNER JOIN [dbo].[CompanySubscription] cs2 ON cs2.Package_ID = p.ID
+                        WHERE cs2.ID = @UpdSubID), 0);
+                    DECLARE @UpdSubType INT = CASE WHEN @UpdPkgType = 4 THEN 1 ELSE 0 END;
+                    SET @updCsSQL = N'UPDATE [dbo].[CompanySubscription] SET [NumberOfLicense]=@seats,[GraceDays]=@gd,[AutoRenew]=0,[SubscriptionType]=@updSubType';
+                    IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CompanySubscription' AND COLUMN_NAME='IsActive'  AND TABLE_SCHEMA='dbo') SET @updCsSQL=@updCsSQL+N',[IsActive]=1';
+                    IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CompanySubscription' AND COLUMN_NAME='Status'    AND TABLE_SCHEMA='dbo') SET @updCsSQL=@updCsSQL+N',[Status]=0'; -- 0=Active (portal pattern)
+                    IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CompanySubscription' AND COLUMN_NAME='IsDeleted' AND TABLE_SCHEMA='dbo') SET @updCsSQL=@updCsSQL+N',[IsDeleted]=0';
+                    IF @csHasUpdOn=1 SET @updCsSQL=@updCsSQL+N',[UpdatedOn]=GETUTCDATE()';
+                    IF @csHasUpdBy=1 SET @updCsSQL=@updCsSQL+N',[UpdatedBy]=@acctId';
+                    SET @updCsSQL=@updCsSQL+N' WHERE [ID]=@sid';
+                    EXEC sp_executesql @updCsSQL,N'@seats INT,@gd SMALLINT,@sid UNIQUEIDENTIFIER,@updSubType INT,@acctId UNIQUEIDENTIFIER',
+                        @seats=@seats,@gd=@GraceDays,@sid=@UpdSubID,@updSubType=@UpdSubType,@acctId=@AdminAccountID;
+                    SET @RowsInserted = @RowsInserted + 1;
+
+                    -- ── AccountCompanySubscription: ensure every AccountCompany is linked ──
+                    IF OBJECT_ID('dbo.AccountCompanySubscription','U') IS NOT NULL
+                    AND OBJECT_ID('dbo.AccountCompany','U') IS NOT NULL
+                    BEGIN
+                        EXEC sp_executesql
+                            N'INSERT INTO [dbo].[AccountCompanySubscription]([ID],[AccountCompany_ID],[Subscription_ID])
+                              SELECT NEWID(), ac.[ID], @sid
+                              FROM [dbo].[AccountCompany] ac
+                              WHERE ac.[Company_ID] = @cid
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM [dbo].[AccountCompanySubscription] acs2
+                                    WHERE acs2.[AccountCompany_ID] = ac.[ID]
+                                      AND acs2.[Subscription_ID]   = @sid)',
+                            N'@sid UNIQUEIDENTIFIER,@cid UNIQUEIDENTIFIER',
+                            @sid=@UpdSubID,@cid=@CompanyID;
+                    END
+
+                    -- ── Get current SubscriptionDetail (becomes ParentDetail_ID) ──
+                    SET @UpdDetID   = NULL;
+                    SET @UpdPlanID  = NULL;
+                    SELECT TOP 1 @UpdDetID  = ID,
+                                 @UpdPlanID = Plan_ID
+                    FROM [dbo].[SubscriptionDetail]
+                    WHERE CompanySubscription_ID = @UpdSubID
+                    ORDER BY ExpiresOn DESC, ID DESC;
+
+                    -- ── Expire old SubscriptionDetail row (portal renewal pattern) ─
+                    IF @UpdDetID IS NOT NULL
+                    BEGIN
+                        SET @updSdSQL = N'UPDATE [dbo].[SubscriptionDetail] SET [Status]=2,[ExpiresOn]=GETUTCDATE()';
+                        IF @sdHasUpdOn=1 SET @updSdSQL=@updSdSQL+N',[UpdatedOn]=GETUTCDATE()';
+                        IF @sdHasUpdBy=1 SET @updSdSQL=@updSdSQL+N',[UpdatedBy]=@acctId';
+                        SET @updSdSQL=@updSdSQL+N' WHERE [ID]=@did';
+                        EXEC sp_executesql @updSdSQL,N'@did UNIQUEIDENTIFIER,@acctId UNIQUEIDENTIFIER',@did=@UpdDetID,@acctId=@AdminAccountID;
+                    END
+                    SET @UpdParentID = @UpdDetID; -- NULL is fine if no prior SD existed
+
+                    -- ── Insert new SubscriptionDetail (portal-style: Amount=0, Status=0) ─
+                    -- ParentDetail_ID → prior row; TransactionInfo_ID → @TxnID from txnInsert
+                    SET @NewDetID   = NEWID();
+                    SET @iSdInsCols = N'[ID],[CompanySubscription_ID],[Plan_ID],[Status],[StartsOn],[ExpiresOn],[Amount],[NumberOfLicense]';
+                    -- Status=1 (SubscriptionStatus.Active) — Core authorizer checks sd.Status IN (1,2).
+                    -- StartsOn=NULL matches portal pattern for renewal SD rows.
+                    SET @iSdInsVals = N'@ndid,@UpdSubID,@udPlan,1,NULL,@ex,0,@seats';
+                    IF @sdHasParent=1 BEGIN SET @iSdInsCols=@iSdInsCols+N',[ParentDetail_ID]';    SET @iSdInsVals=@iSdInsVals+N',@upid'; END
+                    IF @sdHasTxn=1 AND @TxnID IS NOT NULL BEGIN SET @iSdInsCols=@iSdInsCols+N',[TransactionInfo_ID]'; SET @iSdInsVals=@iSdInsVals+N',@txn'; END
+                    IF @sdHasPromo=1 BEGIN SET @iSdInsCols=@iSdInsCols+N',[Promotion_ID]';       SET @iSdInsVals=@iSdInsVals+N',''00000000-0000-0000-0000-000000000000'''; END -- portal stores Guid.Empty
+                    IF @sdHasCreOn=1 BEGIN SET @iSdInsCols=@iSdInsCols+N',[CreatedOn]';           SET @iSdInsVals=@iSdInsVals+N',GETUTCDATE()'; END
+                    IF @sdHasUpdOn=1 BEGIN SET @iSdInsCols=@iSdInsCols+N',[UpdatedOn]';           SET @iSdInsVals=@iSdInsVals+N',GETUTCDATE()'; END
+                    IF @sdHasCreBy=1 BEGIN SET @iSdInsCols=@iSdInsCols+N',[CreatedBy]';           SET @iSdInsVals=@iSdInsVals+N',@acctId'; END
+                    IF @sdHasUpdBy=1 BEGIN SET @iSdInsCols=@iSdInsCols+N',[UpdatedBy]';           SET @iSdInsVals=@iSdInsVals+N',@acctId'; END
+                    SET @iSdInsSQL = N'INSERT INTO [dbo].[SubscriptionDetail]('+@iSdInsCols+N') VALUES('+@iSdInsVals+N')';
+                    BEGIN TRY
+                        EXEC sp_executesql @iSdInsSQL,
+                            N'@ndid UNIQUEIDENTIFIER,@UpdSubID UNIQUEIDENTIFIER,@udPlan UNIQUEIDENTIFIER,@ex DATETIME,@seats INT,@upid UNIQUEIDENTIFIER,@txn UNIQUEIDENTIFIER,@acctId UNIQUEIDENTIFIER',
+                            @ndid=@NewDetID,@UpdSubID=@UpdSubID,@udPlan=@UpdPlanID,@ex=@expiry,@seats=@seats,@upid=@UpdParentID,@txn=@TxnID,@acctId=@AdminAccountID;
+                    END TRY
+                    BEGIN CATCH
+                        IF @TxnErrMsg IS NULL SET @TxnErrMsg = N'SubscriptionDetail insert failed: ' + LEFT(ERROR_MESSAGE(),400);
+                    END CATCH
+                END
+
+                """;
+
+            // ════════════════════════════════════════════════════════════════════
+            // V1 subscription path — old Subscription table (companies whose
+            // Company.SubscriptionVersion = 1, or that have rows in Subscription).
+            // ════════════════════════════════════════════════════════════════════
+            // Shared preamble for V1 scripts (simpler; no CompanySubscription flags).
+            const string preambleV1 = """
+                -- ── Resolve Company ─────────────────────────────────────────────────
+                DECLARE @CompanyID UNIQUEIDENTIFIER = TRY_CAST(@cidParam AS UNIQUEIDENTIFIER);
+                IF @CompanyID IS NULL
+                    RAISERROR('Invalid or missing Company_ID — could not parse [%s] as UNIQUEIDENTIFIER.',
+                              16, 1, @cidParam);
+                DECLARE @GraceDays SMALLINT = ISNULL(
+                    (SELECT TOP 1 CAST([Value] AS SMALLINT) FROM [dbo].[Setting]
+                     WHERE [Key] = 'SubscriptionGraceDays'), 30);
+                DECLARE @GSTPercent DECIMAL(5,2) = (
+                    SELECT TOP 1 TRY_CAST([Value] AS DECIMAL(5,2)) FROM [dbo].[Setting]
+                    WHERE [Key] = 'GSTPercent');
+                DECLARE @AdminAccountID UNIQUEIDENTIFIER =
+                    ISNULL(
+                        (SELECT TOP 1 ac.Account_ID FROM [dbo].[AccountCompany] ac
+                         WHERE ac.Company_ID = @CompanyID ORDER BY (SELECT NULL)),
+                        (SELECT TOP 1 ID FROM [dbo].[Account] ORDER BY (SELECT NULL)));
+                DECLARE @IsV1 BIT = 1;
+                DECLARE @RowsInserted INT = 0;
+                -- ── V1 Subscription table schema flags ──────────────────────────────
+                DECLARE @v1HasParent    BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Subscription' AND COLUMN_NAME='Parent_ID'     AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @v1HasTxn       BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Subscription' AND COLUMN_NAME='Transaction_ID' AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @v1HasCreOn     BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Subscription' AND COLUMN_NAME='CreatedOn'      AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @v1HasUpdOn     BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Subscription' AND COLUMN_NAME='UpdatedOn'      AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @v1HasCreBy     BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Subscription' AND COLUMN_NAME='CreatedBy'      AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @v1HasUpdBy     BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Subscription' AND COLUMN_NAME='UpdatedBy'      AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @v1HasGraceDays BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Subscription' AND COLUMN_NAME='GraceDays'     AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                DECLARE @v1HasPromo     BIT=(SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Subscription' AND COLUMN_NAME='Promotion_ID'  AND TABLE_SCHEMA='dbo') THEN 1 ELSE 0 END);
+                -- ── V1 working variables ──────────────────────────────────────────
+                DECLARE @compUpdSQL     NVARCHAR(MAX);
+                DECLARE @v1UpdSQL       NVARCHAR(MAX);
+                DECLARE @v1_FoundSubID  UNIQUEIDENTIFIER;
+                DECLARE @v1_IterPkgID   UNIQUEIDENTIFIER;
+                DECLARE @v1_IterPlanID  UNIQUEIDENTIFIER;
+                DECLARE @v1_SubID       UNIQUEIDENTIFIER;
+                DECLARE @v1_OldSubID    UNIQUEIDENTIFIER;
+                DECLARE @v1_OldPkgID    UNIQUEIDENTIFIER;
+                DECLARE @v1_OldPlanID   UNIQUEIDENTIFIER;
+                DECLARE @v1_NewSubID    UNIQUEIDENTIFIER;
+                DECLARE @v1_InsCols     NVARCHAR(MAX);
+                DECLARE @v1_InsVals     NVARCHAR(MAX);
+                DECLARE @v1_InsSQL      NVARCHAR(MAX);
+                DECLARE @v1_PkgList     TABLE (ID UNIQUEIDENTIFIER);
+                DECLARE @v1_SubList     TABLE (ID UNIQUEIDENTIFIER);
+                """;
+
+            // V1 NEW subscription: insert into old Subscription table.
+            // Foundation package (first) gets Parent_ID=NULL; subsequent packages reference it.
+            const string newBodyV1 = """
+                -- ── Step 1: Company status ──────────────────────────────────────────
+                SET @compUpdSQL = N'UPDATE [dbo].[Company] SET [CompanyStatus]=@cs,[TrailExpDate]=@ex';
+                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Company' AND COLUMN_NAME='Mode'             AND TABLE_SCHEMA='dbo') SET @compUpdSQL=@compUpdSQL+N',[Mode]=0';
+                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Company' AND COLUMN_NAME='CloudFeedsAccess' AND TABLE_SCHEMA='dbo') SET @compUpdSQL=@compUpdSQL+N',[CloudFeedsAccess]=1';
+                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Company' AND COLUMN_NAME='UpdatedOn'        AND TABLE_SCHEMA='dbo') SET @compUpdSQL=@compUpdSQL+N',[UpdatedOn]=GETUTCDATE()';
+                SET @compUpdSQL=@compUpdSQL+N' WHERE [ID]=@cid';
+                EXEC sp_executesql @compUpdSQL, N'@cs INT,@ex DATETIME,@cid UNIQUEIDENTIFIER',
+                    @cs=@companyStatus,@ex=@expiry,@cid=@CompanyID;
+
+                -- ── Populate V1 package list ─────────────────────────────────────────
+                IF @packageFilter = N'ALL'
+                    INSERT INTO @v1_PkgList SELECT ID FROM [dbo].[Package] WHERE IsActive = 1;
+                ELSE
+                    INSERT INTO @v1_PkgList
+                    SELECT p.ID FROM [dbo].[Package] p
+                    WHERE p.IsActive = 1
+                      AND p.Name IN (
+                          SELECT LTRIM(RTRIM(n.value('.','NVARCHAR(200)')))
+                          FROM (SELECT CAST('<x>' + REPLACE(@packageFilter,'|','</x><x>') + '</x>' AS XML) x) t
+                          CROSS APPLY t.x.nodes('x') r(n));
+
+                IF NOT EXISTS (SELECT 1 FROM @v1_PkgList)
+                    RAISERROR('V1: None of the selected packages were found active in the Package table. Check that the package names in the tool match the Name column in the Package table exactly.',16,1);
+
+                SET @v1_FoundSubID = NULL;
+
+                WHILE EXISTS (SELECT 1 FROM @v1_PkgList)
+                BEGIN
+                    SELECT TOP 1 @v1_IterPkgID = ID FROM @v1_PkgList;
+                    DELETE FROM @v1_PkgList WHERE ID = @v1_IterPkgID;
+
+                    SET @v1_IterPlanID = NULL;
+                    SELECT TOP 1 @v1_IterPlanID = ID
+                    FROM [dbo].[PlanInfo]
+                    WHERE Package_ID = @v1_IterPkgID
+                      AND EffectiveDate  < GETUTCDATE()
+                      AND ExpirationDate > GETUTCDATE()
+                      AND IsActive = 1
+                    ORDER BY MonthMultiplier DESC, EffectiveDate DESC;
+
+                    IF @v1_IterPlanID IS NOT NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM [dbo].[Subscription]
+                        WHERE Company_ID = @CompanyID
+                          AND Package_ID = @v1_IterPkgID
+                          AND Status = 1)
+                    BEGIN
+                        SET @v1_SubID = NEWID();
+                        SET @v1_InsCols = N'[ID],[Package_ID],[Plan_ID],[Company_ID],[Status],[ExpiresOn],[StartsOn],[NumberOfLicense]';
+                        SET @v1_InsVals = N'@v1s,@v1p,@v1pl,@CompanyID,1,@ex,GETUTCDATE(),@seats';
+                        IF @v1HasGraceDays=1 BEGIN SET @v1_InsCols=@v1_InsCols+N',[GraceDays]';     SET @v1_InsVals=@v1_InsVals+N',@gd'; END
+                        IF @v1HasParent=1    BEGIN SET @v1_InsCols=@v1_InsCols+N',[Parent_ID]';     SET @v1_InsVals=@v1_InsVals+N',@v1fnd'; END
+                        IF @v1HasTxn=1       BEGIN SET @v1_InsCols=@v1_InsCols+N',[Transaction_ID]'; SET @v1_InsVals=@v1_InsVals+N',ISNULL(@TxnID,''00000000-0000-0000-0000-000000000000'')'; END
+                        IF @v1HasPromo=1     BEGIN SET @v1_InsCols=@v1_InsCols+N',[Promotion_ID]'; SET @v1_InsVals=@v1_InsVals+N',''00000000-0000-0000-0000-000000000000'''; END
+                        IF @v1HasCreOn=1     BEGIN SET @v1_InsCols=@v1_InsCols+N',[CreatedOn]';     SET @v1_InsVals=@v1_InsVals+N',GETUTCDATE()'; END
+                        IF @v1HasUpdOn=1     BEGIN SET @v1_InsCols=@v1_InsCols+N',[UpdatedOn]';     SET @v1_InsVals=@v1_InsVals+N',GETUTCDATE()'; END
+                        IF @v1HasCreBy=1     BEGIN SET @v1_InsCols=@v1_InsCols+N',[CreatedBy]';     SET @v1_InsVals=@v1_InsVals+N',@acctId'; END
+                        IF @v1HasUpdBy=1     BEGIN SET @v1_InsCols=@v1_InsCols+N',[UpdatedBy]';     SET @v1_InsVals=@v1_InsVals+N',@acctId'; END
+                        SET @v1_InsSQL = N'INSERT INTO [dbo].[Subscription]('+@v1_InsCols+N') VALUES('+@v1_InsVals+N')';
+                        EXEC sp_executesql @v1_InsSQL,
+                            N'@v1s UNIQUEIDENTIFIER,@v1p UNIQUEIDENTIFIER,@v1pl UNIQUEIDENTIFIER,@CompanyID UNIQUEIDENTIFIER,@ex DATETIME,@seats INT,@gd SMALLINT,@v1fnd UNIQUEIDENTIFIER,@TxnID UNIQUEIDENTIFIER,@acctId UNIQUEIDENTIFIER',
+                            @v1s=@v1_SubID,@v1p=@v1_IterPkgID,@v1pl=@v1_IterPlanID,@CompanyID=@CompanyID,@ex=@expiry,@seats=@seats,@gd=@GraceDays,@v1fnd=@v1_FoundSubID,@TxnID=@TxnID,@acctId=@AdminAccountID;
+                        IF @v1_FoundSubID IS NULL SET @v1_FoundSubID = @v1_SubID;
+                        SET @RowsInserted = @RowsInserted + 1;
+                        -- ── AccountCompanySubscription ────────────────────────────
+                        IF OBJECT_ID('dbo.AccountCompanySubscription','U') IS NOT NULL
+                        AND OBJECT_ID('dbo.AccountCompany','U') IS NOT NULL
+                        BEGIN
+                            EXEC sp_executesql
+                                N'INSERT INTO [dbo].[AccountCompanySubscription]([ID],[AccountCompany_ID],[Subscription_ID])
+                                  SELECT NEWID(), ac.[ID], @sid
+                                  FROM [dbo].[AccountCompany] ac
+                                  WHERE ac.[Company_ID] = @cid
+                                    AND NOT EXISTS (
+                                        SELECT 1 FROM [dbo].[AccountCompanySubscription] acs2
+                                        WHERE acs2.[AccountCompany_ID] = ac.[ID]
+                                          AND acs2.[Subscription_ID] = @sid)',
+                                N'@sid UNIQUEIDENTIFIER,@cid UNIQUEIDENTIFIER',
+                                @sid=@v1_SubID,@cid=@CompanyID;
+                        END
+                    END
+                END
+                """;
+
+            // V1 UPDATE: expire existing active Subscription rows, insert new child rows.
+            const string updateBodyV1 = """
+                -- ── Step 1: Company status ──────────────────────────────────────────
+                SET @compUpdSQL = N'UPDATE [dbo].[Company] SET [CompanyStatus]=@cs,[TrailExpDate]=@ex';
+                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Company' AND COLUMN_NAME='Mode'             AND TABLE_SCHEMA='dbo') SET @compUpdSQL=@compUpdSQL+N',[Mode]=0';
+                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Company' AND COLUMN_NAME='CloudFeedsAccess' AND TABLE_SCHEMA='dbo') SET @compUpdSQL=@compUpdSQL+N',[CloudFeedsAccess]=1';
+                IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Company' AND COLUMN_NAME='UpdatedOn'        AND TABLE_SCHEMA='dbo') SET @compUpdSQL=@compUpdSQL+N',[UpdatedOn]=GETUTCDATE()';
+                SET @compUpdSQL=@compUpdSQL+N' WHERE [ID]=@cid';
+                EXEC sp_executesql @compUpdSQL, N'@cs INT,@ex DATETIME,@cid UNIQUEIDENTIFIER',
+                    @cs=@companyStatus,@ex=@expiry,@cid=@CompanyID;
+
+                -- ── Populate V1 existing subscription list ───────────────────────
+                IF @packageFilter = N'ALL'
+                    INSERT INTO @v1_SubList
+                    SELECT s.ID FROM [dbo].[Subscription] s WHERE s.Company_ID = @CompanyID AND s.Status = 1;
+                ELSE
+                    INSERT INTO @v1_SubList
+                    SELECT s.ID FROM [dbo].[Subscription] s
+                    INNER JOIN [dbo].[Package] p ON p.ID = s.Package_ID
+                    WHERE s.Company_ID = @CompanyID AND s.Status = 1
+                      AND p.Name IN (
+                          SELECT LTRIM(RTRIM(n.value('.','NVARCHAR(200)')))
+                          FROM (SELECT CAST('<x>' + REPLACE(@packageFilter,'|','</x><x>') + '</x>' AS XML) x) t
+                          CROSS APPLY t.x.nodes('x') r(n));
+
+                IF NOT EXISTS (SELECT 1 FROM @v1_SubList)
+                    RAISERROR('V1: No active subscriptions found for this company. Use New Subscription mode instead.',16,1);
+
+                WHILE EXISTS (SELECT 1 FROM @v1_SubList)
+                BEGIN
+                    SELECT TOP 1 @v1_OldSubID = ID FROM @v1_SubList;
+                    DELETE FROM @v1_SubList WHERE ID = @v1_OldSubID;
+
+                    SELECT @v1_OldPkgID = Package_ID, @v1_OldPlanID = Plan_ID
+                    FROM [dbo].[Subscription] WHERE ID = @v1_OldSubID;
+
+                    -- Expire the old row (portal renewal pattern: Status=2 = Renewed)
+                    SET @v1UpdSQL = N'UPDATE [dbo].[Subscription] SET [Status]=2,[ExpiresOn]=GETUTCDATE()';
+                    IF @v1HasUpdOn=1 SET @v1UpdSQL=@v1UpdSQL+N',[UpdatedOn]=GETUTCDATE()';
+                    IF @v1HasUpdBy=1 SET @v1UpdSQL=@v1UpdSQL+N',[UpdatedBy]=@acctId';
+                    SET @v1UpdSQL=@v1UpdSQL+N' WHERE [ID]=@did';
+                    EXEC sp_executesql @v1UpdSQL, N'@did UNIQUEIDENTIFIER,@acctId UNIQUEIDENTIFIER',
+                        @did=@v1_OldSubID,@acctId=@AdminAccountID;
+
+                    -- Insert new child subscription (Status=1 Active, Parent_ID=old row ID)
+                    SET @v1_NewSubID = NEWID();
+                    SET @v1_InsCols = N'[ID],[Package_ID],[Plan_ID],[Company_ID],[Status],[ExpiresOn],[StartsOn],[NumberOfLicense]';
+                    SET @v1_InsVals = N'@v1ns,@v1p,@v1pl,@CompanyID,1,@ex,GETUTCDATE(),@seats';
+                    IF @v1HasGraceDays=1 BEGIN SET @v1_InsCols=@v1_InsCols+N',[GraceDays]';     SET @v1_InsVals=@v1_InsVals+N',@gd'; END
+                    IF @v1HasParent=1    BEGIN SET @v1_InsCols=@v1_InsCols+N',[Parent_ID]';     SET @v1_InsVals=@v1_InsVals+N',@v1old'; END
+                    IF @v1HasTxn=1       BEGIN SET @v1_InsCols=@v1_InsCols+N',[Transaction_ID]'; SET @v1_InsVals=@v1_InsVals+N',ISNULL(@TxnID,''00000000-0000-0000-0000-000000000000'')'; END
+                    IF @v1HasPromo=1     BEGIN SET @v1_InsCols=@v1_InsCols+N',[Promotion_ID]'; SET @v1_InsVals=@v1_InsVals+N',''00000000-0000-0000-0000-000000000000'''; END
+                    IF @v1HasCreOn=1     BEGIN SET @v1_InsCols=@v1_InsCols+N',[CreatedOn]';     SET @v1_InsVals=@v1_InsVals+N',GETUTCDATE()'; END
+                    IF @v1HasUpdOn=1     BEGIN SET @v1_InsCols=@v1_InsCols+N',[UpdatedOn]';     SET @v1_InsVals=@v1_InsVals+N',GETUTCDATE()'; END
+                    IF @v1HasCreBy=1     BEGIN SET @v1_InsCols=@v1_InsCols+N',[CreatedBy]';     SET @v1_InsVals=@v1_InsVals+N',@acctId'; END
+                    IF @v1HasUpdBy=1     BEGIN SET @v1_InsCols=@v1_InsCols+N',[UpdatedBy]';     SET @v1_InsVals=@v1_InsVals+N',@acctId'; END
+                    SET @v1_InsSQL = N'INSERT INTO [dbo].[Subscription]('+@v1_InsCols+N') VALUES('+@v1_InsVals+N')';
+                    EXEC sp_executesql @v1_InsSQL,
+                        N'@v1ns UNIQUEIDENTIFIER,@v1p UNIQUEIDENTIFIER,@v1pl UNIQUEIDENTIFIER,@CompanyID UNIQUEIDENTIFIER,@ex DATETIME,@seats INT,@gd SMALLINT,@v1old UNIQUEIDENTIFIER,@TxnID UNIQUEIDENTIFIER,@acctId UNIQUEIDENTIFIER',
+                        @v1ns=@v1_NewSubID,@v1p=@v1_OldPkgID,@v1pl=@v1_OldPlanID,@CompanyID=@CompanyID,@ex=@expiry,@seats=@seats,@gd=@GraceDays,@v1old=@v1_OldSubID,@TxnID=@TxnID,@acctId=@AdminAccountID;
+                    SET @RowsInserted = @RowsInserted + 1;
+                    -- ── AccountCompanySubscription for new child row ───────────────
+                    IF OBJECT_ID('dbo.AccountCompanySubscription','U') IS NOT NULL
+                    AND OBJECT_ID('dbo.AccountCompany','U') IS NOT NULL
+                    BEGIN
+                        EXEC sp_executesql
+                            N'INSERT INTO [dbo].[AccountCompanySubscription]([ID],[AccountCompany_ID],[Subscription_ID])
+                              SELECT NEWID(), ac.[ID], @sid
+                              FROM [dbo].[AccountCompany] ac
+                              WHERE ac.[Company_ID] = @cid
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM [dbo].[AccountCompanySubscription] acs2
+                                    WHERE acs2.[AccountCompany_ID] = ac.[ID]
+                                      AND acs2.[Subscription_ID] = @sid)',
+                            N'@sid UNIQUEIDENTIFIER,@cid UNIQUEIDENTIFIER',
+                            @sid=@v1_NewSubID,@cid=@CompanyID;
+                    END
+                END
+                """;
+
+            // Both paths include txnInsert so @TxnID / @TxnErrMsg are always available.
+            // SELECT returns: col0=@RowsInserted (int), col1=@TxnErrMsg (string|null)
+            const string txnErrSelect = "SELECT @RowsInserted, @TxnErrMsg;";
+
+            // ── Detect subscription version (V1=old Subscription table / V2=CompanySubscription) ──
+            bool isV1 = false;
+            try
+            {
+                const string verSql = """
+                    DECLARE @sv INT = ISNULL(TRY_CAST(
+                        (SELECT TOP 1 SubscriptionVersion FROM [dbo].[Company] WHERE ID = @cid)
+                        AS INT), 0);
+                    SELECT CAST(CASE
+                        WHEN @sv = 1 THEN 1
+                        WHEN @sv = 2 THEN 0
+                        ELSE CASE WHEN EXISTS(SELECT 1 FROM [dbo].[Subscription] WHERE Company_ID = @cid) THEN 1 ELSE 0 END
+                    END AS INT);
+                    """;
+                var verCs = BuildConnStr(HostServerBox.Text.Trim(), HostUserBox.Text.Trim(),
+                                         HostPasswordBox.Password, _hostConn!.Database);
+                await using var verConn = new Microsoft.Data.SqlClient.SqlConnection(verCs);
+                await verConn.OpenAsync();
+                await using var verCmd = new Microsoft.Data.SqlClient.SqlCommand(verSql, verConn);
+                verCmd.Parameters.Add("@cid", System.Data.SqlDbType.UniqueIdentifier).Value = Guid.Parse(companyId);
+                verCmd.CommandTimeout = 15;
+                var verResult = await verCmd.ExecuteScalarAsync();
+                isV1 = verResult != null && verResult != DBNull.Value && Convert.ToInt32(verResult) == 1;
+            }
+            catch { /* default to V2 if detection fails */ }
+
+            string script = isV1
+                ? (isNew ? preambleV1 + "\n" + txnInsert + "\n" + newBodyV1    + "\n" + txnErrSelect
+                         : preambleV1 + "\n" + txnInsert + "\n" + updateBodyV1 + "\n" + txnErrSelect)
+                : (isNew ? preamble   + "\n" + txnInsert + "\n" + newBodyAll   + "\n" + txnErrSelect
+                         : preamble   + "\n" + txnInsert + "\n" + updateBodyAll + "\n" + txnErrSelect);
+
+            var freshCs = BuildConnStr(HostServerBox.Text.Trim(), HostUserBox.Text.Trim(),
+                                       HostPasswordBox.Password, _hostConn!.Database);
+            await using var freshConn = new Microsoft.Data.SqlClient.SqlConnection(freshCs);
+            await freshConn.OpenAsync();
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(script, freshConn);
+            cmd.Parameters.AddWithValue("@cidParam",       companyId);
+            cmd.Parameters.AddWithValue("@packageName",   packageName);
+            cmd.Parameters.AddWithValue("@packageFilter", packageFilter);
+            cmd.Parameters.AddWithValue("@csSubType",     csSubType);
+            cmd.Parameters.AddWithValue("@seats",         seats);
+            cmd.Parameters.AddWithValue("@expiry",        expiry.ToUniversalTime());
+            cmd.Parameters.AddWithValue("@companyStatus", companyStatus);
+            cmd.Parameters.AddWithValue("@billingMode",      billingMode);
+            cmd.Parameters.AddWithValue("@cardLast4",        cardLast4);
+            cmd.Parameters.AddWithValue("@cardName",         cardName);
+            cmd.Parameters.AddWithValue("@cardBrand",        cardBrand);
+            cmd.Parameters.AddWithValue("@cardCvv",          cardCvv);
+            cmd.Parameters.AddWithValue("@cardExpiryDate",   cardExpiryDate);
+            cmd.CommandTimeout = 60;
+            int rowsInserted = 0;
+            string? txnErrText = null;
+            await using (var rdr = await cmd.ExecuteReaderAsync())
+            {
+                if (await rdr.ReadAsync())
+                {
+                    rowsInserted = rdr.IsDBNull(0) ? 0 : rdr.GetInt32(0);
+                    txnErrText   = rdr.IsDBNull(1) ? null : rdr.GetString(1);
+                }
+            }
+
+            string archLabel = isV1 ? "V1 (Subscription table)" : "V2 (CompanySubscription + SubscriptionDetail)";
+            string txnSuffix = billingMode == "AlreadyPaid" ? "AP" : billingMode == "NewCard" ? "C" : "A";
+
+            if (isNew)
+            {
+                log.AppendLine($"✓  Mode: New Subscription");
+                log.AppendLine($"✓  Architecture:              {archLabel}");
+                log.AppendLine($"✓  Subscription Type:         {subTypeLabel} ({csSubType})");
+                log.AppendLine($"✓  Company status updated   — {licenseType}, TrailExpDate={expiry:yyyy-MM-dd}");
+                if (txnErrText != null)
+                    log.AppendLine($"⚠  TransactionInfo skipped  — {txnErrText}");
+                else
+                    log.AppendLine($"✓  TransactionInfo           — NewSubscription({txnSuffix}), Amount=calculated{(billingMode == "NewCard" ? $", Card={cardBrand} ****{cardLast4}" : "")}");
+                log.AppendLine($"✓  Packages ({subTypeLabel}):    {string.Join(", ", pkgList)}");
+                if (rowsInserted == 0)
+                    log.AppendLine($"⚠  Rows inserted: 0 — all packages were skipped (already subscribed or no active PlanInfo). Verify Package names and PlanInfo.ExpirationDate in the Host DB.");
+                else
+                {
+                    log.AppendLine(isV1
+                        ? $"✓  Subscription rows inserted — {rowsInserted} (Status=1 Active, ExpiresOn={expiry:yyyy-MM-dd})"
+                        : $"✓  CompanySubscription rows  — {rowsInserted} new (skipped if already exists)");
+                    if (!isV1)
+                        log.AppendLine($"✓  SubscriptionDetail        — {rowsInserted} new, Status=1 (Active), ExpiresOn={expiry:yyyy-MM-dd}");
+                }
+            }
+            else
+            {
+                log.AppendLine($"✓  Mode: Update Existing");
+                log.AppendLine($"✓  Architecture:              {archLabel}");
+                log.AppendLine($"✓  Subscription Type:         {subTypeLabel} ({csSubType})");
+                log.AppendLine($"✓  Company status updated   — {licenseType}, TrailExpDate={expiry:yyyy-MM-dd}");
+                if (txnErrText != null)
+                    log.AppendLine($"⚠  TransactionInfo skipped  — {txnErrText}");
+                else
+                    log.AppendLine($"✓  TransactionInfo           — NewSubscription({txnSuffix}), Amount=calculated{(billingMode == "NewCard" ? $", Card={cardBrand} ****{cardLast4}" : "")}");
+                log.AppendLine($"✓  Packages ({subTypeLabel}):    {string.Join(", ", pkgList)}");
+                if (rowsInserted == 0)
+                    log.AppendLine($"⚠  Rows updated: 0 — no matching existing subscriptions found. Try New Subscription mode.");
+                else
+                {
+                    log.AppendLine(isV1
+                        ? $"✓  Subscription rows renewed — {rowsInserted} (old→Status=2, new child Status=1, ExpiresOn={expiry:yyyy-MM-dd})"
+                        : $"✓  CompanySubscription rows  — {rowsInserted} updated, seats→{seats}");
+                    if (!isV1)
+                        log.AppendLine($"✓  SubscriptionDetail        — {rowsInserted} new detail rows, Status=1 (Active), ParentDetail_ID linked, ExpiresOn→{expiry:yyyy-MM-dd}");
+                }
+            }
+
+            SetActionBadge(SubResultBadge, SubResultText, true, log.ToString().TrimEnd());
+        }
+        catch (Exception ex)
+        {
+            SetActionBadge(SubResultBadge, SubResultText, false, $"✗  {ex.Message}");
+        }
+    }
+
+    // ── Check Subscription State ─────────────────────────────────────────────
+    private async void CheckSubState_Click(object sender, RoutedEventArgs e)
+    {
+        SubResultBadge.Visibility = System.Windows.Visibility.Collapsed;
+
+        var targetDb = SubCoreDatabaseBox.Text.Trim();
+        if (string.IsNullOrEmpty(targetDb))
+        {
+            SetActionBadge(SubResultBadge, SubResultText, false, "✗  Select a Core Database first.");
+            return;
+        }
+        if (_hostConn?.State != System.Data.ConnectionState.Open)
+        {
+            SetActionBadge(SubResultBadge, SubResultText, false, "✗  Not connected to Host DB. Connect first.");
+            return;
+        }
+
+        try
+        {
+            SetActionBadge(SubResultBadge, SubResultText, true, "⏳  Querying subscription state…");
+            SubResultBadge.Visibility = System.Windows.Visibility.Visible;
+
+            // Resolve company ID — same multi-strategy approach as AddSubscription_Click
+            string? companyId = null;
+            var candidateCs2 = new System.Collections.Generic.List<string>();
+            var coreServer2 = CoreServerBox.Text.Trim();
+            var hostServer2 = HostServerBox.Text.Trim();
+            if (!string.IsNullOrEmpty(coreServer2))
+                candidateCs2.Add(BuildConnStr(coreServer2, CoreUserBox.Text.Trim(), CorePasswordBox.Password, targetDb));
+            if (!string.IsNullOrEmpty(hostServer2) && hostServer2 != coreServer2)
+                candidateCs2.Add(BuildConnStr(hostServer2, HostUserBox.Text.Trim(), HostPasswordBox.Password, targetDb));
+
+            foreach (var tryCs in candidateCs2)
+            {
+                if (!string.IsNullOrEmpty(companyId)) break;
+                try
+                {
+                    await using var tryConn = new Microsoft.Data.SqlClient.SqlConnection(tryCs);
+                    await tryConn.OpenAsync();
+                    if (await new Microsoft.Data.SqlClient.SqlCommand(
+                            "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='Setting'",
+                            tryConn).ExecuteScalarAsync() != null)
+                    {
+                        await using var s1 = new Microsoft.Data.SqlClient.SqlCommand(
+                            "SELECT TOP 1 CAST([Value] AS NVARCHAR(64)) FROM [dbo].[Setting] WHERE [Key] IN ('CompanyId','CompanyID','Company_ID','companyId','companyID') AND [Value] IS NOT NULL AND LEN([Value]) > 0 ORDER BY CASE [Key] WHEN 'CompanyId' THEN 1 WHEN 'CompanyID' THEN 2 ELSE 3 END",
+                            tryConn);
+                        companyId = (await s1.ExecuteScalarAsync())?.ToString()?.Trim();
+                    }
+                }
+                catch { }
+            }
+
+            // Fallback: Host DB Company table exact + LIKE match
+            if (string.IsNullOrEmpty(companyId) && _hostConn?.State == System.Data.ConnectionState.Open)
+            {
+                try
+                {
+                    await using var s4a = new Microsoft.Data.SqlClient.SqlCommand(
+                        "SELECT TOP 1 CAST(ID AS NVARCHAR(64)) FROM [dbo].[Company] WHERE DatabaseID = @db", _hostConn);
+                    s4a.Parameters.AddWithValue("@db", targetDb);
+                    var v4a = await s4a.ExecuteScalarAsync();
+                    if (v4a != null && v4a != DBNull.Value) companyId = v4a.ToString()?.Trim();
+
+                    if (string.IsNullOrEmpty(companyId))
+                    {
+                        var baseName = System.Text.RegularExpressions.Regex.Replace(
+                            targetDb, @"[-_](Sanitized|Backup|Copy|Restore|sanitized|backup|copy|restore).*$", "");
+                        if (baseName != targetDb)
+                        {
+                            await using var s4b = new Microsoft.Data.SqlClient.SqlCommand(
+                                "SELECT TOP 1 CAST(ID AS NVARCHAR(64)) FROM [dbo].[Company] WHERE DatabaseID LIKE @pat", _hostConn);
+                            s4b.Parameters.AddWithValue("@pat", baseName + "%");
+                            var v4b = await s4b.ExecuteScalarAsync();
+                            if (v4b != null && v4b != DBNull.Value) companyId = v4b.ToString()?.Trim();
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            if (string.IsNullOrEmpty(companyId))
+            {
+                SetActionBadge(SubResultBadge, SubResultText, false,
+                    $"✗  Could not resolve Company_ID for [{targetDb}].\nChecked: Setting table in Core DB, Host DB Company.DatabaseID exact + prefix match.\nEnsure Section 1 (Host DB) and Section 2 (Core DB) credentials are entered.");
+                return;
+            }
+
+            const string diagSql = """
+                DECLARE @cid UNIQUEIDENTIFIER = TRY_CAST(@cidParam AS UNIQUEIDENTIFIER);
+
+                -- Version detection
+                DECLARE @sv INT = ISNULL(TRY_CAST(
+                    (SELECT TOP 1 SubscriptionVersion FROM [dbo].[Company] WHERE ID = @cid) AS INT), 0);
+                DECLARE @hasOldSubs BIT = CASE WHEN EXISTS(SELECT 1 FROM [dbo].[Subscription] WHERE Company_ID = @cid) THEN 1 ELSE 0 END;
+                DECLARE @isV1 BIT = CAST(CASE WHEN @sv=1 THEN 1 WHEN @sv=2 THEN 0 ELSE @hasOldSubs END AS BIT);
+                SELECT @sv AS SubscriptionVersion, @isV1 AS IsV1;
+
+                -- V2: CompanySubscription + SubscriptionDetail
+                SELECT
+                    cs.ID              AS CS_ID,
+                    p.Name             AS PackageName,
+                    cs.NumberOfLicense AS Seats,
+                    cs.StartsOn,
+                    cs.SubscriptionType,
+                    sd.Status          AS SD_Status,
+                    sd.ExpiresOn       AS SD_ExpiresOn,
+                    CASE WHEN sd.ExpiresOn > GETUTCDATE() THEN 'Active' ELSE 'EXPIRED' END AS ActiveState
+                FROM [dbo].[CompanySubscription] cs
+                LEFT JOIN [dbo].[Package] p ON p.ID = cs.Package_ID
+                LEFT JOIN [dbo].[SubscriptionDetail] sd ON sd.CompanySubscription_ID = cs.ID
+                    AND sd.Status IN (1, 2)
+                WHERE cs.Company_ID = @cid
+                ORDER BY cs.StartsOn DESC;
+
+                -- V1: old Subscription table
+                SELECT
+                    s.ID,
+                    p.Name         AS PackageName,
+                    s.NumberOfLicense AS Seats,
+                    s.StartsOn,
+                    s.ExpiresOn,
+                    s.Status,
+                    s.Parent_ID,
+                    CASE WHEN s.ExpiresOn > GETUTCDATE() THEN 'Active' ELSE 'EXPIRED' END AS ActiveState
+                FROM [dbo].[Subscription] s
+                LEFT JOIN [dbo].[Package] p ON p.ID = s.Package_ID
+                WHERE s.Company_ID = @cid
+                ORDER BY s.ExpiresOn DESC;
+
+                -- AccountCompanySubscription count
+                SELECT COUNT(*) AS ACS_Count FROM [dbo].[AccountCompanySubscription] acs
+                INNER JOIN [dbo].[AccountCompany] ac ON ac.ID = acs.AccountCompany_ID
+                WHERE ac.Company_ID = @cid;
+                """;
+
+            var cs2 = BuildConnStr(HostServerBox.Text.Trim(), HostUserBox.Text.Trim(),
+                                    HostPasswordBox.Password, _hostConn.Database);
+            await using var conn2 = new Microsoft.Data.SqlClient.SqlConnection(cs2);
+            await conn2.OpenAsync();
+            await using var cmd2 = new Microsoft.Data.SqlClient.SqlCommand(diagSql, conn2);
+            cmd2.Parameters.AddWithValue("@cidParam", companyId);
+            cmd2.CommandTimeout = 30;
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"Company_ID: {companyId}");
+
+            await using var rdr = await cmd2.ExecuteReaderAsync();
+
+            // Result set 1: version info
+            if (await rdr.ReadAsync())
+            {
+                int sv     = rdr.IsDBNull(0) ? 0 : rdr.GetInt32(0);
+                bool isV1  = !rdr.IsDBNull(1) && rdr.GetBoolean(1);
+                sb.AppendLine($"SubscriptionVersion: {sv}  →  Architecture: {(isV1 ? "V1 (Subscription table)" : "V2 (CompanySubscription)")}");
+            }
+
+            // Result set 2: V2 CompanySubscription rows
+            await rdr.NextResultAsync();
+            var v2rows = new System.Text.StringBuilder();
+            int v2count = 0;
+            while (await rdr.ReadAsync())
+            {
+                v2count++;
+                string pkg      = rdr.IsDBNull(1) ? "?" : rdr.GetString(1);
+                object seats    = rdr.IsDBNull(2) ? (object)"?" : rdr.GetInt32(2);
+                string state    = rdr.IsDBNull(7) ? "?" : rdr.GetString(7);
+                string expires  = rdr.IsDBNull(6) ? "no SD" : ((DateTime)rdr[6]).ToString("yyyy-MM-dd");
+                int sdStatus    = rdr.IsDBNull(5) ? -1 : rdr.GetInt32(5);
+                v2rows.AppendLine($"    [{state}] {pkg} — seats={seats}, SD.Status={sdStatus}, ExpiresOn={expires}");
+            }
+            sb.AppendLine($"\nV2 CompanySubscription rows: {v2count}");
+            if (v2count > 0) sb.Append(v2rows);
+
+            // Result set 3: V1 Subscription rows
+            await rdr.NextResultAsync();
+            var v1rows = new System.Text.StringBuilder();
+            int v1count = 0;
+            while (await rdr.ReadAsync())
+            {
+                v1count++;
+                string pkg     = rdr.IsDBNull(1) ? "?" : rdr.GetString(1);
+                object seats   = rdr.IsDBNull(2) ? (object)"?" : rdr.GetInt32(2);
+                string state   = rdr.IsDBNull(7) ? "?" : rdr.GetString(7);
+                string expires = rdr.IsDBNull(4) ? "?" : ((DateTime)rdr[4]).ToString("yyyy-MM-dd");
+                int status     = rdr.IsDBNull(5) ? -1 : rdr.GetInt32(5);
+                bool isRoot    = rdr.IsDBNull(6);
+                v1rows.AppendLine($"    [{state}] {pkg} — seats={seats}, Status={status}, ExpiresOn={expires}{(isRoot ? " (root)" : " (child)")}");
+            }
+            sb.AppendLine($"\nV1 Subscription rows: {v1count}");
+            if (v1count > 0) sb.Append(v1rows);
+
+            // Result set 4: ACS count
+            await rdr.NextResultAsync();
+            if (await rdr.ReadAsync())
+                sb.AppendLine($"\nAccountCompanySubscription rows: {rdr.GetInt32(0)}");
+
+            SetActionBadge(SubResultBadge, SubResultText, true, sb.ToString().TrimEnd());
+        }
+        catch (Exception ex)
+        {
+            SetActionBadge(SubResultBadge, SubResultText, false, $"✗  {ex.Message}");
+        }
+    }
+
+    // ── Fix Duplicate Subscriptions ──────────────────────────────────────────
+    private async void FixDuplicates_Click(object sender, RoutedEventArgs e)
+    {
+        SubResultBadge.Visibility = System.Windows.Visibility.Collapsed;
+
+        var targetDb = SubCoreDatabaseBox.SelectedItem?.ToString()?.Trim();
+        if (string.IsNullOrEmpty(targetDb))
+        {
+            SetActionBadge(SubResultBadge, SubResultText, false, "✗  Select a database first.");
+            return;
+        }
+        if (_hostConn?.State != System.Data.ConnectionState.Open)
+        {
+            SetActionBadge(SubResultBadge, SubResultText, false,
+                "✗  Not connected to Host DB. Connect first.");
+            return;
+        }
+
+        IosAlertDialog.IsDark = _isDarkMode;
+        bool confirmed = IosAlertDialog.Show(
+            title:       "Fix Duplicate Subscriptions",
+            message:     $"This will permanently delete duplicate CompanySubscription rows for [{targetDb}], keeping only the latest per package.\n\nAll related SubscriptionDetail, StorageSubscription, and CompanyAgreement rows for the duplicates will also be removed.\n\nThis cannot be undone.",
+            actionLabel: "Fix Duplicates",
+            destructive: true,
+            owner:       this);
+        if (!confirmed) return;
+
+        var log = new System.Text.StringBuilder();
+        try
+        {
+            SetActionBadge(SubResultBadge, SubResultText, true, "⏳  Fixing duplicates…");
+            SubResultBadge.Visibility = System.Windows.Visibility.Visible;
+
+            // Resolve Company_ID from target DB
+            string? companyId = null;
+            try
+            {
+                var coreCs2 = BuildConnStr(
+                    CoreServerBox.Text.Trim(), CoreUserBox.Text.Trim(),
+                    CorePasswordBox.Password, targetDb);
+                await using var coreConn2 = new Microsoft.Data.SqlClient.SqlConnection(coreCs2);
+                await coreConn2.OpenAsync();
+                await using var cidCmd2 = new Microsoft.Data.SqlClient.SqlCommand("""
+                    SELECT TOP 1 CAST([Value] AS NVARCHAR(64))
+                    FROM [dbo].[Setting]
+                    WHERE [Key] IN ('CompanyId','CompanyID','Company_ID','companyId','companyID')
+                      AND [Value] IS NOT NULL AND LEN([Value]) > 0
+                    ORDER BY CASE [Key]
+                        WHEN 'CompanyId'   THEN 1
+                        WHEN 'CompanyID'   THEN 2
+                        WHEN 'Company_ID'  THEN 3
+                        WHEN 'companyId'   THEN 4
+                        WHEN 'companyID'   THEN 5
+                        ELSE 6 END
+                    """, coreConn2);
+                var cidVal2 = await cidCmd2.ExecuteScalarAsync();
+                companyId = cidVal2?.ToString()?.Trim();
+
+                if (string.IsNullOrEmpty(companyId))
+                {
+                    await using var fbCmd2 = new Microsoft.Data.SqlClient.SqlCommand(
+                        "SELECT TOP 1 CAST(ID AS NVARCHAR(64)) FROM [dbo].[Company] ORDER BY (SELECT NULL)",
+                        coreConn2);
+                    try { companyId = (await fbCmd2.ExecuteScalarAsync())?.ToString()?.Trim(); } catch { }
+                }
+            }
+            catch { /* ignore — will fail below */ }
+
+            if (string.IsNullOrEmpty(companyId))
+            {
+                SetActionBadge(SubResultBadge, SubResultText, false,
+                    "✗  Could not resolve Company_ID from target DB. Check Core DB connection.");
+                return;
+            }
+
+            const string dedupSql = """
+                DECLARE @CompanyID UNIQUEIDENTIFIER = CAST(@cid AS UNIQUEIDENTIFIER);
+
+                -- Collect IDs of rows to DELETE (all non-keepers per Company+Package)
+                DECLARE @DupIDs TABLE (ID UNIQUEIDENTIFIER);
+                INSERT INTO @DupIDs
+                SELECT cs.ID
+                FROM [dbo].[CompanySubscription] cs
+                WHERE cs.Company_ID = @CompanyID
+                  AND cs.ID NOT IN (
+                      SELECT keeper.ID
+                      FROM (
+                          SELECT ID,
+                                 ROW_NUMBER() OVER (
+                                     PARTITION BY Company_ID, Package_ID
+                                     ORDER BY StartsOn DESC, ID DESC) AS rn
+                          FROM [dbo].[CompanySubscription]
+                          WHERE Company_ID = @CompanyID
+                      ) keeper
+                      WHERE keeper.rn = 1
+                  );
+
+                DECLARE @cnt INT = (SELECT COUNT(*) FROM @DupIDs);
+
+                -- Delete child rows first (FK order)
+                DELETE FROM [dbo].[SubscriptionDetail]
+                WHERE CompanySubscription_ID IN (SELECT ID FROM @DupIDs);
+
+                IF OBJECT_ID('[dbo].[StorageSubscription]','U') IS NOT NULL
+                    DELETE FROM [dbo].[StorageSubscription]
+                    WHERE CompanySubscription_ID IN (SELECT ID FROM @DupIDs);
+
+                IF OBJECT_ID('[dbo].[CompanyAgreement]','U') IS NOT NULL
+                    DELETE FROM [dbo].[CompanyAgreement]
+                    WHERE CompanySubscription_ID IN (SELECT ID FROM @DupIDs);
+
+                -- Delete duplicate parent rows
+                DELETE FROM [dbo].[CompanySubscription]
+                WHERE ID IN (SELECT ID FROM @DupIDs);
+
+                SELECT @cnt AS DuplicatesRemoved;
+                """;
+
+            var freshCs2 = BuildConnStr(HostServerBox.Text.Trim(), HostUserBox.Text.Trim(),
+                                        HostPasswordBox.Password, _hostConn.Database);
+            await using var freshConn2 = new Microsoft.Data.SqlClient.SqlConnection(freshCs2);
+            await freshConn2.OpenAsync();
+            await using var dedupCmd = new Microsoft.Data.SqlClient.SqlCommand(dedupSql, freshConn2);
+            dedupCmd.Parameters.AddWithValue("@cid", companyId);
+            dedupCmd.CommandTimeout = 60;
+
+            var removed = await dedupCmd.ExecuteScalarAsync();
+            int removedCount = removed is int ri ? ri : (removed is not null ? Convert.ToInt32(removed) : 0);
+
+            log.AppendLine($"✓  Database: {targetDb}");
+            log.AppendLine($"✓  Company ID: {companyId}");
+            log.AppendLine($"✓  Duplicate CompanySubscription rows removed: {removedCount}");
+            log.AppendLine($"✓  Related SubscriptionDetail / StorageSubscription / CompanyAgreement rows cleaned up");
+            if (removedCount == 0)
+                log.AppendLine("ℹ  No duplicates found — subscriptions are already clean.");
+
+            SetActionBadge(SubResultBadge, SubResultText, true, log.ToString().TrimEnd());
+        }
+        catch (Exception ex)
+        {
+            SetActionBadge(SubResultBadge, SubResultText, false, $"✗  {ex.Message}");
+        }
+    }
+
+    // ── Host Company picker helpers ────────────────────────────────────────────
+    /// <summary>
+    /// Queries Host DB for all Company rows whose DatabaseID matches <paramref name="dbName"/>.
+    /// Returns a list of (companyId, displayLabel).
+    /// </summary>
+    private async Task<List<(string id, string label)>> GetHostCompaniesForDbAsync(string dbName)
+    {
+        var results = new List<(string, string)>();
+        if (_hostConn?.State != System.Data.ConnectionState.Open || string.IsNullOrWhiteSpace(dbName))
+            return results;
+
+        const string sql = @"
+SELECT CAST(c.ID AS NVARCHAR(50)),
+       ISNULL(c.Name, '') AS Name
+FROM   [dbo].[Company] c
+WHERE  c.DatabaseID = @db
+   OR  c.DatabaseID LIKE @dbPrefix
+ORDER BY c.Name, c.ID";
+
+        try
+        {
+            // Build prefix by stripping common backup/sanitised suffixes
+            var baseDb = System.Text.RegularExpressions.Regex.Replace(
+                dbName,
+                @"(_Sanitized|_Backup|_Copy|_Restore|_\d{8,}).*$",
+                "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).TrimEnd('_');
+            var prefix = baseDb + "%";
+
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, _hostConn);
+            cmd.Parameters.AddWithValue("@db",       dbName);
+            cmd.Parameters.AddWithValue("@dbPrefix", prefix);
+            await using var rdr = await cmd.ExecuteReaderAsync();
+            while (await rdr.ReadAsync())
+            {
+                var id    = rdr.GetString(0);
+                var name  = rdr.IsDBNull(1) ? "" : rdr.GetString(1);
+                var label = string.IsNullOrWhiteSpace(name) ? id : $"{name}  ({id})";
+                results.Add((id, label));
+            }
+        }
+        catch { /* host not connected or table missing — caller handles empty list */ }
+
+        return results;
+    }
+
+    private async Task PopulateHostCompanyPicker(
+        string dbName,
+        System.Windows.Controls.Grid rowPanel,
+        System.Windows.Controls.ComboBox pickerBox)
+    {
+        rowPanel.Visibility = System.Windows.Visibility.Collapsed;
+        pickerBox.Items.Clear();
+
+        if (_hostConn?.State != System.Data.ConnectionState.Open) return;
+
+        var companies = await GetHostCompaniesForDbAsync(dbName);
+        if (companies.Count <= 1)
+        {
+            // 0 or 1 result — hide picker, action handler uses its own resolution
+            return;
+        }
+
+        foreach (var (id, label) in companies)
+        {
+            pickerBox.Items.Add(new System.Windows.Controls.ComboBoxItem
+            {
+                Content = label,
+                Tag     = id
+            });
+        }
+        pickerBox.SelectedIndex = 0;
+        rowPanel.Visibility = System.Windows.Visibility.Visible;
+    }
+
+    private async void UnlinkDatabaseBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        var dbName = UnlinkDatabaseBox.Text.Trim();
+        if (string.IsNullOrEmpty(dbName) && UnlinkDatabaseBox.SelectedItem != null)
+            dbName = UnlinkDatabaseBox.SelectedItem.ToString()?.Trim() ?? "";
+        await PopulateHostCompanyPicker(dbName, UnlinkHostCompanyRow, UnlinkHostCompanyBox);
+    }
+
+    private async void DelDatabaseBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        var dbName = DelDatabaseBox.Text.Trim();
+        if (string.IsNullOrEmpty(dbName) && DelDatabaseBox.SelectedItem != null)
+            dbName = DelDatabaseBox.SelectedItem.ToString()?.Trim() ?? "";
+        await PopulateHostCompanyPicker(dbName, DelHostCompanyRow, DelHostCompanyBox);
+    }
+
+    // ── Section 5: Unlink Database ────────────────────────────────────────────
+    private async void UnlinkDatabase_Click(object sender, RoutedEventArgs e)
+    {
+        UnlinkResultBadge.Visibility = System.Windows.Visibility.Collapsed;
+
+        var dbName = UnlinkDatabaseBox.Text.Trim();
+        if (string.IsNullOrEmpty(dbName))
+        {
+            SetActionBadge(UnlinkResultBadge, UnlinkResultText, false, "✗  Select a database to unlink.");
+            return;
+        }
+
+        if (_hostConn?.State != System.Data.ConnectionState.Open)
+        {
+            SetActionBadge(UnlinkResultBadge, UnlinkResultText, false,
+                "✗  Not connected to Host DB (Section 1). Connect first.");
+            return;
+        }
+
+        IosAlertDialog.IsDark = _isDarkMode;
+        bool confirmed = IosAlertDialog.Show(
+            title:       "Unlink Database",
+            message:     $"This will remove [{dbName}] from all Host DB tables (Company, AccountCompany, subscriptions, etc.).\n\nThe SQL database itself will NOT be dropped.",
+            actionLabel: "Unlink",
+            destructive: true,
+            owner:       this);
+        if (!confirmed) return;
+
+        var log = new System.Text.StringBuilder();
+        try
+        {
+            SetActionBadge(UnlinkResultBadge, UnlinkResultText, true, "⏳  Unlinking…");
+            UnlinkResultBadge.Visibility = System.Windows.Visibility.Visible;
+
+            string? companyId = null;
+
+            // Step 0: Use Host Company picker if the user explicitly selected one
+            if (UnlinkHostCompanyRow.Visibility == System.Windows.Visibility.Visible &&
+                UnlinkHostCompanyBox.SelectedItem is System.Windows.Controls.ComboBoxItem pickedItem)
+            {
+                companyId = pickedItem.Tag?.ToString();
+                log.AppendLine($"ℹ  Company_ID from Host Company selector = {companyId}");
+            }
+
+            // Step 1: Company_ID from Core DB
+            if (companyId == null)
+            {
+                try
+                {
+                    var coreCs = BuildConnStr(
+                        CoreServerBox.Text.Trim(), CoreUserBox.Text.Trim(),
+                        CorePasswordBox.Password, dbName);
+                    await using var coreConn = new Microsoft.Data.SqlClient.SqlConnection(coreCs);
+                    await coreConn.OpenAsync();
+                    var pkCol = await new Microsoft.Data.SqlClient.SqlCommand(
+                        "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Company' AND COLUMN_NAME='Company_ID' AND TABLE_SCHEMA='dbo'",
+                        coreConn).ExecuteScalarAsync() != null ? "Company_ID" : "ID";
+                    var val = await new Microsoft.Data.SqlClient.SqlCommand(
+                        $"SELECT TOP 1 [{pkCol}] FROM [dbo].[Company]", coreConn).ExecuteScalarAsync();
+                    if (val is Guid g) { companyId = g.ToString(); log.AppendLine($"ℹ  Company_ID from Core DB = {companyId}"); }
+                }
+                catch (Exception ex) { log.AppendLine($"ℹ  Core DB lookup: {ex.Message}"); }
+            }
+
+            // Step 2: Host DB Company WHERE DatabaseID = @db
+            if (companyId == null)
+            {
+                try
+                {
+                    await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(
+                        "SELECT TOP 1 ID FROM [dbo].[Company] WHERE DatabaseID = @db", _hostConn);
+                    cmd.Parameters.AddWithValue("@db", dbName);
+                    var v = await cmd.ExecuteScalarAsync();
+                    if (v != null && v != DBNull.Value) { companyId = v.ToString(); log.AppendLine($"ℹ  Company_ID from Host DB = {companyId}"); }
+                }
+                catch { }
+            }
+
+            if (companyId == null)
+            {
+                SetActionBadge(UnlinkResultBadge, UnlinkResultText, false,
+                    "✗  Could not resolve Company_ID for this database. Is it linked?");
+                return;
+            }
+
+            // Cascade delete — same as DeleteDatabase but no DROP
+            var hostCs = BuildConnStr(HostServerBox.Text.Trim(), HostUserBox.Text.Trim(),
+                                      HostPasswordBox.Password, _hostConn.Database);
+            var cascadeLog = await CascadeDeleteCompanyAsync(hostCs, Guid.Parse(companyId));
+            log.AppendLine($"Host DB cleanup for [{dbName}] (Company_ID={companyId}):");
+            log.Append(cascadeLog);
+            log.AppendLine($"SQL database [{dbName}] was NOT dropped.");
+
+            // Determine success: Company row must be gone
+            bool unlinkOk = cascadeLog.Contains("✓ Company:");
+            SetActionBadge(UnlinkResultBadge, UnlinkResultText, unlinkOk, log.ToString().TrimEnd());
+        }
+        catch (Exception ex)
+        {
+            SetActionBadge(UnlinkResultBadge, UnlinkResultText, false,
+                $"✗  {ex.Message}\n{log}".TrimEnd());
+        }
+    }
+
+    // ── Shared cascade-delete helper ─────────────────────────────────────────
+    /// <summary>
+    /// Deletes all Host DB rows linked to <paramref name="companyId"/>.
+    /// Each table is deleted via its own SqlCommand so one FK failure never
+    /// silently blocks the rest.  Returns a multi-line log of every table
+    /// touched and how many rows were removed.
+    /// </summary>
+    private static async Task<string> CascadeDeleteCompanyAsync(
+        string hostConnStr,
+        Guid companyId)
+    {
+        var log = new System.Text.StringBuilder();
+
+        // ── Single-batch SQL cascade: every DELETE guarded by IF OBJECT_ID so it
+        //    never fails on a missing table.  One connection, one round-trip, no
+        //    probe-connection race conditions.  Returns row-count SELECT results
+        //    so callers can log exactly which tables were touched.
+        // Every DELETE that touches an optional column is wrapped in sp_executesql so the
+        // statement is only compiled after we've confirmed the column exists at runtime.
+        // Static DELETEs (Company.ID, AccountCompany.Company_ID) use known-stable columns.
+        const string cascadeSql = """
+            DECLARE @cid  UNIQUEIDENTIFIER = @companyId;
+            DECLARE @r    INT = 0;
+            DECLARE @sql  NVARCHAR(MAX);
+
+            -- ── helper: find Company_ID-style column name for a given table ──────────
+            -- Returns the first matching column from a standard set, or NULL.
+            -- Used for tables where the FK column name may vary (Company_ID / CompanyID).
+
+            -- 1a. SubscriptionMetaData → CompanySubscription (Entity_ID, EntityType=0)
+            IF OBJECT_ID('dbo.SubscriptionMetaData','U') IS NOT NULL
+            AND OBJECT_ID('dbo.CompanySubscription','U')  IS NOT NULL
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='CompanySubscription'    AND COLUMN_NAME='Company_ID')
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='SubscriptionMetaData'   AND COLUMN_NAME='Entity_ID')
+            BEGIN
+                SET @sql = N'DELETE smd FROM [dbo].[SubscriptionMetaData] smd WHERE smd.EntityType=0 AND smd.Entity_ID IN (SELECT ID FROM [dbo].[CompanySubscription] WHERE Company_ID=@c)';
+                EXEC sp_executesql @sql, N'@c UNIQUEIDENTIFIER', @c=@cid;
+                SET @r = @@ROWCOUNT; IF @r > 0 SELECT 'SubscriptionMetaData(CS)' lbl, @r rows;
+            END
+
+            -- 1b. SubscriptionMetaData → SubscriptionDetail (EntityType=1)
+            IF OBJECT_ID('dbo.SubscriptionMetaData','U') IS NOT NULL
+            AND OBJECT_ID('dbo.SubscriptionDetail','U')   IS NOT NULL
+            AND OBJECT_ID('dbo.CompanySubscription','U')  IS NOT NULL
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='SubscriptionDetail'     AND COLUMN_NAME='CompanySubscription_ID')
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='CompanySubscription'    AND COLUMN_NAME='Company_ID')
+            BEGIN
+                SET @sql = N'DELETE smd FROM [dbo].[SubscriptionMetaData] smd WHERE smd.EntityType=1 AND smd.Entity_ID IN (SELECT sd.ID FROM [dbo].[SubscriptionDetail] sd INNER JOIN [dbo].[CompanySubscription] cs ON cs.ID=sd.CompanySubscription_ID WHERE cs.Company_ID=@c)';
+                EXEC sp_executesql @sql, N'@c UNIQUEIDENTIFIER', @c=@cid;
+                SET @r = @@ROWCOUNT; IF @r > 0 SELECT 'SubscriptionMetaData(SD)' lbl, @r rows;
+            END
+
+            -- 2. AccountCompanySubscription (bridge: AccountCompany → CompanySubscription)
+            IF OBJECT_ID('dbo.AccountCompanySubscription','U') IS NOT NULL
+            AND OBJECT_ID('dbo.AccountCompany','U') IS NOT NULL
+            AND OBJECT_ID('dbo.CompanySubscription','U') IS NOT NULL
+            BEGIN
+                SET @sql = N'DELETE acs FROM [dbo].[AccountCompanySubscription] acs
+                    WHERE acs.Subscription_ID IN (SELECT ID FROM [dbo].[CompanySubscription] WHERE Company_ID=@c)
+                       OR acs.AccountCompany_ID IN (SELECT ID FROM [dbo].[AccountCompany] WHERE Company_ID=@c)';
+                EXEC sp_executesql @sql, N'@c UNIQUEIDENTIFIER', @c=@cid;
+                SET @r = @@ROWCOUNT; IF @r > 0 SELECT 'AccountCompanySubscription' lbl, @r rows;
+            END
+
+            -- 3. SubscriptionDetail
+            IF OBJECT_ID('dbo.SubscriptionDetail','U') IS NOT NULL
+            AND OBJECT_ID('dbo.CompanySubscription','U') IS NOT NULL
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='SubscriptionDetail'  AND COLUMN_NAME='CompanySubscription_ID')
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='CompanySubscription' AND COLUMN_NAME='Company_ID')
+            BEGIN
+                SET @sql = N'DELETE sd FROM [dbo].[SubscriptionDetail] sd WHERE sd.CompanySubscription_ID IN (SELECT ID FROM [dbo].[CompanySubscription] WHERE Company_ID=@c)';
+                EXEC sp_executesql @sql, N'@c UNIQUEIDENTIFIER', @c=@cid;
+                SET @r = @@ROWCOUNT; IF @r > 0 SELECT 'SubscriptionDetail' lbl, @r rows;
+            END
+
+            -- 4a. StorageSubscription (via CompanySubscription_ID)
+            IF OBJECT_ID('dbo.StorageSubscription','U') IS NOT NULL
+            AND OBJECT_ID('dbo.CompanySubscription','U') IS NOT NULL
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='StorageSubscription' AND COLUMN_NAME='CompanySubscription_ID')
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='CompanySubscription' AND COLUMN_NAME='Company_ID')
+            BEGIN
+                SET @sql = N'DELETE ss FROM [dbo].[StorageSubscription] ss WHERE ss.CompanySubscription_ID IN (SELECT ID FROM [dbo].[CompanySubscription] WHERE Company_ID=@c)';
+                EXEC sp_executesql @sql, N'@c UNIQUEIDENTIFIER', @c=@cid;
+                SET @r = @@ROWCOUNT; IF @r > 0 SELECT 'StorageSubscription(CS)' lbl, @r rows;
+            END
+
+            -- 4b. StorageSubscription (via Company_ID direct)
+            IF OBJECT_ID('dbo.StorageSubscription','U') IS NOT NULL
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='StorageSubscription' AND COLUMN_NAME='Company_ID')
+            BEGIN
+                SET @sql = N'DELETE FROM [dbo].[StorageSubscription] WHERE [Company_ID]=@c';
+                EXEC sp_executesql @sql, N'@c UNIQUEIDENTIFIER', @c=@cid;
+                SET @r = @@ROWCOUNT; IF @r > 0 SELECT 'StorageSubscription(Co)' lbl, @r rows;
+            END
+
+            -- 5a. CompanyAgreement (via CompanySubscription_ID)
+            IF OBJECT_ID('dbo.CompanyAgreement','U') IS NOT NULL
+            AND OBJECT_ID('dbo.CompanySubscription','U') IS NOT NULL
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='CompanyAgreement'    AND COLUMN_NAME='CompanySubscription_ID')
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='CompanySubscription' AND COLUMN_NAME='Company_ID')
+            BEGIN
+                SET @sql = N'DELETE ca FROM [dbo].[CompanyAgreement] ca WHERE ca.CompanySubscription_ID IN (SELECT ID FROM [dbo].[CompanySubscription] WHERE Company_ID=@c)';
+                EXEC sp_executesql @sql, N'@c UNIQUEIDENTIFIER', @c=@cid;
+                SET @r = @@ROWCOUNT; IF @r > 0 SELECT 'CompanyAgreement(CS)' lbl, @r rows;
+            END
+
+            -- 5b. CompanyAgreement (via Company_ID direct)
+            IF OBJECT_ID('dbo.CompanyAgreement','U') IS NOT NULL
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='CompanyAgreement' AND COLUMN_NAME='Company_ID')
+            BEGIN
+                SET @sql = N'DELETE FROM [dbo].[CompanyAgreement] WHERE [Company_ID]=@c';
+                EXEC sp_executesql @sql, N'@c UNIQUEIDENTIFIER', @c=@cid;
+                SET @r = @@ROWCOUNT; IF @r > 0 SELECT 'CompanyAgreement(Co)' lbl, @r rows;
+            END
+
+            -- 5a. AccountCompanySubscription (via Subscription_ID → CompanySubscription)
+            IF OBJECT_ID('dbo.AccountCompanySubscription','U') IS NOT NULL
+            AND OBJECT_ID('dbo.CompanySubscription','U')        IS NOT NULL
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='AccountCompanySubscription' AND COLUMN_NAME='Subscription_ID')
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='CompanySubscription'         AND COLUMN_NAME='Company_ID')
+            BEGIN
+                SET @sql = N'DELETE acs FROM [dbo].[AccountCompanySubscription] acs WHERE acs.Subscription_ID IN (SELECT ID FROM [dbo].[CompanySubscription] WHERE Company_ID=@c)';
+                EXEC sp_executesql @sql, N'@c UNIQUEIDENTIFIER', @c=@cid;
+                SET @r = @@ROWCOUNT; IF @r > 0 SELECT 'AccountCompanySubscription(SubID)' lbl, @r rows;
+            END
+
+            -- 5b. AccountCompanySubscription (via AccountCompany_ID)
+            IF OBJECT_ID('dbo.AccountCompanySubscription','U') IS NOT NULL
+            AND OBJECT_ID('dbo.AccountCompany','U')             IS NOT NULL
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='AccountCompanySubscription' AND COLUMN_NAME='AccountCompany_ID')
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='AccountCompany'             AND COLUMN_NAME='Company_ID')
+            BEGIN
+                SET @sql = N'DELETE acs FROM [dbo].[AccountCompanySubscription] acs WHERE acs.AccountCompany_ID IN (SELECT ID FROM [dbo].[AccountCompany] WHERE Company_ID=@c)';
+                EXEC sp_executesql @sql, N'@c UNIQUEIDENTIFIER', @c=@cid;
+                SET @r = @@ROWCOUNT; IF @r > 0 SELECT 'AccountCompanySubscription(AcID)' lbl, @r rows;
+            END
+
+            -- 6. CompanySubscription
+            IF OBJECT_ID('dbo.CompanySubscription','U') IS NOT NULL
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='CompanySubscription' AND COLUMN_NAME='Company_ID')
+            BEGIN
+                SET @sql = N'DELETE FROM [dbo].[CompanySubscription] WHERE [Company_ID]=@c';
+                EXEC sp_executesql @sql, N'@c UNIQUEIDENTIFIER', @c=@cid;
+                SET @r = @@ROWCOUNT; IF @r > 0 SELECT 'CompanySubscription' lbl, @r rows;
+            END
+
+            -- 7. AccountCompany
+            IF OBJECT_ID('dbo.AccountCompany','U') IS NOT NULL
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='AccountCompany' AND COLUMN_NAME='Company_ID')
+            BEGIN
+                SET @sql = N'DELETE FROM [dbo].[AccountCompany] WHERE [Company_ID]=@c';
+                EXEC sp_executesql @sql, N'@c UNIQUEIDENTIFIER', @c=@cid;
+                SET @r = @@ROWCOUNT; IF @r > 0 SELECT 'AccountCompany' lbl, @r rows;
+            END
+
+            -- 8. CompanyNotification
+            IF OBJECT_ID('dbo.CompanyNotification','U') IS NOT NULL
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='CompanyNotification' AND COLUMN_NAME='Company_ID')
+            BEGIN
+                SET @sql = N'DELETE FROM [dbo].[CompanyNotification] WHERE [Company_ID]=@c';
+                EXEC sp_executesql @sql, N'@c UNIQUEIDENTIFIER', @c=@cid;
+                SET @r = @@ROWCOUNT; IF @r > 0 SELECT 'CompanyNotification' lbl, @r rows;
+            END
+
+            -- 9. CompanyTwoFactorSetting
+            IF OBJECT_ID('dbo.CompanyTwoFactorSetting','U') IS NOT NULL
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='CompanyTwoFactorSetting' AND COLUMN_NAME='Company_ID')
+            BEGIN
+                SET @sql = N'DELETE FROM [dbo].[CompanyTwoFactorSetting] WHERE [Company_ID]=@c';
+                EXEC sp_executesql @sql, N'@c UNIQUEIDENTIFIER', @c=@cid;
+                SET @r = @@ROWCOUNT; IF @r > 0 SELECT 'CompanyTwoFactorSetting' lbl, @r rows;
+            END
+
+            -- 10. Notification
+            IF OBJECT_ID('dbo.Notification','U') IS NOT NULL
+            AND EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='Notification' AND COLUMN_NAME='Company_ID')
+            BEGIN
+                SET @sql = N'DELETE FROM [dbo].[Notification] WHERE [Company_ID]=@c';
+                EXEC sp_executesql @sql, N'@c UNIQUEIDENTIFIER', @c=@cid;
+                SET @r = @@ROWCOUNT; IF @r > 0 SELECT 'Notification' lbl, @r rows;
+            END
+
+            -- 11. Company (root — always last; always emits result so caller detects success)
+            IF OBJECT_ID('dbo.Company','U') IS NOT NULL
+            BEGIN
+                SET @sql = N'DELETE FROM [dbo].[Company] WHERE [ID]=@c';
+                EXEC sp_executesql @sql, N'@c UNIQUEIDENTIFIER', @c=@cid;
+                SET @r = @@ROWCOUNT;
+                SELECT 'Company' lbl, @r rows;
+            END
+            """;
+
+        await using var hostConn = new Microsoft.Data.SqlClient.SqlConnection(hostConnStr);
+        await hostConn.OpenAsync();
+
+        await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(cascadeSql, hostConn);
+        cmd.CommandTimeout = 60;
+        cmd.Parameters.Add("@companyId", System.Data.SqlDbType.UniqueIdentifier).Value = companyId;
+
+        try
+        {
+            await using var reader = await cmd.ExecuteReaderAsync();
+            bool companyDeleted = false;
+            do
+            {
+                while (await reader.ReadAsync())
+                {
+                    string lbl  = reader.GetString(0);
+                    int    rows = reader.GetInt32(1);
+                    if (lbl == "Company")
+                    {
+                        companyDeleted = true;
+                        log.AppendLine(rows > 0
+                            ? $"  ✓ Company: {rows} row deleted."
+                            : $"  ⚠ Company: row not found (ID={companyId}).");
+                    }
+                    else if (rows > 0)
+                    {
+                        log.AppendLine($"  ✓ {lbl}: {rows} row(s) deleted.");
+                    }
+                }
+            } while (await reader.NextResultAsync());
+
+            if (!companyDeleted)
+                log.AppendLine($"  ⚠ Company block did not execute — table may not exist.");
+        }
+        catch (Exception ex)
+        {
+            log.AppendLine($"  ✗ Cascade delete failed: {ex.Message}");
+        }
+
+        return log.ToString();
+    }
+
+    private static async Task<string> CascadeDeleteCompanyAsync_UNUSED(
+        string hostConnStr,
+        Guid companyId)
+    {
+        // Replaced by single-batch SQL implementation above.
+        // Retained to avoid losing helper methods (TblExists / ColExists) referenced elsewhere if needed.
+        var log = new System.Text.StringBuilder();
+        var cid = companyId;
+
+        // Always use a fresh, dedicated connection so shared connection state
+        // (open readers, error flags, implicit transactions) never blocks deletes.
+        await using var hostConn = new Microsoft.Data.SqlClient.SqlConnection(hostConnStr);
+        await hostConn.OpenAsync();
+
+        // Helper: run one DELETE and append the result to log.
+        // tableGuard  — T-SQL expression that evaluates to 1 if the table exists, else 0
+        //               pass null to skip the guard (table is already confirmed to exist)
+        // deleteSql   — parameterised DELETE; @p = UNIQUEIDENTIFIER bound to cid
+        async Task Del(string label, string deleteSql, bool wrapTryCatch = false)
+        {
+            try
+            {
+                await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(deleteSql, hostConn);
+                cmd.CommandTimeout = 30;
+                cmd.Parameters.Add("@p", System.Data.SqlDbType.UniqueIdentifier).Value = cid;
+                int rows = await cmd.ExecuteNonQueryAsync();
+                if (rows > 0) log.AppendLine($"  ✓ {label}: {rows} row(s) deleted.");
+            }
+            catch (Exception ex)
+            {
+                if (!wrapTryCatch)
+                    log.AppendLine($"  ⚠ {label}: {ex.Message}");
+                // wrapTryCatch = true → silently skip (table doesn't exist / no matching rows)
+            }
+        }
+
+        // Helper: check if table+column exists.
+        // Uses a SHORT-LIVED separate connection so it never conflicts with an open reader
+        // on hostConn (MARS is not enabled on the connection string).
+        async Task<bool> ColExists(string table, string column)
+        {
+            try
+            {
+                await using var probe = new Microsoft.Data.SqlClient.SqlConnection(hostConnStr);
+                await probe.OpenAsync();
+                await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(
+                    "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS " +
+                    "WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME=@t AND COLUMN_NAME=@c",
+                    probe);
+                cmd.Parameters.AddWithValue("@t", table);
+                cmd.Parameters.AddWithValue("@c", column);
+                return await cmd.ExecuteScalarAsync() != null;
+            }
+            catch { return false; }
+        }
+
+        async Task<bool> TblExists(string table)
+        {
+            try
+            {
+                await using var probe = new Microsoft.Data.SqlClient.SqlConnection(hostConnStr);
+                await probe.OpenAsync();
+                await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(
+                    "SELECT 1 FROM INFORMATION_SCHEMA.TABLES " +
+                    "WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME=@t AND TABLE_TYPE='BASE TABLE'",
+                    probe);
+                cmd.Parameters.AddWithValue("@t", table);
+                return await cmd.ExecuteScalarAsync() != null;
+            }
+            catch { return false; }
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // Delete in FK-safe order: deepest children first, Company last.
+        //
+        //  1. SubscriptionMetaData        (Entity_ID → CompanySubscription.ID  OR  SubscriptionDetail.ID)
+        //  2. SubscriptionDetail          (FK → CompanySubscription.ID)
+        //  3. StorageSubscription         (FK → CompanySubscription_ID  OR  Company_ID)
+        //  4. CompanyAgreement            (FK → CompanySubscription_ID  OR  Company_ID)
+        //  5. AccountCompanySubscription  (FK → CompanySubscription.ID via Subscription_ID  AND  AccountCompany.ID)
+        //  6. CompanySubscription         (FK → Company.ID)   ← MUST come after 1–5
+        //  7. AccountCompany              (FK → Company.ID)
+        //  8. CompanyNotification         (FK → Company.ID)
+        //  9. CompanyTwoFactorSetting     (FK → Company.ID)
+        // 10. Notification                (FK → Company.ID)
+        // 11. Company                     (root)
+        // ══════════════════════════════════════════════════════════════════════
+
+        // 1. SubscriptionMetaData — logical child of CompanySubscription (Entity_ID, EntityType=0)
+        //    and of SubscriptionDetail (Entity_ID, EntityType=1).  No DB-level FK column name to
+        //    check — delete via sub-select from CompanySubscription.
+        if (await TblExists("SubscriptionMetaData") && await TblExists("CompanySubscription"))
+        {
+            // EntityType=0 → CompanySubscription reference
+            await Del("SubscriptionMetaData (EntityType=0, via CompanySubscription)",
+                "DELETE smd FROM [dbo].[SubscriptionMetaData] smd " +
+                "WHERE smd.EntityType = 0 AND smd.Entity_ID IN " +
+                "  (SELECT ID FROM [dbo].[CompanySubscription] WHERE Company_ID = @p)");
+
+            // EntityType=1 → SubscriptionDetail reference
+            if (await TblExists("SubscriptionDetail"))
+                await Del("SubscriptionMetaData (EntityType=1, via SubscriptionDetail)",
+                    "DELETE smd FROM [dbo].[SubscriptionMetaData] smd " +
+                    "WHERE smd.EntityType = 1 AND smd.Entity_ID IN " +
+                    "  (SELECT sd.ID FROM [dbo].[SubscriptionDetail] sd " +
+                    "   INNER JOIN [dbo].[CompanySubscription] cs ON cs.ID = sd.CompanySubscription_ID " +
+                    "   WHERE cs.Company_ID = @p)");
+        }
+
+        // 2. SubscriptionDetail — child of CompanySubscription
+        if (await TblExists("SubscriptionDetail") && await TblExists("CompanySubscription"))
+            await Del("SubscriptionDetail",
+                "DELETE sd FROM [dbo].[SubscriptionDetail] sd " +
+                "WHERE sd.CompanySubscription_ID IN " +
+                "  (SELECT ID FROM [dbo].[CompanySubscription] WHERE Company_ID = @p)");
+
+        // 3. StorageSubscription — may reference CompanySubscription_ID or Company_ID
+        if (await TblExists("StorageSubscription"))
+        {
+            if (await ColExists("StorageSubscription", "CompanySubscription_ID") && await TblExists("CompanySubscription"))
+                await Del("StorageSubscription (via CompanySubscription_ID)",
+                    "DELETE ss FROM [dbo].[StorageSubscription] ss " +
+                    "WHERE ss.CompanySubscription_ID IN " +
+                    "  (SELECT ID FROM [dbo].[CompanySubscription] WHERE Company_ID = @p)");
+
+            // Also try direct Company_ID column (some schema versions have both)
+            string? ssCo = null;
+            foreach (var c in new[] { "Company_ID", "CompanyID", "CompanyId" })
+                if (await ColExists("StorageSubscription", c)) { ssCo = c; break; }
+            if (ssCo != null)
+                await Del("StorageSubscription (via Company_ID)",
+                    $"DELETE FROM [dbo].[StorageSubscription] WHERE [{ssCo}] = @p");
+        }
+
+        // 4. CompanyAgreement — may reference CompanySubscription_ID or Company_ID
+        if (await TblExists("CompanyAgreement"))
+        {
+            if (await ColExists("CompanyAgreement", "CompanySubscription_ID") && await TblExists("CompanySubscription"))
+                await Del("CompanyAgreement (via CompanySubscription_ID)",
+                    "DELETE ca FROM [dbo].[CompanyAgreement] ca " +
+                    "WHERE ca.CompanySubscription_ID IN " +
+                    "  (SELECT ID FROM [dbo].[CompanySubscription] WHERE Company_ID = @p)");
+
+            string? agCo = null;
+            foreach (var c in new[] { "Company_ID", "CompanyID", "CompanyId" })
+                if (await ColExists("CompanyAgreement", c)) { agCo = c; break; }
+            if (agCo != null)
+                await Del("CompanyAgreement (via Company_ID)",
+                    $"DELETE FROM [dbo].[CompanyAgreement] WHERE [{agCo}] = @p");
+        }
+
+        // 5. AccountCompanySubscription — has TWO FK paths to clear:
+        //    a) Subscription_ID → CompanySubscription.ID  (blocks CompanySubscription delete)
+        //    b) AccountCompany_ID → AccountCompany.ID     (blocks AccountCompany delete)
+        //    Delete ALL rows for this company via both paths before touching either parent table.
+        if (await TblExists("AccountCompanySubscription"))
+        {
+            // Path a: via Subscription_ID → CompanySubscription (must clear before step 6)
+            if (await ColExists("AccountCompanySubscription", "Subscription_ID") && await TblExists("CompanySubscription"))
+                await Del("AccountCompanySubscription (via Subscription_ID → CompanySubscription)",
+                    "DELETE acs FROM [dbo].[AccountCompanySubscription] acs " +
+                    "WHERE acs.Subscription_ID IN " +
+                    "  (SELECT ID FROM [dbo].[CompanySubscription] WHERE Company_ID = @p)");
+
+            // Path b: via AccountCompany_ID → AccountCompany (catches any rows missed by path a)
+            if (await TblExists("AccountCompany"))
+            {
+                string? acsCo = null;
+                foreach (var c in new[] { "AccountCompany_ID", "AccountCompanyID" })
+                    if (await ColExists("AccountCompanySubscription", c)) { acsCo = c; break; }
+                if (acsCo != null)
+                    await Del("AccountCompanySubscription (via AccountCompany_ID)",
+                        $"DELETE acs FROM [dbo].[AccountCompanySubscription] acs " +
+                        $"WHERE acs.[{acsCo}] IN " +
+                        $"  (SELECT ID FROM [dbo].[AccountCompany] WHERE Company_ID = @p)");
+            }
+        }
+
+        // 6. CompanySubscription — now safe to delete (all children cleared in steps 1–5)
+        if (await TblExists("CompanySubscription"))
+        {
+            string? csCo = null;
+            foreach (var c in new[] { "Company_ID", "CompanyID", "CompanyId" })
+                if (await ColExists("CompanySubscription", c)) { csCo = c; break; }
+            if (csCo != null)
+                await Del("CompanySubscription",
+                    $"DELETE FROM [dbo].[CompanySubscription] WHERE [{csCo}] = @p");
+        }
+
+        // 7. AccountCompany
+        if (await TblExists("AccountCompany"))
+        {
+            string? acCo = null;
+            foreach (var c in new[] { "Company_ID", "CompanyID", "CompanyId" })
+                if (await ColExists("AccountCompany", c)) { acCo = c; break; }
+            if (acCo != null)
+                await Del("AccountCompany",
+                    $"DELETE FROM [dbo].[AccountCompany] WHERE [{acCo}] = @p");
+        }
+
+        // 8. CompanyNotification
+        if (await TblExists("CompanyNotification"))
+        {
+            string? cnCo = null;
+            foreach (var c in new[] { "Company_ID", "CompanyID", "CompanyId" })
+                if (await ColExists("CompanyNotification", c)) { cnCo = c; break; }
+            if (cnCo != null)
+                await Del("CompanyNotification",
+                    $"DELETE FROM [dbo].[CompanyNotification] WHERE [{cnCo}] = @p");
+        }
+
+        // 9. CompanyTwoFactorSetting
+        if (await TblExists("CompanyTwoFactorSetting"))
+        {
+            string? tfCo = null;
+            foreach (var c in new[] { "Company_ID", "CompanyID", "CompanyId" })
+                if (await ColExists("CompanyTwoFactorSetting", c)) { tfCo = c; break; }
+            if (tfCo != null)
+                await Del("CompanyTwoFactorSetting",
+                    $"DELETE FROM [dbo].[CompanyTwoFactorSetting] WHERE [{tfCo}] = @p");
+        }
+
+        // 10. Notification
+        if (await TblExists("Notification"))
+        {
+            string? ntCo = null;
+            foreach (var c in new[] { "Company_ID", "CompanyID", "CompanyId" })
+                if (await ColExists("Notification", c)) { ntCo = c; break; }
+            if (ntCo != null)
+                await Del("Notification",
+                    $"DELETE FROM [dbo].[Notification] WHERE [{ntCo}] = @p");
+        }
+
+        // 11. Company — root row
+        if (await TblExists("Company"))
+        {
+            try
+            {
+                await using var delComp = new Microsoft.Data.SqlClient.SqlCommand(
+                    "DELETE FROM [dbo].[Company] WHERE [ID] = @p", hostConn);
+                delComp.CommandTimeout = 30;
+                delComp.Parameters.Add("@p", System.Data.SqlDbType.UniqueIdentifier).Value = cid;
+                int rows = await delComp.ExecuteNonQueryAsync();
+                log.AppendLine(rows > 0
+                    ? $"  ✓ Company: {rows} row deleted."
+                    : $"  ⚠ Company: row not found (ID={cid}).");
+            }
+            catch (Exception ex)
+            {
+                log.AppendLine($"  ✗ Company (FINAL DELETE FAILED): {ex.Message}");
+            }
+        }
+
+        return log.ToString();
+    }
+    // ── End of _OLD method ────────────────────────────────────────────────────
+
+    // ── Section 6: Delete Database ────────────────────────────────────────────
+    private async void DeleteDatabase_Click(object sender, RoutedEventArgs e)
+    {
+        DelResultBadge.Visibility = System.Windows.Visibility.Collapsed;
+
+        var dbName = DelDatabaseBox.Text.Trim();
+        if (string.IsNullOrEmpty(dbName))
+        {
+            SetActionBadge(DelResultBadge, DelResultText, false, "✗  No database selected.");
+            return;
+        }
+
+        bool removeFromHost = DelHostRegistryChk.IsChecked == true;
+        bool dropDb         = DelDropDbChk.IsChecked == true;
+
+        // Require at least one option
+        if (!removeFromHost && !dropDb)
+        {
+            SetActionBadge(DelResultBadge, DelResultText, false,
+                "✗  Select at least one option (Remove from registry / Drop DB).");
+            return;
+        }
+
+        // Confirmation dialog
+        IosAlertDialog.IsDark = _isDarkMode;
+        string warningMsg = dropDb
+            ? $"This will DELETE all linked records AND permanently DROP the SQL database [{dbName}]. This cannot be undone."
+            : $"This will delete all linked records for [{dbName}] from the Host DB. The database itself will not be dropped.";
+
+        bool confirmed = IosAlertDialog.Show(
+            title:       "Delete Database",
+            message:     warningMsg,
+            actionLabel: "Delete",
+            destructive: true,
+            owner:       this);
+        if (!confirmed) return;
+
+        if (_hostConn?.State != System.Data.ConnectionState.Open && removeFromHost)
+        {
+            SetActionBadge(DelResultBadge, DelResultText, false,
+                "✗  Not connected to Host DB (Section 1).");
+            return;
+        }
+
+        var log = new System.Text.StringBuilder();
+
+        try
+        {
+            // ── Step 1: Remove from all Host DB linked tables ─────────────────
+            if (removeFromHost && _hostConn?.State == System.Data.ConnectionState.Open)
+            {
+                // ── 1a: Discover the registration table & its DB-name column ────
+                // The column may be named DatabaseName, DatabaseID, DBName, etc.
+                var dbCols   = new[] { "DatabaseName","DBName","CoreDBName","DataBase",
+                                       "DbIdentifier","DatabaseID","CoreDatabase" };
+                var dbColsList = string.Join(",", dbCols.Select(c => $"'{c}'"));
+
+                var allDbColsSql =
+                    "SELECT c.TABLE_NAME, c.COLUMN_NAME " +
+                    "FROM INFORMATION_SCHEMA.COLUMNS c " +
+                    "JOIN INFORMATION_SCHEMA.TABLES  t " +
+                    "  ON c.TABLE_NAME = t.TABLE_NAME AND c.TABLE_SCHEMA = t.TABLE_SCHEMA " +
+                    $"WHERE c.COLUMN_NAME IN ({dbColsList}) " +
+                    "  AND t.TABLE_TYPE = 'BASE TABLE' " +
+                    "ORDER BY CASE c.TABLE_NAME " +
+                    "  WHEN 'DatabaseInfo'    THEN 1 " +
+                    "  WHEN 'ServiceEntity'   THEN 2 " +
+                    "  WHEN 'Company'         THEN 3 " +
+                    "  WHEN 'CompanyDatabase' THEN 4 " +
+                    "  WHEN 'ClientDatabase'  THEN 5 " +
+                    "  WHEN 'HostDatabase'    THEN 6 " +
+                    "  WHEN 'CoreDatabase'    THEN 7 " +
+                    "  WHEN 'CompanyInfo'     THEN 8 " +
+                    "  ELSE 99 END, c.TABLE_NAME";
+
+                string? regTable   = null;
+                string? regDbCol   = null;
+
+                await using (var cmd = new Microsoft.Data.SqlClient.SqlCommand(allDbColsSql, _hostConn))
+                await using (var rdr = await cmd.ExecuteReaderAsync())
+                {
+                    while (await rdr.ReadAsync())
+                    {
+                        regTable ??= rdr.GetString(0);
+                        regDbCol ??= rdr.GetString(1);
+                        if (rdr.GetString(0) == regTable) { regDbCol = rdr.GetString(1); break; }
+                    }
+                }
+
+                int totalRows = 0;
+
+                if (regTable != null && regDbCol != null)
+                {
+                    // ── 1b: Look up the primary key of this Company/DatabaseInfo row ─
+                    // We need it to cascade-delete FK child tables (AccountCompany,
+                    // CompanyAgreement, CompanySubscription all reference Company.ID).
+                    //
+                    // Three-step resolution (backup DB name often differs from DatabaseID):
+                    //   1. Core DB Company_ID — every Core DB has a single Company row whose
+                    //      PK (Company_ID) equals Host DB Company.ID. Most reliable.
+                    //   2. Host DB Company WHERE DatabaseID = @db (works when already linked)
+                    //   3. Host DB registration table PK WHERE db-name col = @db
+
+                    string? companyId = null;
+
+                    // Step 0: Use Host Company picker if the user explicitly selected one
+                    if (DelHostCompanyRow.Visibility == System.Windows.Visibility.Visible &&
+                        DelHostCompanyBox.SelectedItem is System.Windows.Controls.ComboBoxItem delPickedItem)
+                    {
+                        companyId = delPickedItem.Tag?.ToString();
+                        log.AppendLine($"ℹ  Company_ID from Host Company selector = {companyId}");
+                    }
+
+                    // Step 1: read Company_ID from target DB — try Core server then Host server
+                    var step1Candidates = new List<string>();
+                    var s1Core = CoreServerBox.Text.Trim();
+                    var s1Host = HostServerBox.Text.Trim();
+                    if (!string.IsNullOrEmpty(s1Core))
+                        step1Candidates.Add(BuildConnStr(s1Core, CoreUserBox.Text.Trim(), CorePasswordBox.Password, dbName));
+                    if (!string.IsNullOrEmpty(s1Host) && s1Host != s1Core)
+                        step1Candidates.Add(BuildConnStr(s1Host, HostUserBox.Text.Trim(), HostPasswordBox.Password, dbName));
+
+                    foreach (var s1Cs in step1Candidates)
+                    {
+                        if (companyId != null) break;
+                        try
+                        {
+                            await using var coreConn = new Microsoft.Data.SqlClient.SqlConnection(s1Cs);
+                            await coreConn.OpenAsync();
+
+                            // Try Setting table first (most reliable)
+                            await using var settingCmd = new Microsoft.Data.SqlClient.SqlCommand("""
+                                SELECT TOP 1 CAST([Value] AS NVARCHAR(64))
+                                FROM [dbo].[Setting]
+                                WHERE [Key] IN ('CompanyId','CompanyID','Company_ID','companyId','companyID')
+                                  AND [Value] IS NOT NULL AND LEN([Value]) > 0
+                                ORDER BY CASE [Key] WHEN 'CompanyId' THEN 1 WHEN 'CompanyID' THEN 2 ELSE 3 END
+                                """, coreConn);
+                            var settingVal = await settingCmd.ExecuteScalarAsync();
+                            if (settingVal != null && settingVal != DBNull.Value)
+                            {
+                                companyId = settingVal.ToString()?.Trim();
+                                log.AppendLine($"ℹ  Company_ID resolved from Setting table: {companyId}");
+                                break;
+                            }
+
+                            // Fallback: Company table in Core DB
+                            var pkColName = "Company_ID";
+                            var hasPkCol = await new Microsoft.Data.SqlClient.SqlCommand(
+                                "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS " +
+                                "WHERE TABLE_NAME='Company' AND COLUMN_NAME='Company_ID' AND TABLE_SCHEMA='dbo'",
+                                coreConn).ExecuteScalarAsync() != null;
+                            if (!hasPkCol) pkColName = "ID";
+
+                            await using var coreIdCmd = new Microsoft.Data.SqlClient.SqlCommand(
+                                $"SELECT TOP 1 [{pkColName}] FROM [dbo].[Company]", coreConn);
+                            var coreIdVal = await coreIdCmd.ExecuteScalarAsync();
+                            if (coreIdVal is Guid cg)
+                            {
+                                companyId = cg.ToString();
+                                log.AppendLine($"ℹ  Company_ID resolved from Core DB Company table: {companyId}");
+                            }
+                        }
+                        catch (Exception ex) { log.AppendLine($"ℹ  Core DB lookup attempt: {ex.Message}"); }
+                    }
+
+                    // Step 2: Host DB Company WHERE DatabaseID = @db (exact, then LIKE prefix)
+                    if (companyId == null)
+                    {
+                        try
+                        {
+                            // Exact match first
+                            await using var hcCmd = new Microsoft.Data.SqlClient.SqlCommand(
+                                "SELECT TOP 1 ID FROM [dbo].[Company] WHERE DatabaseID = @db", _hostConn);
+                            hcCmd.Parameters.AddWithValue("@db", dbName);
+                            var hcVal = await hcCmd.ExecuteScalarAsync();
+                            if (hcVal != null && hcVal != DBNull.Value)
+                            {
+                                companyId = hcVal.ToString();
+                            }
+                            else
+                            {
+                                // Sanitized DBs have suffix appended — match on base name prefix
+                                // e.g. "Acme_20210101_Sanitized_20260507" → search "Acme_20210101%"
+                                // Strip known sanitized/backup suffixes to get the base name
+                                var baseName = System.Text.RegularExpressions.Regex.Replace(
+                                    dbName, @"[-_](Sanitized|Backup|Copy|Restore|sanitized|backup|copy|restore).*$", "");
+                                if (baseName != dbName)
+                                {
+                                    await using var hcCmd2 = new Microsoft.Data.SqlClient.SqlCommand(
+                                        "SELECT TOP 1 ID FROM [dbo].[Company] WHERE DatabaseID LIKE @pat", _hostConn);
+                                    hcCmd2.Parameters.AddWithValue("@pat", baseName + "%");
+                                    var hcVal2 = await hcCmd2.ExecuteScalarAsync();
+                                    if (hcVal2 != null && hcVal2 != DBNull.Value)
+                                    {
+                                        companyId = hcVal2.ToString();
+                                        log.AppendLine($"ℹ  Company_ID resolved from Host DB via base-name match ({baseName}%): {companyId}");
+                                    }
+                                }
+                            }
+                        }
+                        catch { /* no Company table or no ID col */ }
+                    }
+
+                    // Step 3: registration table PK WHERE db-name col = @db
+                    if (companyId == null)
+                    {
+                        var pkSql = $"SELECT TOP 1 ID FROM [{regTable}] WHERE [{regDbCol}] = @db";
+                        await using (var pkCmd = new Microsoft.Data.SqlClient.SqlCommand(pkSql, _hostConn))
+                        {
+                            pkCmd.Parameters.AddWithValue("@db", dbName);
+                            try { var pkVal = await pkCmd.ExecuteScalarAsync(); companyId = pkVal?.ToString(); }
+                            catch { /* ID column may not exist */ }
+                        }
+                    }
+
+                    // ── 1c: Cascade-delete all linked tables in FK order ────────
+                    // Full hierarchy (Host DB schema):
+                    //
+                    //  Company
+                    //  ├── AccountCompany          (Company_ID)
+                    //  │   └── AccountCompanySubscription (AccountCompany_ID)
+                    //  ├── CompanySubscription      (Company_ID)
+                    //  │   ├── SubscriptionDetail   (CompanySubscription_ID)
+                    //  │   └── SubscriptionMetaData (Entity_ID, EntityType=0)
+                    //  ├── StorageSubscription      (Company_ID)
+                    //  ├── CompanyAgreement         (Company_ID)
+                    //  ├── CompanyNotification      (Company_ID)
+                    //  ├── CompanyTwoFactorSetting  (Company_ID)
+                    //  ├── Notification             (Company_ID)
+                    //  ├── GatewayIntegrationLink   (Entity_ID via Subscription)
+                    //  └── Company row itself
+                    //
+                    // All tables wrapped in OBJECT_ID guards — safe across schema versions.
+
+                    if (companyId != null)
+                    {
+                        var hostCs2 = BuildConnStr(HostServerBox.Text.Trim(), HostUserBox.Text.Trim(),
+                                                   HostPasswordBox.Password, _hostConn.Database);
+                        var cascadeLog2 = await CascadeDeleteCompanyAsync(hostCs2, Guid.Parse(companyId));
+                        log.AppendLine($"✓  Host DB cleanup (Company_ID={companyId}):");
+                        log.Append(cascadeLog2);
+                        totalRows++;
+                    }
+                    else
+                    {
+                        // companyId unknown — fall back to deleting only the registration row by DatabaseID
+                        var regDelSql = $"DELETE FROM [dbo].[{regTable}] WHERE [{regDbCol}] = @db";
+                        await using var regDelCmd =
+                            new Microsoft.Data.SqlClient.SqlCommand(regDelSql, _hostConn);
+                        regDelCmd.Parameters.AddWithValue("@db", dbName);
+                        int regRows = await regDelCmd.ExecuteNonQueryAsync();
+                        if (regRows > 0)
+                        {
+                            totalRows += regRows;
+                            log.AppendLine($"✓  Deleted {regRows} row(s) from [{regTable}] (by DatabaseID — Company_ID unknown).");
+                        }
+                        else
+                            log.AppendLine($"ℹ  No row matched [{regTable}] for this database.");
+                    }
+                }
+                else
+                {
+                    log.AppendLine("⚠  Could not find a registration table in Host DB — registry removal skipped.");
+                }
+
+                if (totalRows == 0)
+                    log.AppendLine("ℹ  No linked records found in Host DB.");
+            }
+
+            // ── Step 2: DROP the SQL database ────────────────────────────────
+            if (dropDb)
+            {
+                // Need a connection to master on the Core server
+                var cs = BuildConnStr(
+                    CoreServerBox.Text.Trim(),
+                    CoreUserBox.Text.Trim(),
+                    CorePasswordBox.Password,
+                    "master");
+                await using var masterConn = new Microsoft.Data.SqlClient.SqlConnection(cs);
+                await masterConn.OpenAsync();
+
+                // Kill active connections first
+                var killSql = $"""
+                    DECLARE @kill NVARCHAR(MAX) = '';
+                    SELECT @kill += 'KILL ' + CAST(spid AS NVARCHAR(5)) + '; '
+                      FROM sys.sysprocesses
+                     WHERE dbid = DB_ID(N'{dbName}');
+                    EXEC sp_executesql @kill;
+                    """;
+                await using (var killCmd = new Microsoft.Data.SqlClient.SqlCommand(killSql, masterConn))
+                    await killCmd.ExecuteNonQueryAsync();
+
+                var dropSql = $"DROP DATABASE [{dbName}]";
+                await using var dropCmd =
+                    new Microsoft.Data.SqlClient.SqlCommand(dropSql, masterConn);
+                await dropCmd.ExecuteNonQueryAsync();
+                log.AppendLine($"✓  Database [{dbName}] dropped.");
+
+                // Remove from dropdowns
+                var src = (DelDatabaseBox.ItemsSource as List<string>)?.ToList() ?? [];
+                src.Remove(dbName);
+                DelDatabaseBox.ItemsSource     = src;
+                CoreDatabaseBox.ItemsSource    = src;
+                SubCoreDatabaseBox.ItemsSource = src;
+                HostDatabaseBox.ItemsSource    = src;
+                DelDatabaseBox.Text            = src.FirstOrDefault() ?? "";
+            }
+
+            SetActionBadge(DelResultBadge, DelResultText, true,
+                log.Length > 0 ? log.ToString().TrimEnd() : "✓  Done.");
+        }
+        catch (Exception ex)
+        {
+            SetActionBadge(DelResultBadge, DelResultText, false,
+                $"✗  {ex.Message}\n{log}".TrimEnd());
+        }
+    }
+
+    // ── Section 6: DB Maintenance ────────────────────────────────────────────
+
+    private Microsoft.Data.SqlClient.SqlConnection? _execConn;
+
+    // ── Exec connection — server list ─────────────────────────────────────────
+    private async void RefreshExecServers_Click(object sender, RoutedEventArgs e)
+    {
+        var btn = sender as System.Windows.Controls.Button;
+        var prev = ExecServerBox.Text;
+        if (btn != null) btn.Content = "…";
+        try
+        {
+            var instances = await EnumerateSqlInstancesAsync();
+            ExecServerBox.ItemsSource = instances;
+            ExecServerBox.Text = prev;
+            SetDbBadge(ExecConnBadge, ExecConnText, true, $"✓  {instances.Count} instance(s)");
+        }
+        catch (Exception ex)
+        {
+            SetDbBadge(ExecConnBadge, ExecConnText, false, $"✗  {ex.Message}");
+        }
+        finally { if (btn != null) btn.Content = "⟳"; }
+    }
+
+    private void ExecServerBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        => _ = AutoLoadExecDatabases();
+
+    private void ExecServerBox_LostFocus(object sender, RoutedEventArgs e)
+        => _ = AutoLoadExecDatabases();
+
+    private async Task AutoLoadExecDatabases()
+    {
+        var server = ExecServerBox.Text.Trim();
+        var user   = ExecUserBox.Text.Trim();
+        var pass   = ExecPasswordBox.Password;
+        if (string.IsNullOrEmpty(server) || string.IsNullOrEmpty(user)) return;
+        try
+        {
+            var cs = BuildConnStr(server, user, pass, "master");
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(cs);
+            await conn.OpenAsync();
+            var dbs = new List<string>();
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(AllDbFilter, conn)
+                { CommandTimeout = 8 };
+            await using var rdr = await cmd.ExecuteReaderAsync();
+            while (await rdr.ReadAsync()) dbs.Add(rdr.GetString(0));
+            await Dispatcher.InvokeAsync(() =>
+            {
+                var cur = ExecDatabaseBox.Text;
+                ExecDatabaseBox.ItemsSource = dbs;
+                ExecDatabaseBox.Text = string.IsNullOrEmpty(cur) && dbs.Count > 0 ? dbs[0] : cur;
+            });
+        }
+        catch { /* silent — user may not have typed creds yet */ }
+    }
+
+    private async void LoadExecDatabases_Click(object sender, RoutedEventArgs e)
+    {
+        var server = ExecServerBox.Text.Trim();
+        var user   = ExecUserBox.Text.Trim();
+        var pass   = ExecPasswordBox.Password;
+        if (string.IsNullOrEmpty(server))
+        {
+            SetDbBadge(ExecConnBadge, ExecConnText, false, "✗  Enter server first.");
+            return;
+        }
+        try
+        {
+            var cs = BuildConnStr(server, user, pass, "master");
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(cs);
+            await conn.OpenAsync();
+            var dbs = new List<string>();
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(AllDbFilter, conn)
+                { CommandTimeout = 8 };
+            await using var rdr = await cmd.ExecuteReaderAsync();
+            while (await rdr.ReadAsync()) dbs.Add(rdr.GetString(0));
+            var cur = ExecDatabaseBox.Text;
+            ExecDatabaseBox.ItemsSource = dbs;
+            ExecDatabaseBox.Text = cur;
+            SetDbBadge(ExecConnBadge, ExecConnText, true, $"✓  {dbs.Count} databases");
+        }
+        catch (Exception ex)
+        {
+            SetDbBadge(ExecConnBadge, ExecConnText, false, $"✗  {ex.Message}");
+        }
+    }
+
+    private void ExecDatabaseBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        // Reset connected indicator when DB changes
+        if (ExecConnBadge.Visibility == System.Windows.Visibility.Visible)
+        {
+            var text = ExecConnText.Text;
+            if (text.StartsWith("✓  Connected"))
+                ExecConnBadge.Visibility = System.Windows.Visibility.Collapsed;
+        }
+    }
+
+    private async void ConnectExecDb_Click(object sender, RoutedEventArgs e)
+    {
+        ExecConnBadge.Visibility = System.Windows.Visibility.Collapsed;
+
+        var server = ExecServerBox.Text.Trim();
+        var user   = ExecUserBox.Text.Trim();
+        var pass   = ExecPasswordBox.Password;
+        var db     = ExecDatabaseBox.SelectedItem as string ?? ExecDatabaseBox.Text.Trim();
+
+        if (string.IsNullOrEmpty(server) || string.IsNullOrEmpty(db))
+        {
+            SetDbBadge(ExecConnBadge, ExecConnText, false, "✗  Server and database required.");
+            return;
+        }
+
+        try
+        {
+            _execConn?.Dispose();
+            _execConn = null;
+
+            var cs = BuildConnStr(server, user, pass, db);
+            var conn = new Microsoft.Data.SqlClient.SqlConnection(cs);
+            await conn.OpenAsync();
+            _execConn = conn;
+
+            SetDbBadge(ExecConnBadge, ExecConnText, true, $"✓  Connected — {server} / {db}");
+        }
+        catch (Exception ex)
+        {
+            SetDbBadge(ExecConnBadge, ExecConnText, false, $"✗  {ex.Message}");
+        }
+    }
+
+    /// <summary>Loads a preset SQL snippet into the script editor.</summary>
+    private void ProcPresetBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        var item = (ProcPresetBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "";
+        var snippet = item switch
+        {
+            "Rebuild all indexes" =>
+                "-- Rebuild all indexes in the database\r\n" +
+                "EXEC sp_MSforeachtable 'ALTER INDEX ALL ON ? REBUILD WITH (ONLINE = OFF)';",
+
+            "Update statistics" =>
+                "-- Update statistics for all tables\r\n" +
+                "EXEC sp_updatestats;",
+
+            "Shrink database" =>
+                "-- Shrink data and log files\r\n" +
+                "DBCC SHRINKDATABASE (0, 10);  -- 10% free space target",
+
+            "Check DB integrity (DBCC CHECKDB)" =>
+                "-- Check physical and logical integrity\r\n" +
+                "DBCC CHECKDB WITH NO_INFOMSGS, ALL_ERRORMSGS;",
+
+            "List all stored procedures" =>
+                "SELECT name, create_date, modify_date\r\n" +
+                "FROM sys.procedures\r\n" +
+                "ORDER BY name;",
+
+            "List tables and row counts" =>
+                "SELECT t.name AS TableName,\r\n" +
+                "       p.rows AS [RowCount]\r\n" +
+                "FROM   sys.tables t\r\n" +
+                "JOIN   sys.partitions p ON p.object_id = t.object_id AND p.index_id IN (0,1)\r\n" +
+                "ORDER  BY p.rows DESC;",
+
+            "Kill all connections" =>
+                "-- Kill all other connections to this database\r\n" +
+                "DECLARE @kill VARCHAR(MAX) = '';\r\n" +
+                "SELECT @kill = @kill + 'KILL ' + CONVERT(VARCHAR,spid) + '; '\r\n" +
+                "FROM   master.dbo.sysprocesses\r\n" +
+                "WHERE  dbid = DB_ID() AND spid <> @@SPID;\r\n" +
+                "EXEC(@kill);",
+
+            "Clear query plan cache" =>
+                "-- Clear the query plan cache for this database\r\n" +
+                "DBCC FLUSHPROCSYSTEMCACHE;",
+
+            _ => null
+        };
+
+        if (snippet != null)
+            ProcScriptBox.Text = snippet;
+    }
+
+    /// <summary>Executes the script in ProcScriptBox, splitting on GO batches.</summary>
+    private async void ExecuteProc_Click(object sender, RoutedEventArgs e)
+    {
+        ProcResultBadge.Visibility  = System.Windows.Visibility.Collapsed;
+        ProcOutputBox.Visibility    = System.Windows.Visibility.Collapsed;
+
+        // Use the dedicated exec connection; fall back to Section 2 core connection
+        var activeConn = _execConn?.State == System.Data.ConnectionState.Open ? _execConn
+                       : _coreConn?.State  == System.Data.ConnectionState.Open ? _coreConn
+                       : null;
+
+        if (activeConn == null)
+        {
+            SetActionBadge(ProcResultBadge, ProcResultText, false,
+                "✗  Connect to a database using the Connection panel above.");
+            return;
+        }
+
+        var script = ProcScriptBox.Text.Trim();
+        if (string.IsNullOrEmpty(script))
+        {
+            SetActionBadge(ProcResultBadge, ProcResultText, false, "✗  Script is empty.");
+            return;
+        }
+
+        if (!int.TryParse(ProcTimeoutBox.Text.Trim(), out int timeout)) timeout = 300;
+
+        var output = new System.Text.StringBuilder();
+        var overallOk = true;
+
+        try
+        {
+            // Split on GO (case-insensitive, whole line)
+            var batches = System.Text.RegularExpressions.Regex
+                .Split(script, @"^\s*GO\s*$",
+                    System.Text.RegularExpressions.RegexOptions.Multiline |
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            // Attach info-message handler once
+            activeConn.InfoMessage += (_, msg) => output.AppendLine(msg.Message);
+
+            int batchNum = 0;
+            foreach (var batch in batches)
+            {
+                var sql = batch.Trim();
+                if (string.IsNullOrEmpty(sql)) continue;
+                batchNum++;
+
+                try
+                {
+                    await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, activeConn)
+                    {
+                        CommandTimeout = timeout
+                    };
+
+                    int rows = await cmd.ExecuteNonQueryAsync();
+                    if (rows >= 0)
+                        output.AppendLine($"[Batch {batchNum}]  {rows} row(s) affected.");
+                    else
+                        output.AppendLine($"[Batch {batchNum}]  Done.");
+                }
+                catch (Exception bex)
+                {
+                    output.AppendLine($"[Batch {batchNum}]  ERROR: {bex.Message}");
+                    overallOk = false;
+                }
+            }
+
+            SetActionBadge(ProcResultBadge, ProcResultText, overallOk,
+                overallOk ? $"✓  Executed {batchNum} batch(es) successfully." : "⚠  Completed with errors.");
+
+            if (output.Length > 0)
+            {
+                ProcOutputBox.Text       = output.ToString().TrimEnd();
+                ProcOutputBox.Visibility = System.Windows.Visibility.Visible;
+            }
+        }
+        catch (Exception ex)
+        {
+            SetActionBadge(ProcResultBadge, ProcResultText, false, $"✗  {ex.Message}");
+        }
+    }
+
+    /// <summary>Opens a SaveFileDialog so the user can pick a .bak destination path.</summary>
+    private void BrowseBackupPath_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Title            = "Choose backup file location",
+            Filter           = "SQL Server Backup (*.bak)|*.bak|All files (*.*)|*.*",
+            DefaultExt       = ".bak",
+            FileName         = $"{CoreDatabaseBox.Text.Trim()}_{DateTime.Now:yyyyMMdd_HHmm}.bak"
+        };
+        if (dlg.ShowDialog() == true)
+            BackupPathBox.Text = dlg.FileName;
+    }
+
+    // ── Maintenance SQL Connection helpers ──────────────────────────────────────
+
+    /// <summary>
+    /// Returns (server, user, pass) for Backup/Restore.
+    /// Uses the dedicated Maint fields if Server is filled; falls back to the Core DB fields.
+    /// </summary>
+    private (string server, string user, string pass) GetMaintConnDetails()
+    {
+        var ms = MaintServerBox.Text.Trim();
+        if (!string.IsNullOrEmpty(ms))
+            return (ms, MaintUserBox.Text.Trim(), MaintPasswordBox.Password);
+        // Fall back to Core DB credentials
+        return (CoreServerBox.Text.Trim(), CoreUserBox.Text.Trim(), CorePasswordBox.Password);
+    }
+
+    private async void TestMaintConn_Click(object sender, RoutedEventArgs e)
+    {
+        MaintConnBadge.Visibility = System.Windows.Visibility.Collapsed;
+        TestMaintConnBtn.IsEnabled = false;
+        try
+        {
+            var (srv, usr, pw) = GetMaintConnDetails();
+            if (string.IsNullOrEmpty(srv))
+            {
+                SetActionBadge(MaintConnBadge, MaintConnText, false,
+                    "✗  Enter a server name (or leave blank to inherit from Core DB in Section 2).");
+                return;
+            }
+            var connStr = BuildConnStr(srv, usr, pw, "master");
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(connStr);
+            await conn.OpenAsync();
+            var ver = (string?)await new Microsoft.Data.SqlClient.SqlCommand(
+                "SELECT @@VERSION", conn).ExecuteScalarAsync();
+            var shortVer = ver?.Split('\n').FirstOrDefault()?.Trim() ?? "connected";
+            SetActionBadge(MaintConnBadge, MaintConnText, true, $"✓  {shortVer}");
+        }
+        catch (Exception ex)
+        {
+            SetActionBadge(MaintConnBadge, MaintConnText, false, $"✗  {ex.Message}");
+        }
+        finally { TestMaintConnBtn.IsEnabled = true; }
+    }
+
+    /// <summary>Runs BACKUP DATABASE … TO DISK using the Maint SQL connection.</summary>
+    private async void BackupDatabase_Click(object sender, RoutedEventArgs e)
+    {
+        BackupResultBadge.Visibility = System.Windows.Visibility.Collapsed;
+
+        var path = BackupPathBox.Text.Trim();
+        if (string.IsNullOrEmpty(path))
+        {
+            SetActionBadge(BackupResultBadge, BackupResultText, false,
+                "✗  Enter or browse to a backup file path.");
+            return;
+        }
+
+        var (srv, usr, pw) = GetMaintConnDetails();
+        if (string.IsNullOrEmpty(srv))
+        {
+            SetActionBadge(BackupResultBadge, BackupResultText, false,
+                "✗  No SQL Server specified — fill in the SQL Connection above or connect via Section 2.");
+            return;
+        }
+
+        // We need to know which database to back up:
+        // prefer ExecDatabaseBox (the Maintenance target DB), then fall back to _coreConn.Database
+        var dbName = ExecDatabaseBox.Text.Trim();
+        if (string.IsNullOrEmpty(dbName) && _coreConn?.State == System.Data.ConnectionState.Open)
+            dbName = _coreConn.Database;
+        if (string.IsNullOrEmpty(dbName))
+        {
+            SetActionBadge(BackupResultBadge, BackupResultText, false,
+                "✗  Enter the database name in the 'Database' box above, or connect via Section 2.");
+            return;
+        }
+
+        var compress = BackupCompressChk.IsChecked == true;
+        var copyOnly = BackupCopyOnlyChk.IsChecked == true;
+        var options  = new System.Text.StringBuilder();
+        if (compress) options.Append(", COMPRESSION");
+        if (copyOnly) options.Append(", COPY_ONLY");
+
+        var sql = $"BACKUP DATABASE [{dbName}] TO DISK = @path " +
+                  $"WITH NAME = @name, STATS = 10{options};";
+        try
+        {
+            SetActionBadge(BackupResultBadge, BackupResultText, true, "⏳  Backup running…");
+            BackupResultBadge.Visibility = System.Windows.Visibility.Visible;
+
+            var connStr = BuildConnStr(srv, usr, pw, "master");
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(connStr);
+            await conn.OpenAsync();
+
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn)
+            {
+                CommandTimeout = 0
+            };
+            cmd.Parameters.AddWithValue("@path", path);
+            cmd.Parameters.AddWithValue("@name", $"{dbName} backup {DateTime.Now:yyyy-MM-dd HH:mm}");
+
+            var messages = new System.Text.StringBuilder();
+            conn.InfoMessage += (_, msg) => messages.AppendLine(msg.Message);
+
+            await cmd.ExecuteNonQueryAsync();
+
+            SetActionBadge(BackupResultBadge, BackupResultText, true,
+                $"✓  Backup complete → {path}\n{messages.ToString().Trim()}".TrimEnd());
+        }
+        catch (Exception ex)
+        {
+            SetActionBadge(BackupResultBadge, BackupResultText, false, $"✗  {ex.Message}");
+        }
+    }
+
+    /// <summary>Opens an OpenFileDialog to pick a .bak file for restore.</summary>
+    private void BrowseRestoreFile_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new Microsoft.Win32.OpenFileDialog
+        {
+            Title  = "Select backup file",
+            Filter = "SQL Server Backup (*.bak)|*.bak|All files (*.*)|*.*"
+        };
+        if (dlg.ShowDialog() == true)
+        {
+            RestoreFileBox.Text = dlg.FileName;
+            // Auto-suggest restore-as name from file name
+            if (string.IsNullOrWhiteSpace(RestoreAsBox.Text))
+            {
+                var suggested = System.IO.Path.GetFileNameWithoutExtension(dlg.FileName);
+                RestoreAsBox.Text = suggested;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Restores a .bak file to the connected SQL Server instance.
+    /// Reads logical file names from RESTORE FILELISTONLY first,
+    /// then builds a RESTORE DATABASE with MOVE for each logical file.
+    /// </summary>
+    private async void RestoreDatabase_Click(object sender, RoutedEventArgs e)
+    {
+        RestoreResultBadge.Visibility = System.Windows.Visibility.Collapsed;
+
+        var bakPath   = RestoreFileBox.Text.Trim();
+        var targetDb  = RestoreAsBox.Text.Trim();
+        var withRepl  = RestoreWithReplaceChk.IsChecked == true;
+        var killConns = RestoreKillConnChk.IsChecked == true;
+
+        if (string.IsNullOrEmpty(bakPath))
+        {
+            SetActionBadge(RestoreResultBadge, RestoreResultText, false,
+                "✗  Specify the .bak file path.");
+            return;
+        }
+
+        // Need a master connection for RESTORE — use Maint connection, fall back to Core DB
+        var (server, user, pass) = GetMaintConnDetails();
+
+        if (string.IsNullOrEmpty(server))
+        {
+            SetActionBadge(RestoreResultBadge, RestoreResultText, false,
+                "✗  No SQL Server specified — fill in the SQL Connection above or connect via Section 2.");
+            return;
+        }
+
+        try
+        {
+            SetActionBadge(RestoreResultBadge, RestoreResultText, true, "⏳  Preparing restore…");
+            RestoreResultBadge.Visibility = System.Windows.Visibility.Visible;
+
+            var masterConnStr = BuildConnStr(server, user, pass, "master");
+            await using var masterConn = new Microsoft.Data.SqlClient.SqlConnection(masterConnStr);
+            await masterConn.OpenAsync();
+
+            // Step 1 — read logical file list from the .bak
+            var fileList = new List<(string LogicalName, string PhysicalName, string FileType)>();
+            var fileListSql = "RESTORE FILELISTONLY FROM DISK = @bak";
+            await using (var fl = new Microsoft.Data.SqlClient.SqlCommand(fileListSql, masterConn))
+            {
+                fl.Parameters.AddWithValue("@bak", bakPath);
+                fl.CommandTimeout = 120;
+                await using var rdr = await fl.ExecuteReaderAsync();
+                while (await rdr.ReadAsync())
+                {
+                    fileList.Add((
+                        rdr["LogicalName"].ToString()!,
+                        rdr["PhysicalName"].ToString()!,
+                        rdr["Type"].ToString()!
+                    ));
+                }
+            }
+
+            if (fileList.Count == 0)
+            {
+                SetActionBadge(RestoreResultBadge, RestoreResultText, false,
+                    "✗  Could not read file list from backup — verify path.");
+                return;
+            }
+
+            // If no target name given, use the first logical name
+            if (string.IsNullOrWhiteSpace(targetDb))
+                targetDb = fileList[0].LogicalName;
+
+            // Step 2 — figure out SQL Server default data directory
+            string dataDir;
+            await using (var ddc = new Microsoft.Data.SqlClient.SqlCommand(
+                "SELECT SERVERPROPERTY('InstanceDefaultDataPath')", masterConn))
+            {
+                var v = await ddc.ExecuteScalarAsync();
+                dataDir = v is string s && !string.IsNullOrEmpty(s)
+                    ? s : @"C:\Program Files\Microsoft SQL Server\MSSQL\DATA\";
+            }
+            if (!dataDir.EndsWith("\\") && !dataDir.EndsWith("/")) dataDir += "\\";
+
+            // Step 3 — build MOVE clauses
+            var moveSb = new System.Text.StringBuilder();
+            foreach (var (logName, physPath, fileType) in fileList)
+            {
+                var ext      = fileType.Equals("L", StringComparison.OrdinalIgnoreCase) ? ".ldf" : ".mdf";
+                var newFile  = $"{dataDir}{targetDb}{ext}";
+                moveSb.Append($"MOVE N'{logName}' TO N'{newFile}', ");
+            }
+            var moveClause = moveSb.ToString().TrimEnd(',', ' ');
+
+            // Step 4 — kill connections if requested
+            if (killConns)
+            {
+                try
+                {
+                    var killSql = $"IF DB_ID(N'{targetDb}') IS NOT NULL " +
+                                  $"ALTER DATABASE [{targetDb}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;";
+                    await using var kc = new Microsoft.Data.SqlClient.SqlCommand(killSql, masterConn)
+                        { CommandTimeout = 30 };
+                    await kc.ExecuteNonQueryAsync();
+                }
+                catch { /* DB may not exist yet — non-fatal */ }
+            }
+
+            // Step 5 — execute RESTORE
+            var replaceClause = withRepl ? ", REPLACE" : "";
+            var restoreSql =
+                $"RESTORE DATABASE [{targetDb}] FROM DISK = @bak " +
+                $"WITH {moveClause}{replaceClause}, RECOVERY, STATS = 10;";
+
+            SetActionBadge(RestoreResultBadge, RestoreResultText, true, "⏳  Restoring…");
+
+            var messages = new System.Text.StringBuilder();
+            masterConn.InfoMessage += (_, msg) => messages.AppendLine(msg.Message);
+
+            await using (var rc = new Microsoft.Data.SqlClient.SqlCommand(restoreSql, masterConn)
+                { CommandTimeout = 0 })
+            {
+                rc.Parameters.AddWithValue("@bak", bakPath);
+                await rc.ExecuteNonQueryAsync();
+            }
+
+            // Step 6 — put back to MULTI_USER
+            try
+            {
+                await using var mu = new Microsoft.Data.SqlClient.SqlCommand(
+                    $"ALTER DATABASE [{targetDb}] SET MULTI_USER;", masterConn) { CommandTimeout = 30 };
+                await mu.ExecuteNonQueryAsync();
+            }
+            catch { /* non-fatal */ }
+
+            SetActionBadge(RestoreResultBadge, RestoreResultText, true,
+                $"✓  Restored to [{targetDb}]\n{messages.ToString().Trim()}".TrimEnd());
+
+            // Refresh Core database dropdowns — open a fresh connection so the post-RESTORE
+            // state of masterConn doesn't affect the query
+            try
+            {
+                var dbs = new List<string>();
+                var refreshConnStr = BuildConnStr(server, user, pass, "master");
+                await using var refreshConn = new Microsoft.Data.SqlClient.SqlConnection(refreshConnStr);
+                await refreshConn.OpenAsync();
+                await using var listCmd = new Microsoft.Data.SqlClient.SqlCommand(
+                    "SELECT name FROM sys.databases " +
+                    "WHERE name NOT IN ('master','tempdb','model','msdb') " +
+                    "ORDER BY name", refreshConn);
+                listCmd.CommandTimeout = 15;
+                await using var listRdr = await listCmd.ExecuteReaderAsync();
+                while (await listRdr.ReadAsync()) dbs.Add(listRdr.GetString(0));
+
+                // Find index before switching to UI thread
+                var idx = dbs.IndexOf(targetDb);
+
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    CoreDatabaseBox.ItemsSource    = dbs;
+                    SubCoreDatabaseBox.ItemsSource = dbs;
+                    DelDatabaseBox.ItemsSource     = dbs;
+
+                    if (idx >= 0)
+                    {
+                        CoreDatabaseBox.SelectedIndex    = idx;
+                        SubCoreDatabaseBox.SelectedIndex = idx;
+                        DelDatabaseBox.SelectedIndex     = idx;
+                    }
+                });
+            }
+            catch { /* non-fatal — user can click ⟳ manually */ }
+        }
+        catch (Exception ex)
+        {
+            SetActionBadge(RestoreResultBadge, RestoreResultText, false, $"✗  {ex.Message}");
+        }
+    }
+
+    private async void LinkDatabase_Click(object sender, RoutedEventArgs e)
+    {
+        if (_hostConn?.State != System.Data.ConnectionState.Open)
+        {
+            SetActionBadge(ActionResultBadge, ActionResultText, false,
+                "✗  Not connected to Host DB (Section 1).");
+            return;
+        }
+        if (_coreConn?.State != System.Data.ConnectionState.Open)
+        {
+            SetActionBadge(ActionResultBadge, ActionResultText, false,
+                "✗  Not connected to Core DB (Section 2).");
+            return;
+        }
+
+        var newCompany  = NewCompanyBox.Text.Trim();
+        // Resolve display labels → plain emails via the map; fall back to raw text as-is
+        string ResolveToEmail(string text)
+        {
+            var t = text.Trim();
+            if (string.IsNullOrEmpty(t)) return t;
+            // If the text is already an email (contains @) and not in the map as a key, use it directly
+            if (_coreUserEmailMap.TryGetValue(t, out var mapped)) return mapped;
+            // Already a plain email or unknown — return as-is
+            return t;
+        }
+        var restoreAcct = ResolveToEmail(RestoreEmailBox.Text);
+        var coreUsers   = ResolveToEmail(CoreUsersBox.Text);
+        var acctUsers   = ResolveToEmail(AccountUsersBox.Text);
+        var coreDb      = CoreDatabaseBox.Text.Trim();
+        bool sanitize   = SanitizeChk.IsChecked == true;
+        bool setDefault = SetDefaultChk.IsChecked == true;
+
+        if (string.IsNullOrEmpty(coreDb))
+        {
+            SetActionBadge(ActionResultBadge, ActionResultText, false,
+                "✗  No Core Database selected.");
+            return;
+        }
+
+        ActionResultBadge.Visibility = System.Windows.Visibility.Collapsed;
+
+        try
+        {
+            var log = new System.Text.StringBuilder();
+
+            // ── Discover the Host DB registration table dynamically ────────────
+            string? hostRegTable = null;
+            string? hostDbNameCol  = null;   // actual column name for the database identifier
+            string? hostCompanyCol = null;   // actual column name for the company name
+            {
+                // DB-identifier column variants
+                var dbCols   = new[] { "DatabaseName", "DBName", "CoreDBName", "DataBase", "DbIdentifier", "DatabaseID", "CoreDatabase" };
+                // Company-name column variants
+                var nameCols = new[] { "CompanyName", "Company", "ClientName", "AccountName", "Name", "Description" };
+
+                // Step 1 – query INFORMATION_SCHEMA once to find any table that has a db-identifier column
+                var allDbColsSql =
+                    "SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS " +
+                    $"WHERE COLUMN_NAME IN ({string.Join(",", dbCols.Select(c => $"'{c}'"))}) " +
+                    "  AND TABLE_SCHEMA = 'dbo' " +
+                    "ORDER BY CASE TABLE_NAME " +
+                    "  WHEN 'DatabaseInfo'    THEN 1 " +
+                    "  WHEN 'ServiceEntity'   THEN 2 " +
+                    "  WHEN 'Company'         THEN 3 " +
+                    "  WHEN 'CompanyDatabase' THEN 4 " +
+                    "  WHEN 'ClientDatabase'  THEN 5 " +
+                    "  WHEN 'HostDatabase'    THEN 6 " +
+                    "  WHEN 'CoreDatabase'    THEN 7 " +
+                    "  WHEN 'CompanyInfo'     THEN 8 " +
+                    "  ELSE 99 END, TABLE_NAME";
+
+                var tableDbColMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                await using (var c1 = new Microsoft.Data.SqlClient.SqlCommand(allDbColsSql, _hostConn))
+                await using (var r1 = await c1.ExecuteReaderAsync())
+                    while (await r1.ReadAsync())
+                    {
+                        var tn = r1.GetString(0); var cn = r1.GetString(1);
+                        if (!tableDbColMap.ContainsKey(tn)) tableDbColMap[tn] = cn;
+                    }
+
+                // Step 2 – for each candidate table, also check for a company-name column
+                foreach (var (tbl, dbCol) in tableDbColMap)
+                {
+                    var chk = "SELECT TOP 1 COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS " +
+                              $"WHERE TABLE_NAME = '{tbl}' " +
+                              $"  AND COLUMN_NAME IN ({string.Join(",", nameCols.Select(c => $"'{c}'"))})";
+                    await using var cc = new Microsoft.Data.SqlClient.SqlCommand(chk, _hostConn);
+                    var nameCol = (await cc.ExecuteScalarAsync()) as string;
+                    // Prefer tables that have BOTH columns; accept db-col-only as fallback
+                    if (nameCol != null)
+                    {
+                        hostRegTable  = tbl;
+                        hostDbNameCol = dbCol;
+                        hostCompanyCol = nameCol;
+                        break;
+                    }
+                    if (hostRegTable == null)   // keep first db-col-only match as last-resort
+                    {
+                        hostRegTable  = tbl;
+                        hostDbNameCol = dbCol;
+                    }
+                }
+                log.AppendLine(hostRegTable != null
+                    ? $"ℹ  Host reg table: [{hostRegTable}] (db col: {hostDbNameCol}, name col: {hostCompanyCol ?? "n/a"})"
+                    : "⚠  Could not find a registration table in Host DB.");
+            }
+
+            // 1. Register the DB in Host
+            // Uses the same SQL pattern as BQE CoreUtility (decompiled):
+            //   Company INSERT with full column list + AccountCompany link + CoreDBServer entry
+            try
+            {
+                if (!string.IsNullOrEmpty(newCompany) && hostRegTable != null)
+                {
+                    var serverName = CoreServerBox.Text.Trim();
+
+                    if (string.Equals(hostRegTable, "Company", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // ── CoreUtility-compatible full Company + AccountCompany insert ──────
+                        //
+                        // Mirrors the exact SQL pattern from CoreUtility:
+                        //   1. Look up Industry_ID, Country_ID, CoreDBVersion from BQECoreMaster
+                        //   2. Look up Account_ID from Account WHERE Email = restoreAcct
+                        //   3. Get DataFileLocation / LogFileLocation from SQL Server default paths
+                        //   4. UPSERT Company row with all required columns
+                        //   5. INSERT AccountCompany linking account ↔ company
+                        //   6. Ensure CoreDBServer entry exists for this server
+                        //   7. Set IsDefault on AccountCompany
+
+                        // ── 1a: Pre-read company details from Core DB ────────────────────────
+                        string coreCompanyName = newCompany;
+                        string corePhone = "", coreAddress = "", coreCity = "", coreState = "",
+                               coreZip = "", coreWebsite = "", coreCurrency = "USD",
+                               coreTz = "", coreLang = "en", coreIndustry = "";
+                        decimal coreDbVersion = 0;
+                        try
+                        {
+                            // Try CompanyInfo / MasterInfo / GlobalSetting for company details
+                            var coreInfoTables = new[] { "CompanyInfo", "MasterInfo", "GlobalSetting", "tblCompanyInfo", "CompanySettings" };
+                            foreach (var infoTbl in coreInfoTables)
+                            {
+                                var tblChkSql = $"SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='{infoTbl}'";
+                                await using var tblChk = new Microsoft.Data.SqlClient.SqlCommand(tblChkSql, _coreConn);
+                                if (await tblChk.ExecuteScalarAsync() == null) continue;
+
+                                var colMapSql = $"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME='{infoTbl}'";
+                                var existingCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                                await using (var colCmd2 = new Microsoft.Data.SqlClient.SqlCommand(colMapSql, _coreConn))
+                                await using (var colRdr2 = await colCmd2.ExecuteReaderAsync())
+                                    while (await colRdr2.ReadAsync()) existingCols.Add(colRdr2.GetString(0));
+
+                                var selCols = new List<string>();
+                                string? mapName(string[] variants) { foreach (var v in variants) if (existingCols.Contains(v)) return v; return null; }
+                                var nameCol    = mapName(["CompanyName","Name","FirmName","BusinessName","OfficeName"]);
+                                var phoneCol   = mapName(["Phone","PhoneNumber","ContactPhone","BusinessPhone","OfficePhone","Telephone"]);
+                                var addrCol    = mapName(["Address","Address1","StreetAddress","AddressLine1","Street"]);
+                                var cityCol    = mapName(["City","CityName"]);
+                                var stateCol   = mapName(["State","StateName","Province"]);
+                                var zipCol     = mapName(["Zip","ZipCode","PostalCode","PostCode"]);
+                                var webCol     = mapName(["Website","WebsiteURL","URL","WebURL"]);
+                                var curCol     = mapName(["Currency","CurrencyCode","DefaultCurrency","BaseCurrency"]);
+                                var tzCol      = mapName(["TimeZone","TimeZoneId","TimeZoneName","TimezoneId"]);
+                                var langCol    = mapName(["Language","LanguageCode","DefaultLanguage","Locale"]);
+                                var industryCol= mapName(["IndustryType","Industry","IndustryName","BusinessType","FirmType"]);
+                                var verCol     = mapName(["Version","CoreVersion","DBVersion","DatabaseVersion"]);
+
+                                foreach (var (col, _) in new[] {
+                                    (nameCol,nameCol),(phoneCol,phoneCol),(addrCol,addrCol),(cityCol,cityCol),
+                                    (stateCol,stateCol),(zipCol,zipCol),(webCol,webCol),(curCol,curCol),
+                                    (tzCol,tzCol),(langCol,langCol),(industryCol,industryCol),(verCol,verCol)
+                                }.Where(x => x.Item1 != null))
+                                    selCols.Add($"[{col}]");
+
+                                if (selCols.Count == 0) continue;
+
+                                await using var infoCmd = new Microsoft.Data.SqlClient.SqlCommand(
+                                    $"SELECT TOP 1 {string.Join(",", selCols)} FROM [dbo].[{infoTbl}]", _coreConn);
+                                await using var infoRdr = await infoCmd.ExecuteReaderAsync();
+                                if (!await infoRdr.ReadAsync()) continue;
+
+                                string? ReadCol(string? col) {
+                                    if (col == null) return null;
+                                    try { var idx2 = infoRdr.GetOrdinal(col); return infoRdr.IsDBNull(idx2) ? null : infoRdr.GetValue(idx2)?.ToString()?.Trim(); }
+                                    catch { return null; }
+                                }
+                                if (string.IsNullOrEmpty(coreCompanyName)) coreCompanyName = ReadCol(nameCol) ?? coreCompanyName;
+                                corePhone    = ReadCol(phoneCol)    ?? corePhone;
+                                coreAddress  = ReadCol(addrCol)     ?? coreAddress;
+                                coreCity     = ReadCol(cityCol)     ?? coreCity;
+                                coreState    = ReadCol(stateCol)    ?? coreState;
+                                coreZip      = ReadCol(zipCol)      ?? coreZip;
+                                coreWebsite  = ReadCol(webCol)      ?? coreWebsite;
+                                coreCurrency = ReadCol(curCol)      ?? coreCurrency;
+                                coreTz       = ReadCol(tzCol)       ?? coreTz;
+                                coreLang     = ReadCol(langCol)     ?? coreLang;
+                                coreIndustry = ReadCol(industryCol) ?? coreIndustry;
+                                var verStr   = ReadCol(verCol);
+                                if (decimal.TryParse(verStr, out var vp)) coreDbVersion = vp;
+                                break;
+                            }
+
+                            // CoreDBVersion from Core DB UpdateQuery
+                            if (coreDbVersion == 0)
+                            {
+                                try
+                                {
+                                    await using var verCmd = new Microsoft.Data.SqlClient.SqlCommand(
+                                        "IF OBJECT_ID('dbo.UpdateQuery','U') IS NOT NULL SELECT TOP 1 CoreVersion FROM dbo.UpdateQuery ORDER BY CoreVersion DESC",
+                                        _coreConn);
+                                    var vv = await verCmd.ExecuteScalarAsync();
+                                    if (vv != null && decimal.TryParse(vv.ToString(), out var vp2)) coreDbVersion = vp2;
+                                }
+                                catch { }
+                            }
+                        }
+                        catch { /* non-fatal — proceed with defaults */ }
+
+                        // Use resolved company name if NewCompanyBox was empty
+                        if (string.IsNullOrEmpty(newCompany) && !string.IsNullOrEmpty(coreCompanyName))
+                            newCompany = coreCompanyName;
+
+                        // ── 1b: Resolve data/log file paths from SQL Server ──────────────────
+                        string dataFilePath = coreDb, logFilePath = coreDb;
+                        try
+                        {
+                            var pathSql =
+                                "SELECT physical_name FROM sys.master_files " +
+                                $"WHERE database_id = DB_ID(N'{coreDb}') AND type_desc = 'ROWS'";
+                            await using var pathCmd =
+                                new Microsoft.Data.SqlClient.SqlCommand(pathSql, _hostConn);
+                            // Run on Core server (master) instead, as host may not know the file
+                            var cs0 = BuildConnStr(serverName,
+                                CoreUserBox.Text.Trim(), CorePasswordBox.Password, "master");
+                            await using var masterConn0 =
+                                new Microsoft.Data.SqlClient.SqlConnection(cs0);
+                            await masterConn0.OpenAsync();
+                            await using var pathCmd2 =
+                                new Microsoft.Data.SqlClient.SqlCommand(pathSql, masterConn0);
+                            var pathVal = await pathCmd2.ExecuteScalarAsync();
+                            if (pathVal is string p && !string.IsNullOrEmpty(p))
+                            {
+                                dataFilePath = p;
+                                logFilePath  = System.IO.Path.ChangeExtension(p, ".ldf");
+                            }
+                        }
+                        catch { /* non-fatal — blank paths are fine */ }
+
+                        // ── 1b: Dynamic Company INSERT — only include columns that exist in this Host DB version ──
+                        // Resolve what columns the Company table actually has
+                        var compColsSql =
+                            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, " +
+                            "COLUMNPROPERTY(OBJECT_ID('dbo.Company'), COLUMN_NAME, 'IsIdentity') AS IsId, " +
+                            "COLUMNPROPERTY(OBJECT_ID('dbo.Company'), COLUMN_NAME, 'IsComputed')  AS IsComp " +
+                            "FROM INFORMATION_SCHEMA.COLUMNS " +
+                            "WHERE TABLE_NAME = 'Company' AND TABLE_SCHEMA = 'dbo'";
+                        var companyCols = new Dictionary<string, (string Type, bool Nullable, bool IsId, bool IsComp)>(
+                            StringComparer.OrdinalIgnoreCase);
+                        await using (var ccCmd = new Microsoft.Data.SqlClient.SqlCommand(compColsSql, _hostConn))
+                        await using (var ccRdr = await ccCmd.ExecuteReaderAsync())
+                            while (await ccRdr.ReadAsync())
+                                companyCols[ccRdr.GetString(0)] = (
+                                    ccRdr.GetString(1).ToLower(),
+                                    ccRdr.GetString(2).Equals("YES", StringComparison.OrdinalIgnoreCase),
+                                    !ccRdr.IsDBNull(3) && ccRdr.GetInt32(3) == 1,
+                                    !ccRdr.IsDBNull(4) && ccRdr.GetInt32(4) == 1);
+
+                        // Exclude identity AND computed columns — neither can appear in an explicit INSERT
+                        bool HasC(string n) => companyCols.TryGetValue(n, out var m) && !m.IsId && !m.IsComp;
+
+                        // Build INSERT column/value lists — known columns first, then defaults for any
+                        // remaining NOT NULL columns the schema requires but we haven't explicitly set.
+                        var iCols = new List<string>();
+                        var iVals = new List<string>();
+                        void AddCV(string col, string val) { if (HasC(col)) { iCols.Add(col); iVals.Add(val); } }
+
+                        AddCV("ID",                              "NEWID()");
+                        AddCV("Name",                            "@company");
+                        AddCV("DatabaseID",                      "@db");
+                        AddCV("CreatedOn",                       "GETDATE()");
+                        AddCV("UpdatedOn",                       "GETDATE()");
+                        AddCV("CompanyStatus",                   "0");   // Active
+                        AddCV("TrailExpDate",                    "DATEADD(MONTH,6,GETDATE())");
+                        AddCV("HasArchive",                      "0");
+                        AddCV("Mode",                            "0");   // 0=Normal (portal default)
+                        AddCV("Industry_ID",                     "@IndustryID");
+                        AddCV("Country_ID",                      "@CountryID");
+                        AddCV("CoreDBVersion",                   "@CoreDBVersion");
+                        AddCV("CoreDeliveredVersion",            "@CoreDBVersion");
+                        AddCV("DataFileLocation",                "@dataFile");
+                        AddCV("LogFileLocation",                 "@logFile");
+                        AddCV("CreatedBy",                       "@AccountID");
+                        AddCV("UpdatedBy",                       "NULL");
+                        // Contact / address fields — read from Core DB
+                        AddCV("PhoneNumber",                     "@corePhone");
+                        AddCV("Phone",                           "@corePhone");
+                        AddCV("ContactPhone",                    "@corePhone");
+                        AddCV("Address",                         "@coreAddress");
+                        AddCV("Address1",                        "@coreAddress");
+                        AddCV("StreetAddress",                   "@coreAddress");
+                        AddCV("City",                            "@coreCity");
+                        AddCV("State",                           "@coreState");
+                        AddCV("Zip",                             "@coreZip");
+                        AddCV("ZipCode",                         "@coreZip");
+                        AddCV("PostalCode",                      "@coreZip");
+                        AddCV("Website",                         "@coreWebsite");
+                        AddCV("WebsiteURL",                      "@coreWebsite");
+                        // Locale / financial
+                        AddCV("Currency_ID",                     "@CurrencyID");
+                        AddCV("TimeZone_ID",                     "@TimeZoneID");
+                        AddCV("Language_ID",                     "@LanguageID");
+                        AddCV("CurrencyCode",                    "@coreCurrency");
+                        AddCV("DefaultCurrency",                 "@coreCurrency");
+                        AddCV("TimeZoneName",                    "@coreTz");
+                        AddCV("LanguageCode",                    "@coreLang");
+                        // Agent / status nullable cols
+                        AddCV("StatusMessage",                   "NULL");
+                        AddCV("ReportAppStatus",                 "NULL");
+                        AddCV("ReportAppStatusMessage",          "NULL");
+                        AddCV("AgentAlertApiStatus",             "NULL");
+                        AddCV("AgentAlertApiStatusMessage",      "NULL");
+                        AddCV("AgentMonitoringApiStatus",        "NULL");
+                        AddCV("AgentMonitoringApiStatusMessage", "NULL");
+                        AddCV("AgentSchedulingApiStatus",        "NULL");
+                        AddCV("AgentSchedulingApiStatusMessage", "NULL");
+                        AddCV("YodleeID",                        "NULL");
+                        AddCV("LastYodleeRefresh",               "NULL");
+                        AddCV("HAAvailabilitySwitch",            "0");
+                        AddCV("IsMultiCurrency",                 "0");
+                        AddCV("IsActive",                        "1");
+                        AddCV("IsDeleted",                       "0");
+                        // Portal-default feature flags (match Shaheen Enterprise reference row)
+                        AddCV("CloudFeedsAccess",                "1");   // enabled on registration
+                        AddCV("AllowReportScheduling",           "0");
+                        AddCV("AllowBetaAccess",                 "0");
+                        AddCV("SubscriptionVersion",             "0");
+                        AddCV("CompanySSOStatus",                "0");
+                        AddCV("APPID",                           "'BQECORE-WEB-V1'");
+                        AddCV("DevOpsFlag",                      "NULL");
+                        AddCV("SkipSanitize",                    "NULL");
+                        AddCV("CoreAdvisorCompanyLevel",         "NULL");
+
+                        // Fill any remaining NOT NULL columns we haven't covered yet
+                        foreach (var (cn, (dt, nu, isId, isComp)) in companyCols)
+                        {
+                            if (isId || isComp || nu) continue; // skip identity, computed & nullable columns
+                            if (iCols.Any(c => c.Equals(cn, StringComparison.OrdinalIgnoreCase))) continue;
+                            iCols.Add(cn);
+                            iVals.Add(dt switch {
+                                "uniqueidentifier"              => "NEWID()",
+                                "bit"                           => "0",
+                                "int" or "smallint" or "tinyint"
+                                    or "bigint"                 => "0",
+                                "datetime" or "datetime2"
+                                    or "date" or "smalldatetime"=> "GETDATE()",
+                                "decimal" or "numeric"
+                                    or "float" or "real"
+                                    or "money" or "smallmoney"  => "0",
+                                _                               => "N''"
+                            });
+                        }
+
+                        var insertColsSql = string.Join(",", iCols.Select(c => $"[{c}]"));
+                        var insertValsSql = string.Join(",", iVals);
+
+                        // ── Dynamic CoreDBServer INSERT ───────────────────────────────────────
+                        // Copy an existing row but override ID and ServerName; skip if table missing or empty.
+                        var cdbColsSql =
+                            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, " +
+                            "COLUMNPROPERTY(OBJECT_ID('dbo.CoreDBServer'), COLUMN_NAME, 'IsIdentity') AS IsId, " +
+                            "COLUMNPROPERTY(OBJECT_ID('dbo.CoreDBServer'), COLUMN_NAME, 'IsComputed')  AS IsComp " +
+                            "FROM INFORMATION_SCHEMA.COLUMNS " +
+                            "WHERE TABLE_NAME = 'CoreDBServer' AND TABLE_SCHEMA = 'dbo'";
+                        var cdbCols = new Dictionary<string, (string Type, bool Nullable, bool IsId, bool IsComp)>(
+                            StringComparer.OrdinalIgnoreCase);
+                        await using (var cdbCmd = new Microsoft.Data.SqlClient.SqlCommand(cdbColsSql, _hostConn))
+                        await using (var cdbRdr = await cdbCmd.ExecuteReaderAsync())
+                            while (await cdbRdr.ReadAsync())
+                                cdbCols[cdbRdr.GetString(0)] = (
+                                    cdbRdr.GetString(1).ToLower(),
+                                    cdbRdr.GetString(2).Equals("YES", StringComparison.OrdinalIgnoreCase),
+                                    !cdbRdr.IsDBNull(3) && cdbRdr.GetInt32(3) == 1,
+                                    !cdbRdr.IsDBNull(4) && cdbRdr.GetInt32(4) == 1);
+
+                        bool HasCdb(string n) => cdbCols.TryGetValue(n, out var m) && !m.IsId && !m.IsComp;
+                        string TypeDefaultCdb(string n) => cdbCols.TryGetValue(n, out var m) ? m.Type switch {
+                            "uniqueidentifier" => "NEWID()", "bit" => "0",
+                            "int" or "smallint" or "tinyint" or "bigint" => "0",
+                            "datetime" or "datetime2" or "date" or "smalldatetime" => "GETDATE()",
+                            "decimal" or "numeric" or "float" or "real" or "money" or "smallmoney" => "0",
+                            _ => "N''" } : "N''";
+
+                        var cdbICols = new List<string>(); var cdbIVals = new List<string>();
+                        void AddCdb(string col, string val) { if (HasCdb(col)) { cdbICols.Add(col); cdbIVals.Add(val); } }
+                        AddCdb("CoreDBServer_ID",  "NEWID()"); AddCdb("ID", "NEWID()");
+                        AddCdb("ServerName",       "@server");
+                        AddCdb("ServerIP",         "@server");
+                        AddCdb("HostName",         "@server");
+                        AddCdb("Port",             "1433");
+                        AddCdb("IsActive",         "1");
+                        AddCdb("IsEnabled",        "1");
+                        AddCdb("IsSSL",            "0");
+                        AddCdb("IsDefault",        "0");
+                        AddCdb("ServerType",       "0");
+                        AddCdb("DatabaseType",     "0");
+                        AddCdb("CreatedOn",        "GETDATE()");
+                        AddCdb("UpdatedOn",        "GETDATE()");
+                        AddCdb("CreatedBy",        "NULL");
+                        AddCdb("UpdatedBy",        "NULL");
+                        // Fill remaining NOT NULL cols with safe type defaults
+                        foreach (var (cn, (dt, nu, isId, isComp)) in cdbCols)
+                        {
+                            if (isId || isComp || nu) continue;
+                            if (cdbICols.Any(c => c.Equals(cn, StringComparison.OrdinalIgnoreCase))) continue;
+                            cdbICols.Add(cn); cdbIVals.Add(TypeDefaultCdb(cn));
+                        }
+                        var cdbInsertCols = string.Join(",", cdbICols.Select(c => $"[{c}]"));
+                        var cdbInsertVals = string.Join(",", cdbIVals);
+
+                        // ── Dynamic AccountCompany INSERT ────────────────────────────────────
+                        var acColsSql =
+                            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, " +
+                            "COLUMNPROPERTY(OBJECT_ID('dbo.AccountCompany'), COLUMN_NAME, 'IsIdentity') AS IsId, " +
+                            "COLUMNPROPERTY(OBJECT_ID('dbo.AccountCompany'), COLUMN_NAME, 'IsComputed')  AS IsComp " +
+                            "FROM INFORMATION_SCHEMA.COLUMNS " +
+                            "WHERE TABLE_NAME = 'AccountCompany' AND TABLE_SCHEMA = 'dbo'";
+                        var acCols = new Dictionary<string, (string Type, bool Nullable, bool IsId, bool IsComp)>(
+                            StringComparer.OrdinalIgnoreCase);
+                        await using (var acCmd2 = new Microsoft.Data.SqlClient.SqlCommand(acColsSql, _hostConn))
+                        await using (var acRdr2 = await acCmd2.ExecuteReaderAsync())
+                            while (await acRdr2.ReadAsync())
+                                acCols[acRdr2.GetString(0)] = (
+                                    acRdr2.GetString(1).ToLower(),
+                                    acRdr2.GetString(2).Equals("YES", StringComparison.OrdinalIgnoreCase),
+                                    !acRdr2.IsDBNull(3) && acRdr2.GetInt32(3) == 1,
+                                    !acRdr2.IsDBNull(4) && acRdr2.GetInt32(4) == 1);
+
+                        bool HasAc(string n) => acCols.TryGetValue(n, out var m) && !m.IsId && !m.IsComp;
+                        string TypeDefaultAc(string n) => acCols.TryGetValue(n, out var m) ? m.Type switch {
+                            "uniqueidentifier" => "NEWID()", "bit" => "0",
+                            "int" or "smallint" or "tinyint" or "bigint" => "0",
+                            "datetime" or "datetime2" or "date" or "smalldatetime" => "GETDATE()",
+                            "decimal" or "numeric" or "float" or "real" or "money" or "smallmoney" => "0",
+                            _ => "N''" } : "N''";
+
+                        var acICols = new List<string>(); var acIVals = new List<string>();
+                        void AddAc(string col, string val) { if (HasAc(col)) { acICols.Add(col); acIVals.Add(val); } }
+                        AddAc("ID",            "NEWID()");
+                        AddAc("Account_ID",    "@AccountID");
+                        AddAc("Company_ID",    "@CompanyID");
+                        AddAc("IsDefault",     "0");   // promoted later if no existing default
+                        AddAc("UserType",      "0");   // Owner = 0
+                        AddAc("Role",          "0");   // UserRole.Owner = 0 (portal pattern)
+                        AddAc("UserStatus",    "0");   // Active = 0
+                        AddAc("IsCoreUser",    "1");
+                        AddAc("IsActive",      "1");
+                        AddAc("IsDeleted",     "0");
+                        AddAc("IsEnabled",     "1");
+                        AddAc("IsSysAdmin",    "1");
+                        AddAc("IsOwner",       "1");
+                        AddAc("AccessLevel",   "0");
+                        AddAc("AccessType",    "0");
+                        AddAc("Status",        "0");
+                        AddAc("CreatedOn",     "GETDATE()");
+                        AddAc("UpdatedOn",     "GETDATE()");
+                        AddAc("CreatedDate",   "GETDATE()");
+                        AddAc("UpdatedDate",   "GETDATE()");
+                        AddAc("Route_ID",      "@RouteID");
+                        AddAc("CreatedBy",     "NULL");
+                        AddAc("UpdatedBy",     "NULL");
+                        foreach (var (cn, (dt, nu, isId, isComp)) in acCols)
+                        {
+                            if (isId || isComp || nu) continue;
+                            if (acICols.Any(c => c.Equals(cn, StringComparison.OrdinalIgnoreCase))) continue;
+                            acICols.Add(cn); acIVals.Add(TypeDefaultAc(cn));
+                        }
+                        var acInsertCols = string.Join(",", acICols.Select(c => $"[{c}]"));
+                        var acInsertVals = string.Join(",", acIVals);
+
+                        log.AppendLine($"ℹ  Company INSERT: {iCols.Count} cols | CoreDBServer: {cdbICols.Count} cols | AccountCompany: {acICols.Count} cols");
+
+                        var linkScript = $"""
+                            DECLARE @IndustryID    UNIQUEIDENTIFIER = NULL;
+                            DECLARE @CountryID     UNIQUEIDENTIFIER = NULL;
+                            DECLARE @CurrencyID    UNIQUEIDENTIFIER = NULL;
+                            DECLARE @TimeZoneID    UNIQUEIDENTIFIER = NULL;
+                            DECLARE @LanguageID    UNIQUEIDENTIFIER = NULL;
+                            DECLARE @CoreDBVersion DECIMAL(18,4)    = NULLIF(@coreVerParam, 0);
+
+                            -- ── Industry_ID ─────────────────────────────────────────────────────
+                            IF OBJECT_ID('BQECoreMaster.dbo.Industry','U') IS NOT NULL
+                                SET @IndustryID = (SELECT TOP 1 ID FROM BQECoreMaster.dbo.Industry
+                                    WHERE SICDescription = @coreIndustry OR SICDescription = 'Accountant'
+                                    ORDER BY CASE WHEN SICDescription = @coreIndustry THEN 1 ELSE 2 END);
+                            IF @IndustryID IS NULL AND EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='Industry' AND TABLE_SCHEMA='dbo')
+                                SET @IndustryID = (SELECT TOP 1 ID FROM dbo.Industry
+                                    WHERE Name = @coreIndustry OR Name = 'Accountant'
+                                    ORDER BY CASE WHEN Name = @coreIndustry THEN 1 ELSE 2 END);
+
+                            -- ── Country_ID ───────────────────────────────────────────────────────
+                            IF @CountryID IS NULL AND OBJECT_ID('BQECoreMaster.dbo.Country','U') IS NOT NULL
+                                SET @CountryID = (SELECT TOP 1 ID FROM BQECoreMaster.dbo.Country
+                                    WHERE Name IN ('United States of America','United States','USA','US') ORDER BY Name);
+                            IF @CountryID IS NULL AND OBJECT_ID('BQECoreMaster.dbo.CountryTable','U') IS NOT NULL
+                                SET @CountryID = (SELECT TOP 1 countryID FROM BQECoreMaster.dbo.CountryTable
+                                    WHERE countryName IN ('United States of America','United States','USA','US') ORDER BY countryName);
+                            IF @CountryID IS NULL AND EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='CountryTable' AND TABLE_SCHEMA='dbo')
+                                SET @CountryID = (SELECT TOP 1 countryID FROM dbo.CountryTable
+                                    WHERE countryName IN ('United States of America','United States','USA','US') ORDER BY countryName);
+                            IF @CountryID IS NULL AND EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='Country' AND TABLE_SCHEMA='dbo')
+                                SET @CountryID = (SELECT TOP 1 ID FROM dbo.Country
+                                    WHERE Name IN ('United States of America','United States','USA','US') ORDER BY Name);
+                            IF @CountryID IS NULL AND EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='CountryTable' AND TABLE_SCHEMA='dbo')
+                                SET @CountryID = (SELECT TOP 1 countryID FROM dbo.CountryTable ORDER BY countryName);
+                            IF @CountryID IS NULL AND EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='Country' AND TABLE_SCHEMA='dbo')
+                                SET @CountryID = (SELECT TOP 1 ID FROM dbo.Country ORDER BY Name);
+
+                            -- ── Currency_ID ──────────────────────────────────────────────────────
+                            IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='Currency' AND TABLE_SCHEMA='dbo')
+                                SET @CurrencyID = (SELECT TOP 1 ID FROM dbo.Currency
+                                    WHERE Code = @coreCurrency OR Symbol = @coreCurrency OR Name = @coreCurrency
+                                    ORDER BY CASE WHEN Code = @coreCurrency THEN 1 ELSE 2 END);
+                            IF @CurrencyID IS NULL AND EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='CurrencyInfo' AND TABLE_SCHEMA='dbo')
+                                SET @CurrencyID = (SELECT TOP 1 ID FROM dbo.CurrencyInfo
+                                    WHERE CurrencyCode = @coreCurrency OR CurrencySymbol = @coreCurrency
+                                    ORDER BY CASE WHEN CurrencyCode = @coreCurrency THEN 1 ELSE 2 END);
+                            IF @CurrencyID IS NULL AND OBJECT_ID('BQECoreMaster.dbo.Currency','U') IS NOT NULL
+                                SET @CurrencyID = (SELECT TOP 1 ID FROM BQECoreMaster.dbo.Currency WHERE Code = @coreCurrency);
+
+                            -- ── TimeZone_ID ──────────────────────────────────────────────────────
+                            IF LEN(@coreTz) > 0 AND EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='TimeZone' AND TABLE_SCHEMA='dbo')
+                                SET @TimeZoneID = (SELECT TOP 1 ID FROM dbo.TimeZone
+                                    WHERE Name = @coreTz OR TimeZoneId = @coreTz OR DisplayName LIKE '%' + @coreTz + '%');
+                            IF @TimeZoneID IS NULL AND EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='TimeZone' AND TABLE_SCHEMA='dbo')
+                                SET @TimeZoneID = (SELECT TOP 1 ID FROM dbo.TimeZone WHERE Name LIKE '%Eastern%' ORDER BY Name);
+
+                            -- ── Language_ID ──────────────────────────────────────────────────────
+                            IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='Language' AND TABLE_SCHEMA='dbo')
+                                SET @LanguageID = (SELECT TOP 1 ID FROM dbo.Language
+                                    WHERE Code = @coreLang OR Name = @coreLang
+                                    ORDER BY CASE WHEN Code = @coreLang THEN 1 ELSE 2 END);
+
+                            -- ── CoreDBVersion (BQECoreMaster fallback) ───────────────────────────
+                            IF @CoreDBVersion IS NULL AND OBJECT_ID('BQECoreMaster.dbo.UpdateQuery','U') IS NOT NULL
+                                SET @CoreDBVersion = (SELECT TOP 1 CoreVersion FROM BQECoreMaster.dbo.UpdateQuery ORDER BY CoreVersion DESC);
+
+                            DECLARE @AccountID UNIQUEIDENTIFIER = NULL;
+                            IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='Account' AND TABLE_SCHEMA='dbo')
+                            AND EXISTS (SELECT 1 FROM [dbo].[Account] WHERE Email = @restoreEmail)
+                                SET @AccountID = (SELECT TOP 1 ID FROM [dbo].[Account] WHERE Email = @restoreEmail);
+
+                            -- ── Company: INSERT if new, UPDATE if already exists ──────────────
+                            IF NOT EXISTS (SELECT 1 FROM [dbo].[Company] WHERE [DatabaseID] = @db)
+                                INSERT [dbo].[Company] ({insertColsSql}) VALUES ({insertValsSql});
+                            ELSE
+                                UPDATE [dbo].[Company] SET
+                                    {string.Join(",\n                                    ",
+                                        iCols.Zip(iVals, (c, v) => $"[{c}] = {v}")
+                                             .Where(x => !x.StartsWith("[ID]") && !x.StartsWith("[DatabaseID]")))}
+                                WHERE [DatabaseID] = @db;
+
+                            DECLARE @CompanyID UNIQUEIDENTIFIER =
+                                (SELECT DISTINCT TOP 1 ID FROM [dbo].[Company] WHERE [DatabaseID] = @db);
+
+                            -- ── CoreDBServer: INSERT or UPDATE ────────────────────────────────
+                            IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='CoreDBServer' AND TABLE_SCHEMA='dbo')
+                            BEGIN
+                                IF NOT EXISTS (SELECT 1 FROM [dbo].[CoreDBServer] WHERE ServerName = @server)
+                                BEGIN
+                                    IF ({cdbICols.Count}) > 0
+                                        INSERT INTO [dbo].[CoreDBServer] ({cdbInsertCols}) VALUES ({cdbInsertVals});
+                                END
+                                ELSE
+                                BEGIN
+                                    DECLARE @cdbUpdSQL NVARCHAR(MAX) = N'UPDATE [dbo].[CoreDBServer] SET [ServerName]=@srv';
+                                    IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CoreDBServer' AND COLUMN_NAME='IsActive'  AND TABLE_SCHEMA='dbo') SET @cdbUpdSQL=@cdbUpdSQL+N',[IsActive]=1';
+                                    IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CoreDBServer' AND COLUMN_NAME='IsEnabled' AND TABLE_SCHEMA='dbo') SET @cdbUpdSQL=@cdbUpdSQL+N',[IsEnabled]=1';
+                                    IF EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='CoreDBServer' AND COLUMN_NAME='UpdatedOn'  AND TABLE_SCHEMA='dbo') SET @cdbUpdSQL=@cdbUpdSQL+N',[UpdatedOn]=GETDATE()';
+                                    SET @cdbUpdSQL=@cdbUpdSQL+N' WHERE [ServerName]=@srv';
+                                    EXEC sp_executesql @cdbUpdSQL, N'@srv NVARCHAR(256)', @srv=@server;
+                                END
+                            END
+
+                            DECLARE @RouteID UNIQUEIDENTIFIER =
+                                (SELECT TOP 1 Route_ID FROM [dbo].[AccountCompany] WHERE Account_ID = @AccountID);
+                            IF @RouteID IS NULL AND EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='Route' AND TABLE_SCHEMA='dbo')
+                                SET @RouteID = (SELECT TOP 1 ID FROM [dbo].[Route]);
+
+                            -- ── AccountCompany: INSERT if missing, UPDATE if exists ────────────
+                            IF @AccountID IS NOT NULL
+                            BEGIN
+                                IF NOT EXISTS (SELECT 1 FROM [dbo].[AccountCompany]
+                                    WHERE Account_ID = @AccountID AND Company_ID = @CompanyID)
+                                BEGIN
+                                    IF ({acICols.Count}) > 0
+                                        INSERT [dbo].[AccountCompany] ({acInsertCols}) VALUES ({acInsertVals});
+                                END
+                                ELSE
+                                    UPDATE [dbo].[AccountCompany] SET
+                                        {string.Join(",\n                                        ",
+                                            acICols.Zip(acIVals, (c, v) => $"[{c}] = {v}")
+                                                   .Where(x => !x.StartsWith("[ID]") && !x.StartsWith("[Account_ID]") && !x.StartsWith("[Company_ID]")))}
+                                    WHERE Account_ID = @AccountID AND Company_ID = @CompanyID;
+                            END
+
+                            -- Promote to default if account has no other default company
+                            IF @AccountID IS NOT NULL
+                            AND NOT EXISTS (
+                                SELECT 1 FROM [dbo].[AccountCompany]
+                                WHERE Account_ID = @AccountID AND IsDefault = 1
+                                  AND Company_ID <> @CompanyID)
+                                UPDATE [dbo].[AccountCompany] SET IsDefault = 1
+                                WHERE Account_ID = @AccountID AND Company_ID = @CompanyID;
+                            """;
+
+                        await using var linkCmd =
+                            new Microsoft.Data.SqlClient.SqlCommand(linkScript, _hostConn);
+                        linkCmd.Parameters.AddWithValue("@db",            coreDb);
+                        linkCmd.Parameters.AddWithValue("@company",       newCompany);
+                        linkCmd.Parameters.AddWithValue("@server",        serverName);
+                        linkCmd.Parameters.AddWithValue("@restoreEmail",  restoreAcct ?? "");
+                        linkCmd.Parameters.AddWithValue("@dataFile",      dataFilePath);
+                        linkCmd.Parameters.AddWithValue("@logFile",       logFilePath);
+                        linkCmd.Parameters.AddWithValue("@corePhone",     corePhone);
+                        linkCmd.Parameters.AddWithValue("@coreAddress",   coreAddress);
+                        linkCmd.Parameters.AddWithValue("@coreCity",      coreCity);
+                        linkCmd.Parameters.AddWithValue("@coreState",     coreState);
+                        linkCmd.Parameters.AddWithValue("@coreZip",       coreZip);
+                        linkCmd.Parameters.AddWithValue("@coreWebsite",   coreWebsite);
+                        linkCmd.Parameters.AddWithValue("@coreCurrency",  coreCurrency);
+                        linkCmd.Parameters.AddWithValue("@coreTz",        coreTz);
+                        linkCmd.Parameters.AddWithValue("@coreLang",      coreLang);
+                        linkCmd.Parameters.AddWithValue("@coreIndustry",  coreIndustry);
+                        linkCmd.Parameters.Add("@coreVerParam", System.Data.SqlDbType.Decimal).Value = coreDbVersion;
+                        linkCmd.CommandTimeout = 30;
+                        await linkCmd.ExecuteNonQueryAsync();
+                        log.AppendLine($"✓  Registered [{coreDb}] as \"{newCompany}\" in Company + AccountCompany.");
+                    }
+                    else
+                    {
+                        // ── Generic fallback for non-Company registration tables ───────────
+                        var colCheckSql =
+                            "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, " +
+                            "  COLUMNPROPERTY(OBJECT_ID(c.TABLE_NAME), c.COLUMN_NAME, 'IsIdentity') AS IsIdentity, " +
+                            "  COLUMNPROPERTY(OBJECT_ID(c.TABLE_NAME), c.COLUMN_NAME, 'IsComputed')  AS IsComputed " +
+                            $"FROM INFORMATION_SCHEMA.COLUMNS c WHERE c.TABLE_NAME = '{hostRegTable}'";
+
+                        var colMeta = new Dictionary<string, (string Type, bool Nullable, bool IsIdentity, bool IsComputed)>(
+                            StringComparer.OrdinalIgnoreCase);
+                        await using (var colCmd = new Microsoft.Data.SqlClient.SqlCommand(colCheckSql, _hostConn))
+                        await using (var colRdr = await colCmd.ExecuteReaderAsync())
+                            while (await colRdr.ReadAsync())
+                            {
+                                var cn     = colRdr.GetString(0);
+                                var dt     = colRdr.GetString(1).ToLowerInvariant();
+                                var null_  = colRdr.GetString(2).Equals("YES", StringComparison.OrdinalIgnoreCase);
+                                var isId   = !colRdr.IsDBNull(3) && colRdr.GetInt32(3) == 1;
+                                var isComp = !colRdr.IsDBNull(4) && colRdr.GetInt32(4) == 1;
+                                colMeta[cn] = (dt, null_, isId, isComp);
+                            }
+
+                        bool HasCol(string n) => colMeta.ContainsKey(n);
+                        bool IsStr(string n)  => colMeta.TryGetValue(n, out var m)
+                                                 && m.Type is "varchar" or "nvarchar" or "char" or "nchar";
+                        bool IsGuidPk(string n) => colMeta.TryGetValue(n, out var m)
+                                                   && !m.Nullable && !m.IsIdentity && !m.IsComputed
+                                                   && m.Type == "uniqueidentifier"
+                                                   && string.Equals(n, "ID", StringComparison.OrdinalIgnoreCase);
+
+                        var dbNameCol  = hostDbNameCol ?? "DatabaseName";
+                        var insertCols = new List<string>();
+                        var insertVals = new List<string>();
+                        foreach (var (cn, _) in colMeta)
+                            if (IsGuidPk(cn)) { insertCols.Add(cn); insertVals.Add("NEWID()"); }
+                        insertCols.Add(dbNameCol); insertVals.Add("@db");
+                        if (hostCompanyCol != null && IsStr(hostCompanyCol))
+                        { insertCols.Add(hostCompanyCol); insertVals.Add("@company"); }
+                        if (HasCol("ServerName") && IsStr("ServerName"))
+                        { insertCols.Add("ServerName"); insertVals.Add("@server"); }
+                        if (HasCol("DataFileLocation") && IsStr("DataFileLocation"))
+                        { insertCols.Add("DataFileLocation"); insertVals.Add("@dataFile"); }
+                        if (HasCol("LogFileLocation") && IsStr("LogFileLocation"))
+                        { insertCols.Add("LogFileLocation"); insertVals.Add("@logFile"); }
+                        if (HasCol("IsActive"))    { insertCols.Add("IsActive");    insertVals.Add("1"); }
+                        if (HasCol("CreatedDate")) { insertCols.Add("CreatedDate"); insertVals.Add("GETDATE()"); }
+                        if (HasCol("DateCreated")) { insertCols.Add("DateCreated"); insertVals.Add("GETDATE()"); }
+
+                        var upsertSql =
+                            $"IF EXISTS (SELECT 1 FROM [dbo].[{hostRegTable}] WHERE [{dbNameCol}] = @db) " +
+                            $"  UPDATE [dbo].[{hostRegTable}] SET [{hostCompanyCol ?? dbNameCol}] = @company, [UpdatedOn] = GETDATE() WHERE [{dbNameCol}] = @db " +
+                            $"ELSE " +
+                            $"  INSERT INTO [dbo].[{hostRegTable}] ([{string.Join("],[", insertCols)}]) VALUES ({string.Join(",", insertVals)});";
+
+                        await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(upsertSql, _hostConn);
+                        cmd.Parameters.AddWithValue("@db",       coreDb);
+                        cmd.Parameters.AddWithValue("@company",  newCompany);
+                        cmd.Parameters.AddWithValue("@server",   serverName);
+                        cmd.Parameters.AddWithValue("@dataFile", coreDb);
+                        cmd.Parameters.AddWithValue("@logFile",  coreDb);
+                        await cmd.ExecuteNonQueryAsync();
+                        log.AppendLine($"✓  Registered/updated [{coreDb}] as \"{newCompany}\" in [{hostRegTable}].");
+                    }
+                }
+                else if (!string.IsNullOrEmpty(newCompany) && hostRegTable == null)
+                    log.AppendLine("⚠  Could not find a registration table in Host DB — skipped.");
+            }
+            catch (Exception ex)
+            {
+                var detail = ex.InnerException != null ? $"{ex.Message} → {ex.InnerException.Message}" : ex.Message;
+                throw new Exception($"Step 1 (Register in Host): {detail}", ex);
+            }
+
+            // 2. Set as default company in Host DB
+            try
+            {
+                if (setDefault && hostRegTable != null)
+                {
+                    var hasDefaultCol = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS " +
+                                        $"WHERE TABLE_NAME = '{hostRegTable}' AND COLUMN_NAME = 'IsDefault'";
+                    await using var chkDef = new Microsoft.Data.SqlClient.SqlCommand(hasDefaultCol, _hostConn);
+                    if (await chkDef.ExecuteScalarAsync() != null)
+                    {
+                        var dbNameCol2 = hostDbNameCol ?? "DatabaseName";
+                        // Scope the IsDefault=0 clear to AccountCompany rows for this account only.
+                        // For the Company registration table it's a company-level flag — safe to clear all.
+                        // Only promote this company to default if the account has no existing default.
+                        // Never wipe IsDefault on other companies — leave them untouched.
+                        var defaultSql = string.Equals(hostRegTable, "AccountCompany", StringComparison.OrdinalIgnoreCase)
+                            ? $"IF NOT EXISTS (" +
+                              $"  SELECT 1 FROM [dbo].[AccountCompany] ac2 " +
+                              $"  JOIN [dbo].[Company] co ON co.ID = ac2.Company_ID " +
+                              $"  WHERE ac2.Account_ID = (SELECT TOP 1 Account_ID FROM [dbo].[AccountCompany] ac3 " +
+                              $"    JOIN [dbo].[Company] co2 ON co2.ID = ac3.Company_ID WHERE co2.[{dbNameCol2}] = @db) " +
+                              $"  AND ac2.IsDefault = 1 AND co.[{dbNameCol2}] <> @db) " +
+                              $"  UPDATE [dbo].[AccountCompany] SET [IsDefault] = 1 " +
+                              $"  WHERE Company_ID = (SELECT TOP 1 ID FROM [dbo].[Company] WHERE [{dbNameCol2}] = @db);"
+                            : $"UPDATE [dbo].[{hostRegTable}] SET [IsDefault] = 1 WHERE [{dbNameCol2}] = @db;";
+                        await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(defaultSql, _hostConn);
+                        cmd.Parameters.AddWithValue("@db", coreDb);
+                        await cmd.ExecuteNonQueryAsync();
+                        log.AppendLine("✓  Set as Default Company.");
+                    }
+                }
+            }
+            catch (Exception ex) { throw new Exception($"Step 2 (Set Default): {ex.Message}", ex); }
+
+            // 2b. Activate the restore-account in Host DB (Account + AccountCompany)
+            // The Account row can be InActive if the backup was taken from a production DB
+            // or the account was deactivated. We always want the restore user to be Active.
+            try
+            {
+                if (!string.IsNullOrEmpty(restoreAcct) && _hostConn?.State == System.Data.ConnectionState.Open)
+                {
+                    // Discover what column carries the active/status flag on Account
+                    // Common names: IsActive (bit), Status (int: 1=Active), AccountStatus (int)
+                    var acctActiveSql = new System.Text.StringBuilder();
+
+                    // Account.IsActive / Account.Status / Account.AccountStatus
+                    var hasAcctIsActive = await new Microsoft.Data.SqlClient.SqlCommand(
+                        "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Account' AND COLUMN_NAME='IsActive' AND TABLE_SCHEMA='dbo'",
+                        _hostConn).ExecuteScalarAsync() != null;
+                    var hasAcctStatus = !hasAcctIsActive && await new Microsoft.Data.SqlClient.SqlCommand(
+                        "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Account' AND COLUMN_NAME='Status' AND TABLE_SCHEMA='dbo'",
+                        _hostConn).ExecuteScalarAsync() != null;
+
+                    if (hasAcctIsActive)
+                        acctActiveSql.Append("UPDATE [dbo].[Account] SET [IsActive]=1 WHERE [Email]=@email; ");
+                    else if (hasAcctStatus)
+                        acctActiveSql.Append("UPDATE [dbo].[Account] SET [Status]=1 WHERE [Email]=@email; ");
+
+                    // AccountCompany.UserStatus — UserStatus.Active = 0, InActive = 1
+                    // Set Active (0) only for the newly linked company; leave other companies untouched.
+                    var hasAcUserStatus = await new Microsoft.Data.SqlClient.SqlCommand(
+                        "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='AccountCompany' AND COLUMN_NAME='UserStatus' AND TABLE_SCHEMA='dbo'",
+                        _hostConn).ExecuteScalarAsync() != null;
+                    if (hasAcUserStatus)
+                        acctActiveSql.Append(
+                            "UPDATE [dbo].[AccountCompany] SET [UserStatus]=0 " +
+                            "WHERE [Account_ID] = (SELECT TOP 1 ID FROM [dbo].[Account] WHERE [Email]=@email) " +
+                            "  AND [Company_ID] = (SELECT TOP 1 ID FROM [dbo].[Company] WHERE [DatabaseID]=@db); ");
+
+                    if (acctActiveSql.Length > 0)
+                    {
+                        await using var actvCmd = new Microsoft.Data.SqlClient.SqlCommand(acctActiveSql.ToString(), _hostConn);
+                        actvCmd.Parameters.AddWithValue("@email", restoreAcct);
+                        actvCmd.Parameters.AddWithValue("@db",    coreDb);
+                        await actvCmd.ExecuteNonQueryAsync();
+                        log.AppendLine($"✓  Host DB Account activated for {restoreAcct}.");
+                    }
+                }
+            }
+            catch (Exception ex) { log.AppendLine($"⚠  Host DB Account activation skipped: {ex.Message}"); }
+
+            // ── Discover user table + email column in Core DB ─────────────────
+            // Same fixed-priority approach as CoreUtility — try known tables first.
+            string? userTable = null;
+            string? emailCol  = null;
+            {
+                var knownUserTables = new (string Table, string Col)[]
+                {
+                    ("Account",      "Email"),
+                    ("UserInfo",     "Email"),
+                    ("tblUser",      "EmailID"),
+                    ("CoreUserInfo", "Email"),
+                    ("AccountInfo",  "Email"),
+                    ("tblEmployee",  "Email"),
+                    ("Employee",     "Email"),
+                    ("user_table",   "actEmail"),
+                    ("AccountTable", "actEmail"),
+                    ("BQUsers",      "Email"),
+                };
+                foreach (var (tbl, col) in knownUserTables)
+                {
+                    var chk = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS " +
+                              $"WHERE TABLE_NAME = '{tbl}' AND COLUMN_NAME = '{col}' AND TABLE_SCHEMA = 'dbo'";
+                    await using var chkCmd = new Microsoft.Data.SqlClient.SqlCommand(chk, _coreConn);
+                    if (await chkCmd.ExecuteScalarAsync() != null)
+                    { userTable = tbl; emailCol = col; break; }
+                }
+            }
+
+            // Discover columns + data types in the user table
+            var userTableCols     = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var userTableStrCols  = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // varchar/nvarchar only
+            if (userTable != null)
+            {
+                var colsSql = $"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{userTable}'";
+                await using var cc = new Microsoft.Data.SqlClient.SqlCommand(colsSql, _coreConn);
+                await using var cr = await cc.ExecuteReaderAsync();
+                while (await cr.ReadAsync())
+                {
+                    var colName  = cr.GetString(0);
+                    var dataType = cr.GetString(1).ToLowerInvariant();
+                    userTableCols.Add(colName);
+                    if (dataType is "varchar" or "nvarchar" or "char" or "nchar" or "text" or "ntext")
+                        userTableStrCols.Add(colName);
+                }
+            }
+
+            // 3. Patch restore account email in Core DB
+            try
+            {
+            if (!string.IsNullOrEmpty(restoreAcct) && userTable != null && emailCol != null)
+            {
+                // Build WHERE clause from whichever admin flags exist
+                var adminWhere = new List<string>();
+                if (userTableCols.Contains("IsSysAdmin"))     adminWhere.Add("[IsSysAdmin] = 1");
+                if (userTableCols.Contains("IsAccountAdmin")) adminWhere.Add("[IsAccountAdmin] = 1");
+                if (userTableCols.Contains("IsFullAccess"))   adminWhere.Add("[IsFullAccess] = 1");
+                if (userTableCols.Contains("IsAdmin"))        adminWhere.Add("[IsAdmin] = 1");
+
+                var setCols = new List<string> { $"[{emailCol}] = @email" };
+                // Only include extra columns if they are string types — prevents smallint/int FK columns from receiving an email string
+                if (userTableStrCols.Contains("UserName"))  setCols.Add("[UserName] = @email");
+                if (userTableStrCols.Contains("LoginName")) setCols.Add("[LoginName] = @email");
+                // Always activate the user being patched
+                if (userTableCols.Contains("IsActive"))     setCols.Add("[IsActive] = 1");
+
+                // If no admin flags found, update all rows (new DB — no existing active user to filter by)
+                var whereClause = adminWhere.Count > 0
+                    ? string.Join(" OR ", adminWhere)
+                    : "1=1";
+
+                var emailSql = $"UPDATE [dbo].[{userTable}] SET {string.Join(", ", setCols)} WHERE {whereClause};";
+                await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(emailSql, _coreConn);
+                cmd.Parameters.AddWithValue("@email", restoreAcct);
+                int rows = await cmd.ExecuteNonQueryAsync();
+                log.AppendLine($"✓  Account email set to \"{restoreAcct}\" ({rows} user(s) in [{userTable}]).");
+            }
+            else if (!string.IsNullOrEmpty(restoreAcct) && userTable == null)
+                log.AppendLine("⚠  No user table found in Core DB — email patch skipped.");
+            }
+            catch (Exception ex) { throw new Exception($"Step 3 (Patch email): {ex.Message}", ex); }
+
+            // 4. Add / activate Core users
+            try
+            {
+                if (!string.IsNullOrEmpty(coreUsers) && userTable != null && emailCol != null)
+                {
+                    var insCols = new List<string> { $"[{emailCol}]" };
+                    var insVals = new List<string> { "@email" };
+                    if (userTableStrCols.Contains("UserName"))   { insCols.Add("[UserName]");   insVals.Add("@email"); }
+                    if (userTableCols.Contains("IsActive"))      { insCols.Add("[IsActive]");   insVals.Add("1"); }
+                    if (userTableCols.Contains("IsCoreUser"))    { insCols.Add("[IsCoreUser]"); insVals.Add("1"); }
+
+                    var updSets = new List<string>();
+                    if (userTableCols.Contains("IsActive"))   updSets.Add("[IsActive] = 1");
+                    if (userTableCols.Contains("IsCoreUser")) updSets.Add("[IsCoreUser] = 1");
+
+                    // Check if Employee table has HostAccount_ID (for the secondary activation below)
+                    bool hasHostAccIdCol = userTable.Equals("Employee", StringComparison.OrdinalIgnoreCase)
+                        && userTableCols.Contains("HostAccount_ID");
+
+                    foreach (var u in coreUsers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    {
+                        // Primary: upsert by email
+                        var upsertSql =
+                            $"IF NOT EXISTS (SELECT 1 FROM [dbo].[{userTable}] WHERE [{emailCol}] = @email) " +
+                            $"  INSERT INTO [dbo].[{userTable}] ({string.Join(",", insCols)}) VALUES ({string.Join(",", insVals)});" +
+                            (updSets.Count > 0
+                                ? $" ELSE UPDATE [dbo].[{userTable}] SET {string.Join(", ", updSets)} WHERE [{emailCol}] = @email;"
+                                : "");
+                        await using (var cmd = new Microsoft.Data.SqlClient.SqlCommand(upsertSql, _coreConn))
+                        {
+                            cmd.Parameters.AddWithValue("@email", u);
+                            await cmd.ExecuteNonQueryAsync();
+                        }
+
+                        // Secondary: also activate by HostAccount_ID — resolves mismatched email casing
+                        // or employees whose email column differs from the Host Account email.
+                        if (hasHostAccIdCol && updSets.Count > 0 && _hostConn?.State == System.Data.ConnectionState.Open)
+                        {
+                            try
+                            {
+                                // Look up the Account.ID for this email in Host DB
+                                Guid? hostAccId = null;
+                                await using (var haCmd = new Microsoft.Data.SqlClient.SqlCommand(
+                                    "SELECT TOP 1 ID FROM [dbo].[Account] WHERE Email = @email", _hostConn))
+                                {
+                                    haCmd.Parameters.AddWithValue("@email", u);
+                                    var haVal = await haCmd.ExecuteScalarAsync();
+                                    if (haVal is Guid hg) hostAccId = hg;
+                                }
+                                if (hostAccId.HasValue)
+                                {
+                                    var byHostIdSql =
+                                        $"UPDATE [dbo].[{userTable}] SET {string.Join(", ", updSets)} " +
+                                        $"WHERE [HostAccount_ID] = @haid";
+                                    await using var cmd2 = new Microsoft.Data.SqlClient.SqlCommand(byHostIdSql, _coreConn);
+                                    cmd2.Parameters.AddWithValue("@haid", hostAccId.Value);
+                                    int rows2 = await cmd2.ExecuteNonQueryAsync();
+                                    if (rows2 > 0)
+                                        log.AppendLine($"✓  Core user activated via HostAccount_ID ({rows2} row(s)): {u}");
+                                }
+                            }
+                            catch { /* non-fatal */ }
+                        }
+
+                        log.AppendLine($"✓  Core user activated: {u}");
+                    }
+                }
+            }
+            catch (Exception ex) { throw new Exception($"Step 4 (Add Core users): {ex.Message}", ex); }
+
+            // 5. Activate account users
+            try
+            {
+                if (!string.IsNullOrEmpty(acctUsers) && userTable != null && emailCol != null
+                    && userTableCols.Contains("IsActive"))
+                {
+                    var activateSql =
+                        $"UPDATE [dbo].[{userTable}] SET [IsActive] = 1 WHERE [{emailCol}] = @email;";
+                    foreach (var u in acctUsers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    {
+                        await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(activateSql, _coreConn);
+                        cmd.Parameters.AddWithValue("@email", u);
+                        await cmd.ExecuteNonQueryAsync();
+                        log.AppendLine($"✓  Account user activated: {u}");
+                    }
+                }
+            }
+            catch (Exception ex) { throw new Exception($"Step 5 (Activate users): {ex.Message}", ex); }
+
+            // 6. Sanitize — delete tokens, mask emails, clear PII
+            try
+            {
+                if (sanitize)
+                    await SanitizeCoreDb(_coreConn, log);
+            }
+            catch (Exception ex) { throw new Exception($"Step 6 (Sanitize): {ex.Message}", ex); }
+
+            SetActionBadge(ActionResultBadge, ActionResultText, true,
+                log.Length > 0 ? log.ToString().TrimEnd() : "✓  Done — no operations were needed.");
+        }
+        catch (Exception ex)
+        {
+            SetActionBadge(ActionResultBadge, ActionResultText, false, $"✗  {ex.Message}");
+        }
+    }
+}
