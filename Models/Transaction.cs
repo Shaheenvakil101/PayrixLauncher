@@ -422,16 +422,83 @@ public class Transaction : INotifyPropertyChanged
 
     public bool IsAch => Type == 7 || Type == 8;
 
-    public string StatusLabel => Status switch
+    /// <summary>
+    /// Full transaction status, derived from Type + Status + Returned + Refunded fields.
+    /// Priority: explicit reversal signals (returned date, refunded flag, type) take precedence
+    /// over the numeric Status code so the grid always reflects the true final state.
+    /// </summary>
+    public string StatusLabel
     {
-        1 => "Approved",
-        2 => "Declined",
-        3 => "Captured",
-        4 when IsAch => "Settled",
-        4 => "Error",
-        5 when IsAch => "Returned",
-        _ => $"Status {Status}"
-    };
+        get
+        {
+            bool isReturned = !string.IsNullOrWhiteSpace(Returned);
+            bool isRefunded = Refunded.HasValue && Refunded.Value > 0;
+            int  status     = Status ?? 0;
+
+            // --- Type-driven labels (most specific) ---
+            if (Type == 4) return isReturned ? "Refund Returned" : "Refunded";
+            if (Type == 5) return "Voided";
+            if (Type == 6) return status == 2 ? "Disbursement Failed" : "Disbursed";
+
+            if (Type == 7) // ACH Sale
+            {
+                if (isReturned) return "ACH Returned";
+                if (isRefunded) return "ACH Refunded";
+                if (status == 1) return "ACH Approved";
+                if (status == 2) return "ACH Declined";
+                if (status == 3) return "ACH Pending";   // submitted to bank, in transit
+                if (status == 4) return "ACH Settled";
+                if (status == 5) return "ACH Returned";
+                return status > 0 ? $"ACH – Status {status}" : "ACH Pending";
+            }
+
+            if (Type == 8) return "ACH Return";
+
+            // --- Returned / Refunded flags override status code for CC Sales ---
+            if (isReturned && isRefunded) return "Returned & Refunded";
+            if (isReturned)               return "Returned";
+            if (isRefunded)               return "Refunded";
+
+            // --- Standard CC status codes ---
+            if (status == 1) return "Approved";
+            if (status == 2) return "Declined";
+            if (status == 3) return "Captured";
+            if (status == 4) return "Settled";
+            if (status == 5) return "Held";
+            return status > 0 ? $"Status {status}" : "Pending";
+        }
+    }
+
+    /// <summary>Hex colour for the status badge — used in the DataGrid via StringToBrushConverter.</summary>
+    public string StatusColor
+    {
+        get
+        {
+            var lbl = StatusLabel;
+            // Green — success / settled
+            if (lbl == "Approved" || lbl == "ACH Approved")
+                return "#17A34A";
+            // Blue — captured / settled / disbursed
+            if (lbl == "Captured" || lbl == "Settled" || lbl == "ACH Settled" || lbl == "Disbursed")
+                return "#2c99f0";
+            // Amber — reversals / voids / in-transit
+            if (lbl == "Refunded"    || lbl == "ACH Refunded" ||
+                lbl == "Voided"      || lbl == "ACH Pending")
+                return "#D87706";
+            // Red — failures / returns / declines / errors
+            if (lbl == "Returned"          || lbl == "ACH Returned"     ||
+                lbl == "ACH Return"         || lbl == "Refund Returned"  ||
+                lbl == "Returned & Refunded"|| lbl == "Declined"         ||
+                lbl == "ACH Declined"       || lbl == "Error"            ||
+                lbl == "Disbursement Failed")
+                return "#DC2625";
+            // Purple — held
+            if (lbl == "Held")
+                return "#6D28D9";
+            // Gray — pending / unknown
+            return "#64748B";
+        }
+    }
 
     /// <summary>Extracts the invoice number from the "Invoice Number: XXXX" Order field.</summary>
     public string InvoiceNoFromOrder
@@ -472,38 +539,29 @@ public class Transaction : INotifyPropertyChanged
         get
         {
             var issues = new List<string>();
-            var fmt = System.Globalization.CultureInfo.GetCultureInfo("en-US");
+            var fmt    = System.Globalization.CultureInfo.GetCultureInfo("en-US");
 
             string Fmt(decimal v) => v.ToString("C2", fmt);
 
-            if (Items.Count > 0)
+            // Line items total doesn't match the transaction header amount.
+            // Only meaningful when items have been fetched — and only for sale/capture types.
+            if (Items.Count > 0 && (Type == 1 || Type == 3 || Type == 7))
             {
-                var itemsSum   = Items.Sum(i => i.Total ?? 0);
-                var headerAmt  = Approved ?? Total ?? 0;
+                var itemsSum  = Items.Sum(i => i.Total ?? 0);
+                var headerAmt = Approved ?? Total ?? 0;
                 if (itemsSum != headerAmt)
                 {
                     var diff = Math.Abs(itemsSum - headerAmt) / 100;
-                    issues.Add($"Line items sum ({Fmt(itemsSum / 100)}) ≠ Transaction approved ({Fmt(headerAmt / 100)}) — difference {Fmt(diff)}");
+                    issues.Add(
+                        $"Line items sum ({Fmt(itemsSum / 100)}) ≠ Transaction approved " +
+                        $"({Fmt(headerAmt / 100)}) — difference {Fmt(diff)}");
                 }
             }
 
-            if ((Approved ?? 0) != (Total ?? 0))
-                issues.Add($"Approved ({Fmt(ApprovedDollars)}) ≠ Total ({Fmt(TotalDollars)})");
-
-            if (OriginalApproved.HasValue && OriginalApproved.Value != (Approved ?? 0))
-                issues.Add($"OriginalApproved ({Fmt(OriginalApproved.Value / 100)}) ≠ Approved ({Fmt(ApprovedDollars)})");
-
-            if ((Refunded ?? 0) != 0)
-                issues.Add($"Transaction has been refunded (refunded={Refunded})");
-
+            // Declined but processor returned a non-zero approved amount — genuine concern.
             if (Status == 2 && (Approved ?? 0) > 0)
-                issues.Add($"Declined but Approved={Fmt(ApprovedDollars)} — money may have been taken");
+                issues.Add($"Declined but Approved = {Fmt(ApprovedDollars)} — possible double-charge risk");
 
-            if (Status == 4)
-                issues.Add($"Transaction has an Error status (status=4)");
-
-            if (SettledTotal.HasValue && SettledTotal.Value != (Approved ?? 0))
-                issues.Add($"SettledTotal ({Fmt(SettledTotal.Value / 100)}) ≠ Approved ({Fmt(ApprovedDollars)})");
 
             return issues;
         }

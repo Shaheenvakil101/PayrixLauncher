@@ -127,6 +127,19 @@ public class TransactionItem
         var n => $"{n}"
     };
 
+    /// <summary>Hex badge colour for the LineItemDetailIndicator — used by StringToBrushConverter in the DataGrid.</summary>
+    [JsonIgnore]
+    public string LineItemDetailIndicatorColor
+    {
+        get
+        {
+            int v = LineItemDetailIndicator ?? 0;
+            if (v == 2 || v == 3) return "#17A34A";   // Credit — green
+            if (v == 4 || v == 5) return "#2c99f0";   // Payment — Core blue
+            return "#64748B";                           // Normal (0/1) — gray
+        }
+    }
+
     public decimal PriceDollars => (Price ?? 0) / 100;
     public decimal TotalDollars => (Total ?? 0) / 100;
 

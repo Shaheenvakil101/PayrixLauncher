@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -21,7 +21,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly ObservableCollection<DisbursementEntry> _disbEntries = [];
     private readonly List<string> _rawJsons = [];
     private readonly ObservableCollection<WebhookTestCase> _testCases = [];
-    private readonly ObservableCollection<TransactionItem> _postTxnItems = [];
     private CancellationTokenSource? _testCts;
 
     // ── Sidebar navigation state ──────────────────────────────────────────────
@@ -70,9 +69,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         DisbEntryGrid.ItemsSource     = _disbEntries;
         DisbGrid.ItemsSource          = _disbRecords;
         DisbEntryDetailGrid.ItemsSource = _disbDetailEntries;
-        // Post Txn tab — seed with one sample row and bind the editable grid
-        _postTxnItems.Add(new TransactionItem { ItemSequenceNumber = 1, Description = "Professional Services", Quantity = 1, Price = 999, Total = 999, Um = "EA", ProductCode = "SVCHR" });
-        PostTxnItemsGrid.ItemsSource = _postTxnItems;
         LoadSettings();
         InitHttpClient();
         InitEnvironments();
@@ -566,7 +562,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
             if (_transactions.Count > 0)
             {
-                await StampDisbursementIdsAsync(service, _transactions, envLabel);
                 LoadAllItems();
             }
         }
@@ -679,7 +674,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
             if (_transactions.Count > 0)
             {
-                await StampDisbursementIdsAsync(service, _transactions, envLabel);
                 LoadAllItems();
             }
         }
@@ -795,7 +789,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
             if (_transactions.Count > 0)
             {
-                await StampDisbursementIdsAsync(service, _transactions, envLabel);
                 LoadAllItems();
             }
         }
@@ -890,7 +883,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
             if (_transactions.Count > 0)
             {
-                await StampDisbursementIdsAsync(service, _transactions, envLabel);
                 LoadAllItems();
             }
         }
@@ -2462,299 +2454,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     // ── Post Txn (Level 2/3 lineItemDetailIndicator) ────────────────────────
 
-    private async void PostTxnFetchTokensBtn_Click(object sender, RoutedEventArgs e)
-    {
-        var merchantId = PostTxnMerchantBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(merchantId))
-        {
-            PostTxnStatus.Text       = "❌  Enter a Merchant ID first, then click 🔍 to fetch tokens.";
-            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
-            return;
-        }
-
-        var apiKey = (IsSandbox ? SandboxApiKeyBox.Password : ProductionApiKeyBox.Password).Trim();
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            PostTxnStatus.Text       = "❌  Enter an API key in Settings first.";
-            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
-            return;
-        }
-
-        PostTxnFetchTokensBtn.IsEnabled = false;
-        PostTxnStatus.Text       = $"⏳  Fetching vault tokens for merchant {merchantId}…";
-        PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
-
-        try
-        {
-            var env     = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
-            var service = new PayrixService(apiKey, env);
-            var (tokens, _, error) = await service.GetTokensByMerchantAsync(merchantId);
-
-            if (error != null)
-            {
-                PostTxnStatus.Text       = $"❌  Token fetch failed: {error}";
-                PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
-                return;
-            }
-
-            if (tokens.Count == 0)
-            {
-                PostTxnStatus.Text       = "⚠  No vault tokens found for this merchant.";
-                PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(180, 130, 0));
-                return;
-            }
-
-            PostTxnTokenBox.Items.Clear();
-            foreach (var tok in tokens)
-            {
-                // Flag tokens whose merchant field doesn't match (fallback case — shouldn't happen after filter)
-                var mismatch = !string.IsNullOrEmpty(tok.Merchant) &&
-                               !string.Equals(tok.Merchant, merchantId, StringComparison.OrdinalIgnoreCase);
-                PostTxnTokenBox.Items.Add(new System.Windows.Controls.ComboBoxItem
-                {
-                    Content    = mismatch ? $"⚠ {tok.DropdownLabel}  [merchant mismatch]" : tok.DropdownLabel,
-                    Tag        = tok.Id,
-                    Foreground = mismatch
-                        ? new WpfBrush(WpfColor.FromRgb(220, 38, 38))
-                        : System.Windows.Media.Brushes.Transparent   // inherits
-                });
-            }
-            PostTxnTokenBox.SelectedIndex = 0;
-            PostTxnTokenBox.Text          = tokens[0].Id ?? "";
-
-            // Only count tokens that exactly match this merchant
-            int exactCount = tokens.Count(t =>
-                string.IsNullOrEmpty(t.Merchant) ||
-                string.Equals(t.Merchant, merchantId, StringComparison.OrdinalIgnoreCase));
-
-            PostTxnStatus.Text = exactCount == tokens.Count
-                ? $"✅  {tokens.Count} token(s) for merchant {merchantId} — auto-selected first token."
-                : $"⚠  {exactCount} of {tokens.Count} token(s) match this merchant — mismatched tokens are marked ⚠.";
-            PostTxnStatus.Foreground = exactCount == tokens.Count
-                ? new WpfBrush(WpfColor.FromRgb(22, 101, 52))
-                : new WpfBrush(WpfColor.FromRgb(180, 83, 9));
-        }
-        finally
-        {
-            PostTxnFetchTokensBtn.IsEnabled = true;
-        }
-    }
-
-    private void PostTxnTokenBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
-    {
-        if (PostTxnTokenBox.SelectedItem is System.Windows.Controls.ComboBoxItem item)
-            PostTxnTokenBox.Text = item.Tag?.ToString() ?? item.Content?.ToString() ?? "";
-    }
-
-    private async void PostTxnCreateTokenBtn_Click(object sender, RoutedEventArgs e)
-    {
-        var merchantId = PostTxnMerchantBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(merchantId))
-        {
-            PostTxnStatus.Text       = "❌  Enter a Merchant ID first — the token will be created under that merchant.";
-            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
-            return;
-        }
-
-        var apiKey = (IsSandbox ? SandboxApiKeyBox.Password : ProductionApiKeyBox.Password).Trim();
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            PostTxnStatus.Text       = "❌  Enter an API key in Settings first.";
-            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
-            return;
-        }
-
-        PostTxnCreateTokenBtn.IsEnabled = false;
-        PostTxnStatus.Text       = "⏳  Creating test customer + vault token (Visa 4111…1111, exp 12/25)…";
-        PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
-
-        try
-        {
-            var env     = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
-            var service = new PayrixService(apiKey, env);
-
-            // Step 1: POST /customers  Step 2: POST /tokens with that customer
-            var (tokenId, rawJson, error) = await service.CreateTestTokenAsync(
-                merchantId,
-                cardNumber:  "4111111111111111",
-                expiration:  "1225",
-                cvv:         "999",
-                cardHolder:  "Test Cardholder");
-
-            // Show raw response regardless
-            PostTxnResponseBox.Text        = rawJson;
-            PostTxnResponseCard.Visibility = System.Windows.Visibility.Visible;
-
-            if (error != null)
-            {
-                PostTxnStatus.Text       = $"❌  Token creation failed: {error}";
-                PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
-                return;
-            }
-
-            // Populate the token box with the fresh token — set Text directly;
-            // adding a ComboBoxItem and selecting it causes WPF editable ComboBox to
-            // display the Content label instead of the token ID string.
-            PostTxnTokenBox.Items.Clear();
-            PostTxnTokenBox.SelectedIndex = -1;
-            PostTxnTokenBox.Text          = tokenId ?? "";
-
-            PostTxnStatus.Text       = $"✅  Token created: {tokenId}";
-            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
-        }
-        finally
-        {
-            PostTxnCreateTokenBtn.IsEnabled = true;
-        }
-    }
-
-    private void PostTxnUseSelectedTxnBtn_Click(object sender, RoutedEventArgs e)
-    {
-        var txn = TxnGrid.SelectedItem as Transaction;
-        if (txn is null)
-        {
-            PostTxnStatus.Text       = "❌  No transaction selected — pick a row in the Transactions tab first.";
-            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(txn.Token))
-        {
-            PostTxnStatus.Text       = $"⚠  Selected transaction ({txn.Id}) has no Token field — it may have been posted without a vault token.";
-            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(180, 83, 9));
-            return;
-        }
-
-        // Set Token
-        PostTxnTokenBox.Items.Clear();
-        PostTxnTokenBox.Text = txn.Token;
-
-        // Also fill Merchant if blank or different
-        if (!string.IsNullOrWhiteSpace(txn.Merchant))
-            PostTxnMerchantBox.Text = txn.Merchant;
-
-        PostTxnStatus.Text       = $"✅  Token + Merchant copied from transaction {txn.Id}.";
-        PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
-    }
-
-    private void PostTxnAddItemBtn_Click(object sender, RoutedEventArgs e)
-    {
-        var seq = _postTxnItems.Count + 1;
-        _postTxnItems.Add(new TransactionItem { ItemSequenceNumber = seq, Quantity = 1 });
-    }
-
-    private void PostTxnRemoveItemBtn_Click(object sender, RoutedEventArgs e)
-    {
-        if (PostTxnItemsGrid.SelectedItem is TransactionItem selected)
-            _postTxnItems.Remove(selected);
-        else if (_postTxnItems.Count > 0)
-            _postTxnItems.RemoveAt(_postTxnItems.Count - 1);
-
-        // Re-sequence
-        for (int i = 0; i < _postTxnItems.Count; i++)
-            _postTxnItems[i].ItemSequenceNumber = i + 1;
-    }
-
-    private async void PostTxnBtn_Click(object sender, RoutedEventArgs e)
-    {
-        // Clear any stale status (e.g. from a previous ← txn click)
-        PostTxnStatus.Text       = "";
-        PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
-
-        var apiKey = IsSandbox
-            ? SandboxApiKeyBox.Password.Trim()
-            : ProductionApiKeyBox.Password.Trim();
-
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            PostTxnStatus.Text       = "❌  Enter an API key in Settings first.";
-            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
-            return;
-        }
-
-        var merchantId = PostTxnMerchantBox.Text.Trim();
-        var token      = PostTxnTokenBox.Text.Trim();
-
-        if (string.IsNullOrWhiteSpace(merchantId) || string.IsNullOrWhiteSpace(token))
-        {
-            PostTxnStatus.Text       = "❌  Merchant ID and Token are required.";
-            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
-            return;
-        }
-
-        if (!decimal.TryParse(PostTxnTotalBox.Text.Trim(), out var totalCents) || totalCents <= 0)
-        {
-            PostTxnStatus.Text       = "❌  Total must be a positive number of cents.";
-            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
-            return;
-        }
-
-        decimal.TryParse(PostTxnTaxBox.Text.Trim(), out var taxCents);
-
-        // Type: SelectedIndex 0=Sale(1), 1=Auth(2), 2=Capture(3)
-        var txnType = PostTxnTypeBox.SelectedIndex + 1;
-
-        // Origin: read Tag from selected ComboBoxItem (default 1 = API)
-        var originTag = (PostTxnOriginBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Tag?.ToString();
-        int txnOrigin = int.TryParse(originTag, out var o) ? o : 1;
-
-        var description = PostTxnDescBox.Text.Trim();
-        var order       = PostTxnOrderBox.Text.Trim();
-
-        var items = (IReadOnlyList<TransactionItem>)_postTxnItems;
-
-        // lineItemDetailIndicator is per-item — need at least one row
-        if (_postTxnItems.Count == 0)
-        {
-            PostTxnStatus.Text       = "❌  Add at least one line item (lineItemDetailIndicator is set per item).";
-            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
-            return;
-        }
-
-        PostTxnBtn.IsEnabled     = false;
-        PostTxnStatus.Text       = "⏳  Posting transaction…";
-        PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
-        PostTxnResponseCard.Visibility = System.Windows.Visibility.Collapsed;
-
-        try
-        {
-            var env     = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
-            var service = new PayrixService(apiKey, env);
-
-            var (txn, rawJson, error) = await service.CreateTransactionWithLineItemsAsync(
-                merchantId, token, totalCents, taxCents, txnType, txnOrigin,
-                string.IsNullOrEmpty(description) ? null : description,
-                string.IsNullOrEmpty(order)       ? null : order,
-                items);
-
-            // Show raw response
-            PostTxnResponseBox.Text            = rawJson;
-            PostTxnResponseCard.Visibility     = System.Windows.Visibility.Visible;
-
-            if (error != null)
-            {
-                PostTxnStatus.Text       = $"❌  {error}";
-                PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
-            }
-            else
-            {
-                var envLabel = IsSandbox ? "SANDBOX" : "PROD";
-                var indicators = string.Join(", ", items.Select((it, i) =>
-                    $"item{i + 1}:{it.LineItemDetailIndicator?.ToString() ?? "auto"}"));
-                PostTxnStatus.Text = $"✅  [{envLabel}] Transaction created — ID: {txn?.Id ?? "(none)"}  |  {items.Count} line item(s)  |  indicators: [{indicators}]";
-                PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
-            }
-        }
-        catch (Exception ex)
-        {
-            PostTxnStatus.Text       = $"❌  Exception: {ex.Message}";
-            PostTxnStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
-        }
-        finally
-        {
-            PostTxnBtn.IsEnabled = true;
-        }
-    }
 
     // ── Unified Webhook POST (dispatches by type dropdown) ───────────────────
 

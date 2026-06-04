@@ -17,6 +17,11 @@
         Background="{DynamicResource WindowBg}">
 
     <Window.Resources>
+
+        <!-- Converts a hex colour string (e.g. "#17A34A") to a SolidColorBrush.
+             Used by the Status badge column to drive background from StatusColor property. -->
+        <local:StringToBrushConverter x:Key="StringToBrushConverter"/>
+
         <!-- Implicit TextBlock — Apple SF Pro fallback, theme-aware foreground -->
         <Style TargetType="TextBlock">
             <Setter Property="Foreground" Value="{DynamicResource PrimaryText}"/>
@@ -1928,50 +1933,21 @@
                             <DataGridTextColumn Header="Gateway" Binding="{Binding Gateway}" Width="110"/>
                             <DataGridTextColumn Header="Payment Type" Binding="{Binding PaymentTypeLabel}" Width="110"/>
                             <DataGridTextColumn Header="Payment Method" Binding="{Binding PaymentMethodDisplay}" Width="160"/>
-                            <DataGridTemplateColumn Header="Status" Width="90">
+                            <DataGridTemplateColumn Header="Status" Width="130">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
-                                        <Border CornerRadius="4" Padding="6,2" HorizontalAlignment="Left">
-                                            <Border.Style>
-                                                <Style TargetType="Border">
-                                                    <Setter Property="Background" Value="#F1F5F9"/>
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding Status}" Value="1">
-                                                            <Setter Property="Background" Value="#DCFCE7"/>
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding Status}" Value="2">
-                                                            <Setter Property="Background" Value="#FEE2E2"/>
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding Status}" Value="3">
-                                                            <Setter Property="Background" Value="{DynamicResource InfoStripBlueBtnHover}"/>
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding Status}" Value="4">
-                                                            <Setter Property="Background" Value="#FEE2E2"/>
-                                                        </DataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </Border.Style>
-                                            <TextBlock Text="{Binding StatusLabel}" FontWeight="SemiBold" FontSize="11">
-                                                <TextBlock.Style>
-                                                    <Style TargetType="TextBlock">
-                                                        <Setter Property="Foreground" Value="#475569"/>
-                                                        <Style.Triggers>
-                                                            <DataTrigger Binding="{Binding Status}" Value="1">
-                                                                <Setter Property="Foreground" Value="#166534"/>
-                                                            </DataTrigger>
-                                                            <DataTrigger Binding="{Binding Status}" Value="2">
-                                                                <Setter Property="Foreground" Value="#991B1B"/>
-                                                            </DataTrigger>
-                                                            <DataTrigger Binding="{Binding Status}" Value="3">
-                                                                <Setter Property="Foreground" Value="#1E40AF"/>
-                                                            </DataTrigger>
-                                                            <DataTrigger Binding="{Binding Status}" Value="4">
-                                                                <Setter Property="Foreground" Value="#991B1B"/>
-                                                            </DataTrigger>
-                                                        </Style.Triggers>
-                                                    </Style>
-                                                </TextBlock.Style>
-                                            </TextBlock>
+                                        <!-- Badge colour driven by StatusColor property — covers
+                                             Approved / Declined / Captured / Refunded / Returned /
+                                             ACH Returned / Voided / Error / Held / Pending etc. -->
+                                        <Border CornerRadius="4" Padding="7,3" HorizontalAlignment="Left"
+                                                Margin="2,0">
+                                            <Border.Background>
+                                                <Binding Path="StatusColor"
+                                                         Converter="{StaticResource StringToBrushConverter}"/>
+                                            </Border.Background>
+                                            <TextBlock Text="{Binding StatusLabel}"
+                                                       FontWeight="SemiBold" FontSize="11"
+                                                       Foreground="White"/>
                                         </Border>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
@@ -2022,6 +1998,7 @@
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
@@ -2105,7 +2082,37 @@
                             <DataGridTextColumn Header="Commodity Code" Binding="{Binding CommodityCode}" Width="130"/>
                             <DataGridTextColumn Header="Product Code" Binding="{Binding ProductCode}" Width="150"/>
                             <DataGridTextColumn Header="Discount Treatment" Binding="{Binding DiscountTreatment}" Width="140"/>
-                            <DataGridTextColumn Header="Line Item Indicator" Binding="{Binding LineItemDetailIndicatorLabel}" Width="160"/>
+                            <DataGridTemplateColumn Header="Line Item Indicator" Width="170" SortMemberPath="LineItemDetailIndicator">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <Border CornerRadius="4" Padding="7,3"
+                                                HorizontalAlignment="Left" Margin="2,3">
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="Background" Value="#64748B"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding LineItemDetailIndicator}" Value="2">
+                                                            <Setter Property="Background" Value="#17A34A"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding LineItemDetailIndicator}" Value="3">
+                                                            <Setter Property="Background" Value="#17A34A"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding LineItemDetailIndicator}" Value="4">
+                                                            <Setter Property="Background" Value="#2c99f0"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding LineItemDetailIndicator}" Value="5">
+                                                            <Setter Property="Background" Value="#2c99f0"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <TextBlock Text="{Binding LineItemDetailIndicatorLabel}"
+                                                       FontWeight="SemiBold" FontSize="11"
+                                                       Foreground="White"/>
+                                        </Border>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
                         </DataGrid.Columns>
                     </DataGrid>
 
@@ -2209,409 +2216,52 @@
                         </Grid>
                     </Border>
 
+                    <!-- lineItemDetailIndicator reference banner -->
+                    <Border Grid.Row="3"
+                            Background="{DynamicResource InfoBannerBg}"
+                            BorderBrush="{DynamicResource InfoBannerBorder}"
+                            BorderThickness="0,1,0,0" Padding="14,10">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="16"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBlock Text="lineItemDetailIndicator" FontFamily="Consolas"
+                                           FontSize="11" FontWeight="Bold"
+                                           Foreground="{DynamicResource InfoBannerTitleFg}"
+                                           VerticalAlignment="Center"/>
+                                <TextBlock Text=" — Worldpay CNP per-item field"
+                                           FontSize="11" Foreground="{DynamicResource InfoBannerTextFg}"
+                                           VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                                <Border Background="#64748B" CornerRadius="4" Padding="6,2" Margin="0,0,6,0">
+                                    <TextBlock Text="0 — Normal" Foreground="White" FontSize="11" FontWeight="SemiBold"/>
+                                </Border>
+                                <Border Background="#64748B" CornerRadius="4" Padding="6,2" Margin="0,0,6,0">
+                                    <TextBlock Text="1 — Normal (last)" Foreground="White" FontSize="11" FontWeight="SemiBold"/>
+                                </Border>
+                                <Border Background="#17A34A" CornerRadius="4" Padding="6,2" Margin="0,0,6,0">
+                                    <TextBlock Text="2 — Credit" Foreground="White" FontSize="11" FontWeight="SemiBold"/>
+                                </Border>
+                                <Border Background="#17A34A" CornerRadius="4" Padding="6,2" Margin="0,0,6,0">
+                                    <TextBlock Text="3 — Credit (last)" Foreground="White" FontSize="11" FontWeight="SemiBold"/>
+                                </Border>
+                                <Border Background="#2c99f0" CornerRadius="4" Padding="6,2" Margin="0,0,6,0">
+                                    <TextBlock Text="4 — Payment" Foreground="White" FontSize="11" FontWeight="SemiBold"/>
+                                </Border>
+                                <Border Background="#2c99f0" CornerRadius="4" Padding="6,2">
+                                    <TextBlock Text="5 — Payment (last)" Foreground="White" FontSize="11" FontWeight="SemiBold"/>
+                                </Border>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
                     </Grid>
                 </TabItem>
 
-                <!-- Post Txn (Level 2/3) Tab -->
-                <TabItem Header="Post Txn">
-                    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="20,16,20,20">
-                        <StackPanel>
-
-                            <!-- Header card -->
-                            <Border Background="{DynamicResource CardBg}" BorderBrush="{DynamicResource CardBorder}"
-                                    BorderThickness="1" CornerRadius="8" Padding="16,12" Margin="0,0,0,12">
-                                <StackPanel>
-                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-                                        <TextBlock Text="📋  Post Transaction with Line Item Detail"
-                                                   FontSize="15" FontWeight="Bold"
-                                                   Foreground="{DynamicResource TitleFg}"/>
-                                        <Border Background="#1D4ED8" CornerRadius="4" Padding="6,2" Margin="10,0,0,0" VerticalAlignment="Center">
-                                            <TextBlock Text="lineItemDetailIndicator = 1"
-                                                       Foreground="White" FontSize="10" FontWeight="Bold"
-                                                       FontFamily="Consolas"/>
-                                        </Border>
-                                    </StackPanel>
-                                    <TextBlock Text="Submit a Payrix POST /txns with Level 2/Level 3 enhanced line item data. All amounts are in cents (e.g. 1099 = $10.99)."
-                                               FontSize="12" Foreground="{DynamicResource HintFg}" TextWrapping="Wrap"/>
-                                </StackPanel>
-                            </Border>
-
-                            <!-- Transaction fields card -->
-                            <Border Background="{DynamicResource CardBg}" BorderBrush="{DynamicResource CardBorder}"
-                                    BorderThickness="1" CornerRadius="8" Padding="16,12" Margin="0,0,0,12">
-                                <Grid>
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="8"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="8"/>
-                                        <RowDefinition Height="Auto"/>
-                                    </Grid.RowDefinitions>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto" MinWidth="80"/>
-                                        <ColumnDefinition Width="8"/>
-                                        <ColumnDefinition Width="220"/>
-                                        <ColumnDefinition Width="16"/>
-                                        <ColumnDefinition Width="Auto" MinWidth="80"/>
-                                        <ColumnDefinition Width="8"/>
-                                        <ColumnDefinition Width="180"/>
-                                        <ColumnDefinition Width="16"/>
-                                        <ColumnDefinition Width="Auto" MinWidth="80"/>
-                                        <ColumnDefinition Width="8"/>
-                                        <ColumnDefinition Width="100"/>
-                                        <ColumnDefinition Width="16"/>
-                                        <ColumnDefinition Width="Auto" MinWidth="80"/>
-                                        <ColumnDefinition Width="8"/>
-                                        <ColumnDefinition Width="100"/>
-                                    </Grid.ColumnDefinitions>
-
-                                    <!-- Row 0: Merchant, Token, Type, Amount -->
-                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Merchant ID:"
-                                               FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"
-                                               Foreground="{DynamicResource LabelFg}"/>
-                                    <TextBox x:Name="PostTxnMerchantBox" Grid.Row="0" Grid.Column="2"
-                                             Height="32" Padding="8,0" FontFamily="Consolas" FontSize="11"
-                                             VerticalContentAlignment="Center"
-                                             BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
-                                             ToolTip="Payrix merchant ID"/>
-
-                                    <TextBlock Grid.Row="0" Grid.Column="4" Text="Token:"
-                                               FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"
-                                               Foreground="{DynamicResource LabelFg}"
-                                               ToolTip="Payrix vault token — the ID of a stored card or ACH payment method&#x0a;(from GET /tokens for this merchant). Click 🔍 to fetch tokens."/>
-                                    <!-- Token ComboBox + fetch + create + txn shortcut -->
-                                    <Grid Grid.Row="0" Grid.Column="6">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="4"/>
-                                            <ColumnDefinition Width="Auto"/>
-                                            <ColumnDefinition Width="4"/>
-                                            <ColumnDefinition Width="Auto"/>
-                                            <ColumnDefinition Width="4"/>
-                                            <ColumnDefinition Width="Auto"/>
-                                        </Grid.ColumnDefinitions>
-                                        <ComboBox x:Name="PostTxnTokenBox" Grid.Column="0"
-                                                  IsEditable="True" Height="32" Padding="6,0"
-                                                  FontFamily="Consolas" FontSize="11"
-                                                  VerticalContentAlignment="Center"
-                                                  SelectionChanged="PostTxnTokenBox_SelectionChanged"
-                                                  BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
-                                                  ToolTip="Payrix vault token — the ID of a stored card/ACH payment method.&#x0a;Click 🔍 to fetch all tokens for the entered Merchant ID."/>
-                                        <Button x:Name="PostTxnFetchTokensBtn" Grid.Column="2"
-                                                Content="🔍" Height="32" Width="32" FontSize="13"
-                                                Cursor="Hand" BorderThickness="1"
-                                                BorderBrush="{DynamicResource InputBorder}"
-                                                Background="{DynamicResource CardBg}"
-                                                Foreground="{DynamicResource PrimaryText}"
-                                                Click="PostTxnFetchTokensBtn_Click"
-                                                ToolTip="Fetch all vault tokens for the Merchant ID above and populate the dropdown"/>
-                                        <Button x:Name="PostTxnUseSelectedTxnBtn" Grid.Column="4"
-                                                Content="← txn" Height="32" Padding="8,0" FontSize="11"
-                                                Cursor="Hand" BorderThickness="1"
-                                                BorderBrush="{DynamicResource InputBorder}"
-                                                Background="{DynamicResource CardBg}"
-                                                Foreground="{DynamicResource PrimaryText}"
-                                                Click="PostTxnUseSelectedTxnBtn_Click"
-                                                ToolTip="Copy Token + Merchant from the selected row in the Transactions grid&#x0a;This is the most reliable source — the token was used in a real transaction"/>
-                                        <Button x:Name="PostTxnCreateTokenBtn" Grid.Column="6"
-                                                Content="+ Token" Height="32" Padding="8,0" FontSize="11"
-                                                Cursor="Hand" BorderThickness="1"
-                                                BorderBrush="#34C759" Background="#F0FDF4" Foreground="#166534"
-                                                Click="PostTxnCreateTokenBtn_Click"
-                                                ToolTip="Create a new vault token using the sandbox test card&#x0a;Visa 4111111111111111 exp 12/25 CVV 999&#x0a;Requires Merchant ID to be filled in"/>
-                                    </Grid>
-
-                                    <TextBlock Grid.Row="0" Grid.Column="8" Text="Type:"
-                                               FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"
-                                               Foreground="{DynamicResource LabelFg}"/>
-                                    <ComboBox x:Name="PostTxnTypeBox" Grid.Row="0" Grid.Column="10"
-                                              Height="32" FontSize="12" VerticalContentAlignment="Center"
-                                              SelectedIndex="0">
-                                        <ComboBoxItem Content="1 — Sale"/>
-                                        <ComboBoxItem Content="2 — Authorize"/>
-                                        <ComboBoxItem Content="3 — Capture"/>
-                                    </ComboBox>
-
-                                    <TextBlock Grid.Row="0" Grid.Column="12" Text="Total (¢):"
-                                               FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"
-                                               Foreground="{DynamicResource LabelFg}"/>
-                                    <TextBox x:Name="PostTxnTotalBox" Grid.Row="0" Grid.Column="14"
-                                             Height="32" Padding="8,0" FontFamily="Consolas" FontSize="11"
-                                             VerticalContentAlignment="Center" Text="1099"
-                                             BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
-                                             ToolTip="Transaction total in cents (e.g. 1099 = $10.99)"/>
-
-                                    <!-- Row 2: Tax, Description, Order -->
-                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Tax (¢):"
-                                               FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"
-                                               Foreground="{DynamicResource LabelFg}"/>
-                                    <TextBox x:Name="PostTxnTaxBox" Grid.Row="2" Grid.Column="2"
-                                             Height="32" Padding="8,0" FontFamily="Consolas" FontSize="11"
-                                             VerticalContentAlignment="Center" Text="0"
-                                             BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
-                                             ToolTip="Tax amount in cents"/>
-
-                                    <TextBlock Grid.Row="2" Grid.Column="4" Text="Description:"
-                                               FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"
-                                               Foreground="{DynamicResource LabelFg}"/>
-                                    <TextBox x:Name="PostTxnDescBox" Grid.Row="2" Grid.Column="6"
-                                             Height="32" Padding="8,0" FontSize="12"
-                                             VerticalContentAlignment="Center"
-                                             BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
-                                             ToolTip="Optional transaction description"/>
-
-                                    <TextBlock Grid.Row="2" Grid.Column="8" Text="Order/Invoice:"
-                                               FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"
-                                               Foreground="{DynamicResource LabelFg}"/>
-                                    <TextBox x:Name="PostTxnOrderBox" Grid.Row="2" Grid.Column="10"
-                                             Height="32" Padding="8,0" FontFamily="Consolas" FontSize="11"
-                                             VerticalContentAlignment="Center"
-                                             BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
-                                             ToolTip="Optional order/invoice reference"/>
-
-                                    <TextBlock Grid.Row="2" Grid.Column="12" Text="Origin:"
-                                               FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"
-                                               Foreground="{DynamicResource LabelFg}"
-                                               ToolTip="Transaction origin — required by Payrix&#x0a;1=API  2=Virtual Terminal  3=Mobile  4=POS"/>
-                                    <ComboBox x:Name="PostTxnOriginBox" Grid.Row="2" Grid.Column="14"
-                                              Height="32" FontSize="12" VerticalContentAlignment="Center"
-                                              SelectedIndex="0"
-                                              ToolTip="1 = API (default for programmatic calls)&#x0a;2 = Virtual Terminal&#x0a;3 = Mobile&#x0a;4 = POS">
-                                        <ComboBoxItem Content="1 — API"               Tag="1"/>
-                                        <ComboBoxItem Content="2 — Virtual Terminal"  Tag="2"/>
-                                        <ComboBoxItem Content="3 — Mobile"            Tag="3"/>
-                                        <ComboBoxItem Content="4 — POS"               Tag="4"/>
-                                    </ComboBox>
-
-                                    <!-- Row 4: lineItemDetailIndicator info banner -->
-                                    <Border Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="15"
-                                            Background="{DynamicResource InfoBannerBg}"
-                                            BorderBrush="{DynamicResource InfoBannerBorder}"
-                                            BorderThickness="1" CornerRadius="6" Padding="10,7"
-                                            Margin="0,4,0,0">
-                                        <StackPanel>
-                                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-                                                <TextBlock Text="lineItemDetailIndicator" FontFamily="Consolas"
-                                                           FontSize="11" FontWeight="Bold"
-                                                           Foreground="{DynamicResource InfoBannerTitleFg}"
-                                                           VerticalAlignment="Center"/>
-                                                <TextBlock Text="  — set per line item in the grid below"
-                                                           FontSize="11" Foreground="{DynamicResource InfoBannerTextFg}"
-                                                           VerticalAlignment="Center"/>
-                                            </StackPanel>
-                                            <TextBlock FontSize="11" Foreground="{DynamicResource InfoBannerTextFg}"
-                                                       TextWrapping="Wrap">
-                                                <Run Text="0" Foreground="{DynamicResource InfoBannerNumFg}"/>
-                                                <Run Text=" Normal  " Foreground="{DynamicResource InfoBannerTextFg}"/>
-                                                <Run Text="1" Foreground="{DynamicResource InfoBannerNumFg}"/>
-                                                <Run Text=" Normal (last)  " Foreground="{DynamicResource InfoBannerTextFg}"/>
-                                                <Run Text="2" Foreground="{DynamicResource InfoBannerNumFg}"/>
-                                                <Run Text=" Credit  " Foreground="{DynamicResource InfoBannerTextFg}"/>
-                                                <Run Text="3" Foreground="{DynamicResource InfoBannerNumFg}"/>
-                                                <Run Text=" Credit (last)  " Foreground="{DynamicResource InfoBannerTextFg}"/>
-                                                <Run Text="4" Foreground="{DynamicResource InfoBannerNumFg}"/>
-                                                <Run Text=" Payment  " Foreground="{DynamicResource InfoBannerTextFg}"/>
-                                                <Run Text="5" Foreground="{DynamicResource InfoBannerNumFg}"/>
-                                                <Run Text=" Payment (last) — leave blank to auto-assign (last item → 1, others → 0)" Foreground="{DynamicResource InfoBannerTextFg}"/>
-                                            </TextBlock>
-                                        </StackPanel>
-                                    </Border>
-                                </Grid>
-                            </Border>
-
-                            <!-- Line items card -->
-                            <Border Background="{DynamicResource CardBg}" BorderBrush="{DynamicResource CardBorder}"
-                                    BorderThickness="1" CornerRadius="8" Padding="0,0,0,0" Margin="0,0,0,12"
-                                    ClipToBounds="True">
-                                <StackPanel>
-                                    <!-- Sub-header -->
-                                    <Border Background="{DynamicResource KpiHeaderBg}" Padding="14,8">
-                                        <Grid>
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="Auto"/>
-                                                <ColumnDefinition Width="8"/>
-                                                <ColumnDefinition Width="Auto"/>
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="Line Items  (prices in cents)"
-                                                       FontSize="12" FontWeight="Bold"
-                                                       Foreground="White" VerticalAlignment="Center"/>
-                                            <Button x:Name="PostTxnAddItemBtn" Grid.Column="1"
-                                                    Content="＋  Add Item" Height="28" Padding="10,0"
-                                                    FontSize="11" FontWeight="SemiBold" Cursor="Hand"
-                                                    BorderThickness="0" Background="#16A34A" Foreground="White"
-                                                    Click="PostTxnAddItemBtn_Click">
-                                                <Button.Template>
-                                                    <ControlTemplate TargetType="Button">
-                                                        <Border Background="{TemplateBinding Background}"
-                                                                CornerRadius="5" Padding="{TemplateBinding Padding}">
-                                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                                        </Border>
-                                                        <ControlTemplate.Triggers>
-                                                            <Trigger Property="IsMouseOver" Value="True">
-                                                                <Setter Property="Background" Value="#15803D"/>
-                                                            </Trigger>
-                                                        </ControlTemplate.Triggers>
-                                                    </ControlTemplate>
-                                                </Button.Template>
-                                            </Button>
-                                            <Button x:Name="PostTxnRemoveItemBtn" Grid.Column="3"
-                                                    Content="✕  Remove" Height="28" Padding="10,0"
-                                                    FontSize="11" FontWeight="SemiBold" Cursor="Hand"
-                                                    BorderThickness="0" Background="#DC2626" Foreground="White"
-                                                    Click="PostTxnRemoveItemBtn_Click">
-                                                <Button.Template>
-                                                    <ControlTemplate TargetType="Button">
-                                                        <Border Background="{TemplateBinding Background}"
-                                                                CornerRadius="5" Padding="{TemplateBinding Padding}">
-                                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                                        </Border>
-                                                        <ControlTemplate.Triggers>
-                                                            <Trigger Property="IsMouseOver" Value="True">
-                                                                <Setter Property="Background" Value="#B91C1C"/>
-                                                            </Trigger>
-                                                        </ControlTemplate.Triggers>
-                                                    </ControlTemplate>
-                                                </Button.Template>
-                                            </Button>
-                                        </Grid>
-                                    </Border>
-
-                                    <!-- Editable line items DataGrid -->
-                                    <DataGrid x:Name="PostTxnItemsGrid"
-                                              AutoGenerateColumns="False" IsReadOnly="False"
-                                              CanUserAddRows="False" CanUserDeleteRows="False"
-                                              CanUserResizeColumns="True" GridLinesVisibility="Horizontal"
-                                              AlternatingRowBackground="{DynamicResource GridAltRowBg}"
-                                              RowBackground="{DynamicResource GridRowBg}"
-                                              HeadersVisibility="Column" BorderThickness="0"
-                                              SelectionUnit="Cell" SelectionMode="Single"
-                                              HorizontalScrollBarVisibility="Auto"
-                                              VerticalScrollBarVisibility="Auto"
-                                              MaxHeight="260"
-                                              FontSize="12">
-                                        <DataGrid.ColumnHeaderStyle>
-                                            <Style TargetType="DataGridColumnHeader">
-                                                <Setter Property="Background" Value="{DynamicResource GridHeaderBg}"/>
-                                                <Setter Property="Foreground" Value="{DynamicResource GridHeaderFg}"/>
-                                                <Setter Property="FontWeight" Value="SemiBold"/>
-                                                <Setter Property="Padding" Value="8,6"/>
-                                                <Setter Property="BorderBrush" Value="{DynamicResource GridBorder}"/>
-                                                <Setter Property="BorderThickness" Value="0,0,1,1"/>
-                                            </Style>
-                                        </DataGrid.ColumnHeaderStyle>
-                                        <DataGrid.Columns>
-                                            <DataGridTextColumn Header="#"                  Binding="{Binding ItemSequenceNumber}"       Width="38"  IsReadOnly="True"/>
-                                            <DataGridTextColumn Header="Description"         Binding="{Binding Description}"              Width="160"/>
-                                            <DataGridTextColumn Header="Qty"                Binding="{Binding Quantity}"                 Width="50"/>
-                                            <DataGridTextColumn Header="Price (¢)"          Binding="{Binding Price}"                    Width="80"/>
-                                            <DataGridTextColumn Header="Total (¢)"          Binding="{Binding Total}"                    Width="80"/>
-                                            <DataGridTextColumn Header="Tax (¢)"            Binding="{Binding TaxAmount}"                Width="70"/>
-                                            <DataGridTextColumn Header="Tax Rate %"         Binding="{Binding TaxRate}"                  Width="80"/>
-                                            <DataGridTextColumn Header="Tax In Total"       Binding="{Binding TaxIncludedInTotal}"        Width="90"/>
-                                            <DataGridTextColumn Header="UM"                 Binding="{Binding Um}"                       Width="50"/>
-                                            <DataGridTextColumn Header="Product Code"       Binding="{Binding ProductCode}"              Width="110"/>
-                                            <DataGridTextColumn Header="Commodity"          Binding="{Binding CommodityCode}"            Width="100"/>
-                                            <DataGridTextColumn Header="Discount (¢)"       Binding="{Binding Discount}"                 Width="90"/>
-                                            <DataGridTemplateColumn Header="lineItemDetailIndicator (0–5)" Width="190">
-                                                <DataGridTemplateColumn.CellTemplate>
-                                                    <DataTemplate>
-                                                        <TextBlock Text="{Binding LineItemDetailIndicatorLabel}" Padding="4,2"/>
-                                                    </DataTemplate>
-                                                </DataGridTemplateColumn.CellTemplate>
-                                                <DataGridTemplateColumn.CellEditingTemplate>
-                                                    <DataTemplate>
-                                                        <!-- SelectedItem bound to string property — avoids int?/string type mismatch -->
-                                                        <ComboBox SelectedItem="{Binding LineItemDetailIndicatorStr, UpdateSourceTrigger=PropertyChanged}">
-                                                            <sys:String>0</sys:String>
-                                                            <sys:String>1</sys:String>
-                                                            <sys:String>2</sys:String>
-                                                            <sys:String>3</sys:String>
-                                                            <sys:String>4</sys:String>
-                                                            <sys:String>5</sys:String>
-                                                        </ComboBox>
-                                                    </DataTemplate>
-                                                </DataGridTemplateColumn.CellEditingTemplate>
-                                            </DataGridTemplateColumn>
-                                        </DataGrid.Columns>
-                                    </DataGrid>
-                                </StackPanel>
-                            </Border>
-
-                            <!-- POST button row -->
-                            <Border Background="{DynamicResource CardBg}" BorderBrush="{DynamicResource CardBorder}"
-                                    BorderThickness="1" CornerRadius="8" Padding="14,10" Margin="0,0,0,12">
-                                <Grid>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto"/>
-                                        <ColumnDefinition Width="12"/>
-                                        <ColumnDefinition Width="*"/>
-                                    </Grid.ColumnDefinitions>
-
-                                    <Button x:Name="PostTxnBtn" Grid.Column="0"
-                                            Content="⚡  POST /txns" Height="36" Padding="18,0"
-                                            FontWeight="Bold" FontSize="13" Cursor="Hand"
-                                            BorderThickness="0" Background="#1D4ED8" Foreground="White"
-                                            Click="PostTxnBtn_Click">
-                                        <Button.Template>
-                                            <ControlTemplate TargetType="Button">
-                                                <Border Background="{TemplateBinding Background}"
-                                                        CornerRadius="6" Padding="{TemplateBinding Padding}">
-                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                                </Border>
-                                                <ControlTemplate.Triggers>
-                                                    <Trigger Property="IsMouseOver" Value="True">
-                                                        <Setter Property="Background" Value="#1E40AF"/>
-                                                    </Trigger>
-                                                    <Trigger Property="IsEnabled" Value="False">
-                                                        <Setter Property="Background" Value="#93C5FD"/>
-                                                    </Trigger>
-                                                </ControlTemplate.Triggers>
-                                            </ControlTemplate>
-                                        </Button.Template>
-                                    </Button>
-
-                                    <TextBlock x:Name="PostTxnStatus" Grid.Column="2"
-                                               FontSize="12" VerticalAlignment="Center"
-                                               Foreground="{DynamicResource LabelFg}"
-                                               TextWrapping="Wrap"/>
-                                </Grid>
-                            </Border>
-
-                            <!-- Response card (shown after POST) -->
-                            <Border x:Name="PostTxnResponseCard"
-                                    Background="{DynamicResource CardBg}" BorderBrush="{DynamicResource CardBorder}"
-                                    BorderThickness="1" CornerRadius="8" Padding="14,10"
-                                    Visibility="Collapsed">
-                                <StackPanel>
-                                    <TextBlock Text="API Response" FontSize="12" FontWeight="Bold"
-                                               Foreground="{DynamicResource LabelFg}" Margin="0,0,0,6"/>
-                                    <Border Background="{DynamicResource CodeBg}" CornerRadius="4">
-                                        <TextBox x:Name="PostTxnResponseBox"
-                                                 IsReadOnly="True" TextWrapping="Wrap"
-                                                 FontFamily="Consolas" FontSize="11"
-                                                 Foreground="{DynamicResource CodeFg}"
-                                                 SelectionBrush="{DynamicResource CodeFg}" SelectionOpacity="0.3"
-                                                 BorderThickness="0" Padding="8,6"
-                                                 MaxHeight="200" VerticalScrollBarVisibility="Auto">
-                                            <!-- Strip the default TextBox template so it doesn't paint a white SystemColors.WindowBrush
-                                                 over the parent Border's CodeBg background. -->
-                                            <TextBox.Template>
-                                                <ControlTemplate TargetType="TextBox">
-                                                    <ScrollViewer x:Name="PART_ContentHost"
-                                                                  Background="Transparent"
-                                                                  Padding="{TemplateBinding Padding}"
-                                                                  VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"/>
-                                                </ControlTemplate>
-                                            </TextBox.Template>
-                                        </TextBox>
-                                    </Border>
-                                </StackPanel>
-                            </Border>
-
-                        </StackPanel>
-                    </ScrollViewer>
-                </TabItem>
 
                 <!-- Webhook Tests Tab -->
                 <TabItem Header="Webhook Tests">
