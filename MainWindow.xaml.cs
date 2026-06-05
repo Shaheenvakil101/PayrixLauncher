@@ -71,6 +71,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         DisbEntryDetailGrid.ItemsSource = _disbDetailEntries;
         LoadSettings();
         InitHttpClient();
+        InitSubscriptions();
         InitEnvironments();
         InitPerformanceTester();
         InitWebhookTests();   // must run AFTER LoadSettings so EntityCustomBox is populated
@@ -87,24 +88,49 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void LogoutBtn_Click(object sender, MouseButtonEventArgs e)
     {
+        var confirm = WpfMessageBox.Show(
+            $"Sign out of {SidebarUserName.Text}?\n\nUnsaved settings will be saved before signing out.",
+            "Sign Out",
+            System.Windows.MessageBoxButton.YesNo,
+            System.Windows.MessageBoxImage.Question);
+
+        if (confirm != System.Windows.MessageBoxResult.Yes) return;
+
         SaveSettings();
 
-        // Show login window again
+        // Clear any BQE Core session token on sign-out
+        var s = SettingsService.Load();
+        if (!string.IsNullOrEmpty(s.BqeJwtToken))
+        {
+            s.BqeJwtToken     = "";
+            s.BqeLoggedInUser = "";
+            SettingsService.Save(s);
+            UpdateSidebarBqeBadge("", false);
+        }
+
+        // Show login window — must re-authenticate to continue
         var login = new LoginWindow();
+        login.Owner = this;
         bool? result = login.ShowDialog();
 
         if (result == true)
         {
-            // Update sidebar with new user
+            // Update sidebar with the new signed-in user
             if (!string.IsNullOrEmpty(login.LoggedInName))
             {
                 SidebarUserName.Text   = login.LoggedInName;
-                SidebarAvatarText.Text = login.LoggedInName[0].ToString().ToUpper();
+                SidebarAvatarText.Text = char.ToUpper(login.LoggedInName[0]).ToString();
             }
             if (!string.IsNullOrEmpty(login.LoggedInEmail))
                 SidebarUserRole.Text = login.LoggedInEmail;
+
+            SetStatus($"Signed in as {login.LoggedInName}.");
         }
-        // If cancelled, stay on current session — do nothing
+        else
+        {
+            // User cancelled — close the app (no valid session)
+            System.Windows.Application.Current.Shutdown();
+        }
     }
 
     // ── Sidebar navigation ────────────────────────────────────────────────────
@@ -321,6 +347,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (!string.IsNullOrEmpty(s.SprintMainDbConnectionString))
             SprintMainDbBox.Text   = s.SprintMainDbConnectionString;
 
+        // BQE Core account sign-in
+        if (!string.IsNullOrEmpty(s.BqeCoreBaseUrl))  BqeCoreUrlBox.Text   = s.BqeCoreBaseUrl;
+        if (!string.IsNullOrEmpty(s.BqeLoginEmail))   BqeEmailBox.Text     = s.BqeLoginEmail;
+        if (!string.IsNullOrEmpty(s.BqeJwtToken))
+            ApplyBqeSignedInState(s.BqeLoggedInUser, s.BqeJwtToken);
+
         // Core DB Utility credentials
         if (!string.IsNullOrEmpty(s.CoreHostServer))   HostServerBox.Text   = s.CoreHostServer;
         if (!string.IsNullOrEmpty(s.CoreHostUser))     HostUserBox.Text     = s.CoreHostUser;
@@ -396,6 +428,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             WindowHeight     = Height,
             WindowLeft       = Left,
             WindowTop        = Top,
+            // BQE Core account
+            BqeCoreBaseUrl  = BqeCoreUrlBox.Text.Trim(),
+            BqeLoginEmail   = BqeEmailBox.Text.Trim(),
+            BqeJwtToken     = existing.BqeJwtToken,     // preserved — only updated by sign-in/out
+            BqeLoggedInUser = existing.BqeLoggedInUser,
             // Core DB Utility
             CoreHostServer   = HostServerBox.Text.Trim(),
             CoreHostUser     = HostUserBox.Text.Trim(),
@@ -405,6 +442,179 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             CoreDbUser       = CoreUserBox.Text.Trim(),
             CoreDbPassword   = CorePasswordBox.Password,
         });
+    }
+
+    // ── BQE Core Account sign-in ─────────────────────────────────────────────
+
+    private void BqeUrlPreset_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as System.Windows.Controls.Button)?.Tag is string url)
+            BqeCoreUrlBox.Text = url;
+    }
+
+    private string? _bqePendingEmail;
+    private string? _bqePendingPassword;
+
+    private async void BqeSignInBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var url      = BqeCoreUrlBox.Text.Trim();
+        var email    = BqeEmailBox.Text.Trim();
+        var password = BqePasswordBox.Password;
+
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            BqeSignInStatus.Text       = "❌  Enter the BQE Core base URL first.";
+            BqeSignInStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(password))
+        {
+            BqeSignInStatus.Text       = "❌  Email and password are required.";
+            BqeSignInStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        BqeSignInBtn.IsEnabled = false;
+        BqeSignInStatus.Text       = "⏳  Signing in to BQE Core…";
+        BqeSignInStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+
+        // Hide company picker if visible from a previous attempt
+        if (BqeCompanyPickerRow != null)
+            BqeCompanyPickerRow.Visibility = Visibility.Collapsed;
+
+        try
+        {
+            var result = await Services.BqeAuthService.LoginAsync(url, email, password);
+
+            // Always show raw log for debugging
+            if (!string.IsNullOrWhiteSpace(result.RawLog))
+            {
+                BqeRawResponseBox.Text        = result.RawLog;
+                BqeRawResponseCard.Visibility = Visibility.Visible;
+            }
+
+            // Multiple companies — show picker
+            if (result.Companies != null && result.Companies.Count > 0)
+            {
+                _bqePendingEmail    = email;
+                _bqePendingPassword = password;
+                BqeCompanyBox.ItemsSource   = result.Companies;
+                BqeCompanyBox.SelectedIndex = 0;
+                if (BqeCompanyPickerRow != null)
+                    BqeCompanyPickerRow.Visibility = Visibility.Visible;
+                BqeSignInStatus.Text       = $"⚠  {result.Companies.Count} companies found — pick one and click Select & Sign In.";
+                BqeSignInStatus.Foreground = new WpfBrush(WpfColor.FromRgb(180, 83, 9));
+                return;
+            }
+
+            if (!result.Success || result.Token == null)
+            {
+                BqeSignInStatus.Text       = $"❌  {result.Error ?? "Sign-in failed — no token returned."}";
+                BqeSignInStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+                return;
+            }
+
+            BqeRawResponseCard.Visibility = Visibility.Collapsed;   // hide log on success
+            PersistAndApplyBqeToken(url, email, result.UserName ?? email, result.Token);
+        }
+        finally
+        {
+            BqeSignInBtn.IsEnabled = true;
+        }
+    }
+
+    private async void BqeCompanySignInBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (BqeCompanyBox.SelectedItem is not Services.BqeCompany company) return;
+
+        var url      = BqeCoreUrlBox.Text.Trim();
+        var email    = _bqePendingEmail ?? BqeEmailBox.Text.Trim();
+        var password = _bqePendingPassword ?? "";
+
+        BqeSignInStatus.Text       = $"⏳  Signing in as {company.Name}…";
+        BqeSignInStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+
+        var result = await Services.BqeAuthService.LoginWithCompanyAsync(url, email, password, company.Id);
+
+        if (!string.IsNullOrWhiteSpace(result.RawLog))
+        {
+            BqeRawResponseBox.Text        = result.RawLog;
+            BqeRawResponseCard.Visibility = Visibility.Visible;
+        }
+
+        if (!result.Success || result.Token == null)
+        {
+            BqeSignInStatus.Text       = $"❌  {result.Error ?? "Sign-in failed."}";
+            BqeSignInStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        BqeRawResponseCard.Visibility = Visibility.Collapsed;
+
+        if (BqeCompanyPickerRow != null)
+            BqeCompanyPickerRow.Visibility = Visibility.Collapsed;
+
+        PersistAndApplyBqeToken(url, email, result.UserName ?? email, result.Token!);
+    }
+
+    private void PersistAndApplyBqeToken(string url, string email, string userName, string token)
+    {
+        var s = Services.SettingsService.Load();
+        s.BqeJwtToken     = token;
+        s.BqeLoggedInUser = userName;
+        s.BqeCoreBaseUrl  = url;
+        s.BqeLoginEmail   = email;
+        Services.SettingsService.Save(s);
+
+        BqePasswordBox.Clear();
+        _bqePendingPassword = null;
+        ApplyBqeSignedInState(userName, token);
+
+        BqeSignInStatus.Text       = "✅  Signed in successfully.";
+        BqeSignInStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+    }
+
+    private void BqeSignOutBtn_Click(object sender, RoutedEventArgs e)
+    {
+        // Clear stored token
+        var s = Services.SettingsService.Load();
+        s.BqeJwtToken     = "";
+        s.BqeLoggedInUser = "";
+        Services.SettingsService.Save(s);
+
+        BqeSignedInBanner.Visibility = Visibility.Collapsed;
+        BqeSignInStatus.Text         = "Signed out.";
+        BqeSignInStatus.Foreground   = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+
+        // Update sidebar user badge
+        UpdateSidebarBqeBadge("", false);
+    }
+
+    private void ApplyBqeSignedInState(string userName, string? token)
+    {
+        BqeSignedInBanner.Visibility = Visibility.Visible;
+        BqeSignedInUserText.Text     = userName;
+        var preview = token?.Length > 40 ? token[..40] + "…" : (token ?? "");
+        BqeTokenPreviewText.Text     = $"Token: {preview}";
+        UpdateSidebarBqeBadge(userName, true);
+    }
+
+    private void UpdateSidebarBqeBadge(string userName, bool signedIn)
+    {
+        if (SidebarBqeBadge == null) return;
+        SidebarBqeBadge.Visibility = signedIn ? Visibility.Visible : Visibility.Collapsed;
+        if (SidebarBqeUserText != null)
+            SidebarBqeUserText.Text = userName;
+    }
+
+    /// <summary>Exposes the stored JWT for use by other tabs (HTTP Client, Webhook Tests).</summary>
+    public string? StoredBqeJwt
+    {
+        get
+        {
+            var s = Services.SettingsService.Load();
+            return string.IsNullOrEmpty(s.BqeJwtToken) ? null : s.BqeJwtToken;
+        }
     }
 
     // ── Environment toggle ────────────────────────────────────────────────────
@@ -1460,6 +1670,252 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             ItemsMatchIcon.Visibility    = Visibility.Collapsed;
             ItemsMismatchIcon.Visibility = Visibility.Collapsed;
         }
+    }
+
+    // ── Subscriptions tab ─────────────────────────────────────────────────────
+
+    private readonly System.Collections.ObjectModel.ObservableCollection<Models.UserSubscribePackage>
+        _subscriptions = [];
+
+    private void InitSubscriptions()
+    {
+        SubscriptionsGrid.ItemsSource = _subscriptions;
+    }
+
+    private async void SubFetchBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var companyIdStr = SubCompanyIdBox.Text.Trim();
+        if (!Guid.TryParse(companyIdStr, out var companyId))
+        {
+            SubStatusText.Text       = "❌  Enter a valid Company GUID.";
+            SubStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        // Require BQE Core sign-in
+        var settings = Services.SettingsService.Load();
+        if (string.IsNullOrEmpty(settings.BqeJwtToken))
+        {
+            SubStatusText.Text       = "❌  Sign in to BQE Core first (Settings tab → BQE Core Account).";
+            SubStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        SubFetchBtn.IsEnabled    = false;
+        SubStatusText.Text       = "⏳  Fetching subscriptions…";
+        SubStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+        _subscriptions.Clear();
+        SubChangeExpiryCard.Visibility = Visibility.Collapsed;
+
+        try
+        {
+            var baseUrl = settings.BqeCoreBaseUrl;
+            var token   = settings.BqeJwtToken;
+
+            var (active, errA) = await Services.BqeSubscriptionService
+                .GetSubscriptionsAsync(baseUrl, token, companyId);
+
+            if (errA != null && active.Count == 0)
+            {
+                SubStatusText.Text       = $"❌  {errA}";
+                SubStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+                return;
+            }
+
+            foreach (var p in active) _subscriptions.Add(p);
+
+            // Also fetch inactive if checkbox is checked
+            if (SubShowInactiveChk.IsChecked == true)
+            {
+                var (inactive, _) = await Services.BqeSubscriptionService
+                    .GetInactiveSubscriptionsAsync(baseUrl, token, companyId);
+                foreach (var p in inactive) _subscriptions.Add(p);
+            }
+
+            SubCountText.Text        = $"{_subscriptions.Count} subscription(s)";
+            SubChangeExpiryBtn.IsEnabled = false;
+            SubStatusText.Text       = _subscriptions.Count > 0
+                ? $"✅  Loaded {_subscriptions.Count} subscription(s)."
+                : "ℹ  No subscriptions found for this company.";
+            SubStatusText.Foreground = new WpfBrush(
+                _subscriptions.Count > 0
+                    ? WpfColor.FromRgb(22, 101, 52)
+                    : WpfColor.FromRgb(107, 114, 128));
+        }
+        finally
+        {
+            SubFetchBtn.IsEnabled = true;
+        }
+    }
+
+    private void SubscriptionsGrid_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        var pkg = SubscriptionsGrid.SelectedItem as Models.UserSubscribePackage;
+        SubChangeExpiryBtn.IsEnabled = pkg != null;
+
+        if (pkg != null)
+        {
+            // Pre-fill expiry picker
+            if (DateTime.TryParse(pkg.ExpiresOn, out var d))
+                SubNewExpiryPicker.SelectedDate = d;
+            SubAutoRenewChk.IsChecked = pkg.AutoRenew;
+        }
+    }
+
+    private void SubChangeExpiryBtn_Click(object sender, RoutedEventArgs e)
+    {
+        SubChangeExpiryCard.Visibility = Visibility.Visible;
+        SubChangeExpiryStatus.Text     = "";
+    }
+
+    private async void SubSaveExpiryBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var pkg = SubscriptionsGrid.SelectedItem as Models.UserSubscribePackage;
+        if (pkg == null) return;
+
+        if (SubNewExpiryPicker.SelectedDate == null)
+        {
+            SubChangeExpiryStatus.Text       = "❌  Select a new expiry date.";
+            SubChangeExpiryStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        var settings = Services.SettingsService.Load();
+        if (!Guid.TryParse(SubCompanyIdBox.Text.Trim(), out var companyId)) return;
+
+        SubSaveExpiryBtn.IsEnabled       = false;
+        SubChangeExpiryStatus.Text       = "⏳  Saving…";
+        SubChangeExpiryStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+
+        try
+        {
+            var (ok, err) = await Services.BqeSubscriptionService.ChangeExpiryDateAsync(
+                settings.BqeCoreBaseUrl, settings.BqeJwtToken,
+                companyId, pkg.Id,
+                SubNewExpiryPicker.SelectedDate.Value,
+                SubAutoRenewChk.IsChecked == true);
+
+            if (!ok)
+            {
+                SubChangeExpiryStatus.Text       = $"❌  {err}";
+                SubChangeExpiryStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+                return;
+            }
+
+            // Update local model
+            pkg.ExpiresOn  = SubNewExpiryPicker.SelectedDate.Value.ToString("o");
+            pkg.AutoRenew  = SubAutoRenewChk.IsChecked == true;
+            SubscriptionsGrid.Items.Refresh();
+
+            SubChangeExpiryStatus.Text       = $"✅  Expiry updated to {SubNewExpiryPicker.SelectedDate.Value:dd MMM yyyy}.";
+            SubChangeExpiryStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+        }
+        finally
+        {
+            SubSaveExpiryBtn.IsEnabled = true;
+        }
+    }
+
+    // ── Fix Discrepancy ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Called from the 🔧 Fix Discrepancy button inside the Transactions grid Discrepancy column.
+    /// Selects the row, navigates to Line Items tab, loads items if needed, then runs the fix.
+    /// </summary>
+    private async void TxnGridFixDiscrepancyBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as System.Windows.Controls.Button)?.Tag is not Transaction txn) return;
+
+        // Scroll the row into view without changing SelectionUnit
+        TxnGrid.ScrollIntoView(txn);
+
+        // Load items if not yet fetched
+        if (txn.Items.Count == 0 && txn.Id is not null)
+        {
+            var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+            if (!string.IsNullOrEmpty(apiKey))
+            {
+                SetStatus($"Loading items for {txn.Id}…");
+                var env     = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
+                var service = new PayrixService(apiKey, env);
+                var items   = await service.GetTransactionItemsAsync(txn.Id);
+                foreach (var item in items) txn.Items.Add(item);
+            }
+        }
+
+        // Switch to Line Items tab (index 2) and load items into the grid
+        MainTabControl.SelectedIndex = 2;
+        _ = LoadItemsForTransactionAsync(txn);
+
+        // Brief delay to let the tab switch and grid populate, then run fix
+        await Task.Delay(120);
+        FixDiscrepancyBtn_Click(sender, e);
+    }
+
+    private void FixDiscrepancyBtn_Click(object sender, RoutedEventArgs e)
+    {
+        FixDiscrepancyStatus.Text = "";
+
+        if (_selectedTransaction is null || _items.Count == 0)
+        {
+            FixDiscrepancyStatus.Text       = "Select a transaction first.";
+            FixDiscrepancyStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        // Target = Approved amount in cents (authoritative source)
+        var targetCents = _selectedTransaction.Approved ?? _selectedTransaction.Total ?? 0;
+        var currentSum  = _items.Sum(i => i.Total ?? 0);
+        var diff        = targetCents - currentSum;   // positive = items under, negative = items over
+
+        if (diff == 0)
+        {
+            FixDiscrepancyStatus.Text       = "✓ Already balanced.";
+            FixDiscrepancyStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+            return;
+        }
+
+        // Strategy: adjust the last item's Total (and Price if single-item) by the difference
+        var lastItem = _items[_items.Count - 1];
+        var oldTotal = lastItem.Total ?? 0;
+        var newTotal = oldTotal + diff;
+
+        if (newTotal < 0)
+        {
+            FixDiscrepancyStatus.Text =
+                $"❌ Cannot fix — adjusting last item would make Total negative ({newTotal / 100m:C2}).";
+            FixDiscrepancyStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        lastItem.Total = newTotal;
+
+        // If it's the only item, also align Price to Total
+        if (_items.Count == 1 && (lastItem.Quantity ?? 1) == 1)
+            lastItem.Price = newTotal;
+
+        // Sync back to the transaction's Items list
+        if (_selectedTransaction is not null)
+        {
+            var txnItem = _selectedTransaction.Items
+                .FirstOrDefault(i => i.Id == lastItem.Id);
+            if (txnItem != null)
+            {
+                txnItem.Total = newTotal;
+                if (_items.Count == 1 && (txnItem.Quantity ?? 1) == 1)
+                    txnItem.Price = newTotal;
+            }
+        }
+
+        // Refresh grid + summary
+        ItemsGrid.Items.Refresh();
+        UpdateItemsSummary();
+
+        var diffDollars = Math.Abs(diff) / 100m;
+        var direction   = diff > 0 ? "increased" : "decreased";
+        FixDiscrepancyStatus.Text =
+            $"✅ Fixed — last item Total {direction} by {diffDollars:C2}  (was {oldTotal / 100m:C2} → now {newTotal / 100m:C2})";
+        FixDiscrepancyStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
     }
 
     private void SetExportEnabled(bool enabled)
@@ -4270,7 +4726,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     // Collections store
     private readonly System.Collections.ObjectModel.ObservableCollection<Models.HttpCollection> _collections = [];
-    private Models.HttpCollection? _activeCollection;
+    private Models.HttpCollection? _activeCollection;   // reserved for future collection switching
 
     private void InitHttpClient()
     {

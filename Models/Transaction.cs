@@ -320,6 +320,26 @@ public class Transaction : INotifyPropertyChanged
     [JsonPropertyName("gateway")]
     public string? Gateway { get; set; }
 
+    /// <summary>
+    /// Human-readable gateway name. Uses the raw Gateway field when present;
+    /// falls back to deriving from PaymentType/Type when the API omits it.
+    /// </summary>
+    [JsonIgnore]
+    public string GatewayDisplay
+    {
+        get
+        {
+            if (!string.IsNullOrWhiteSpace(Gateway)) return Gateway;
+            // Derive from payment type
+            var pt = PaymentType?.ToLowerInvariant() ?? "";
+            if (pt == "ach" || pt == "echeck" || Type == 7 || Type == 8) return "ACH / eCheck";
+            if (pt == "creditcard" || pt == "debitcard") return "Card";
+            // Fall back to platform
+            if (!string.IsNullOrWhiteSpace(Platform)) return Platform;
+            return "—";
+        }
+    }
+
     public string PaymentTypeLabel
     {
         get

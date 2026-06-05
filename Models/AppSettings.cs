@@ -45,6 +45,12 @@ public class AppSettings
     public string SprintMainDbConnectionString        { get; set; } = "";
     public string ProductionMainDbConnectionString    { get; set; } = "";
 
+    // BQE Core account sign-in (JWT for API calls)
+    public string BqeCoreBaseUrl    { get; set; } = "";   // e.g. https://local.bqecore.com:8443
+    public string BqeLoginEmail     { get; set; } = "";
+    public string BqeJwtToken       { get; set; } = "";   // stored after successful sign-in
+    public string BqeLoggedInUser   { get; set; } = "";   // display name
+
     // OAuth client IDs (register apps at console.cloud.google.com / portal.azure.com)
     public string GoogleClientId     { get; set; } = "";
     public string GoogleClientSecret { get; set; } = "";

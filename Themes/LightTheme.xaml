@@ -2,197 +2,197 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!-- ═══════════════════════════════════════════════════════════════════
-         BQE CORE — EXACT LIGHT THEME
-         Primary #2c99f0 · Dark #296598 · BG #F9FAFC · Text #1E293B
-         Font: Open Sans / Inter · Radius: 8px buttons / 5px components
-         Source: BQECoreWebApp/css/themes/light-theme-variables.css
+         WINDOWS 11 FLUENT DESIGN — LIGHT THEME
+         Mica #F3F3F3 · Cards #FFFFFF · Accent #0078D4
+         Font: Segoe UI Variable · Radius: 4px controls / 8px cards
          ═══════════════════════════════════════════════════════════════════ -->
 
-    <SolidColorBrush x:Key="WindowBg"           Color="#F9FAFC"/>
+    <SolidColorBrush x:Key="WindowBg"           Color="#F3F3F3"/>
 
-    <!-- ── Sidebar — dark left nav (matches Core screenshot) ─────────────── -->
-    <SolidColorBrush x:Key="SidebarBg"          Color="#1E2533"/>
-    <SolidColorBrush x:Key="SidebarBorder"      Color="#2A3347"/>
-    <SolidColorBrush x:Key="SidebarNavFg"       Color="#94A3B8"/>
+    <!-- ── Sidebar (NavigationView pane — slightly tinted Mica) ──────────── -->
+    <SolidColorBrush x:Key="SidebarBg"          Color="#EBEBEB"/>
+    <SolidColorBrush x:Key="SidebarBorder"      Color="#E0E0E0"/>
+    <SolidColorBrush x:Key="SidebarNavFg"       Color="#666666"/>
 
-    <!-- ── Cards ─────────────────────────────────────────────────────────── -->
+    <!-- ── Cards / surfaces ──────────────────────────────────────────────── -->
     <SolidColorBrush x:Key="CardBg"             Color="#FFFFFF"/>
-    <SolidColorBrush x:Key="CardBorder"         Color="#D3DAE1"/>
+    <SolidColorBrush x:Key="CardBorder"         Color="#E0E0E0"/>
     <Color            x:Key="CardShadowColor"   >#000000</Color>
 
     <!-- ── Text ──────────────────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="PrimaryText"        Color="#1E293B"/>
-    <SolidColorBrush x:Key="SubText"            Color="#64748B"/>
-    <SolidColorBrush x:Key="MutedText"          Color="#94A3B8"/>
+    <SolidColorBrush x:Key="PrimaryText"        Color="#1A1A1A"/>
+    <SolidColorBrush x:Key="SubText"            Color="#666666"/>
+    <SolidColorBrush x:Key="MutedText"          Color="#999999"/>
 
     <!-- ── DataGrid ──────────────────────────────────────────────────────── -->
     <SolidColorBrush x:Key="GridRowBg"          Color="#FFFFFF"/>
-    <SolidColorBrush x:Key="GridAltRowBg"       Color="#F9FAFC"/>
-    <SolidColorBrush x:Key="GridHeaderBg"       Color="#F9FAFC"/>
-    <SolidColorBrush x:Key="GridHeaderFg"       Color="#465568"/>
-    <SolidColorBrush x:Key="GridBorder"         Color="#E1E8F0"/>
-    <SolidColorBrush x:Key="GridFg"             Color="#1E293B"/>
+    <SolidColorBrush x:Key="GridAltRowBg"       Color="#FAFAFA"/>
+    <SolidColorBrush x:Key="GridHeaderBg"       Color="#F9F9F9"/>
+    <SolidColorBrush x:Key="GridHeaderFg"       Color="#444444"/>
+    <SolidColorBrush x:Key="GridBorder"         Color="#E5E5E5"/>
+    <SolidColorBrush x:Key="GridFg"             Color="#1A1A1A"/>
 
     <!-- ── Inputs ────────────────────────────────────────────────────────── -->
     <SolidColorBrush x:Key="InputBg"            Color="#FFFFFF"/>
-    <SolidColorBrush x:Key="InputBorder"        Color="#CBD5E1"/>
-    <SolidColorBrush x:Key="InputFg"            Color="#1E293B"/>
+    <SolidColorBrush x:Key="InputBorder"        Color="#D1D1D1"/>
+    <SolidColorBrush x:Key="InputFg"            Color="#1A1A1A"/>
 
     <!-- ── Tabs ──────────────────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="TabFg"              Color="#64748B"/>
-    <SolidColorBrush x:Key="TabSelectedFg"      Color="#2c99f0"/>
-    <SolidColorBrush x:Key="TabSelectedBorder"  Color="#2c99f0"/>
+    <SolidColorBrush x:Key="TabFg"              Color="#666666"/>
+    <SolidColorBrush x:Key="TabSelectedFg"      Color="#0078D4"/>
+    <SolidColorBrush x:Key="TabSelectedBorder"  Color="#0078D4"/>
     <SolidColorBrush x:Key="TabControlBg"       Color="#FFFFFF"/>
-    <SolidColorBrush x:Key="TabHoverBg"         Color="#F9FAFC"/>
+    <SolidColorBrush x:Key="TabHoverBg"         Color="#F0F0F0"/>
 
     <!-- ── Code / JSON ───────────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="CodeBg"             Color="#1E2533"/>
-    <SolidColorBrush x:Key="CodeFg"             Color="#e5f4fd"/>
+    <SolidColorBrush x:Key="CodeBg"             Color="#1E1E1E"/>
+    <SolidColorBrush x:Key="CodeFg"             Color="#D4D4D4"/>
 
-    <!-- ── KPI / Stats ───────────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="StatCountFg"        Color="#1E293B"/>
-    <SolidColorBrush x:Key="KpiHeaderBg"        Color="#1E2533"/>
+    <!-- ── KPI ───────────────────────────────────────────────────────────── -->
+    <SolidColorBrush x:Key="StatCountFg"        Color="#1A1A1A"/>
+    <SolidColorBrush x:Key="KpiHeaderBg"        Color="#0078D4"/>
     <SolidColorBrush x:Key="KpiHeaderFg"        Color="#FFFFFF"/>
-    <SolidColorBrush x:Key="KpiValueFg"         Color="#2c99f0"/>
-    <SolidColorBrush x:Key="KpiCardBorder"      Color="#D3DAE1"/>
+    <SolidColorBrush x:Key="KpiValueFg"         Color="#0078D4"/>
+    <SolidColorBrush x:Key="KpiCardBorder"      Color="#E0E0E0"/>
 
     <!-- ── Semantic ──────────────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="SeparatorFg"           Color="#E1E8F0"/>
-    <SolidColorBrush x:Key="StatusLabelFg"         Color="#64748B"/>
+    <SolidColorBrush x:Key="SeparatorFg"           Color="#E5E5E5"/>
+    <SolidColorBrush x:Key="StatusLabelFg"         Color="#666666"/>
     <SolidColorBrush x:Key="InfoBoxBg"             Color="#FFFFFF"/>
-    <SolidColorBrush x:Key="CopyBtnBg"             Color="#F1F4F9"/>
-    <SolidColorBrush x:Key="CopyBtnBorder"         Color="#CBD5E1"/>
+    <SolidColorBrush x:Key="CopyBtnBg"             Color="#F5F5F5"/>
+    <SolidColorBrush x:Key="CopyBtnBorder"         Color="#D1D1D1"/>
 
     <!-- ── Quick-fetch chips ─────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="QuickFetchAchBg"       Color="#EDE9FF"/>
-    <SolidColorBrush x:Key="QuickFetchAchBorder"   Color="#C4B5FD"/>
-    <SolidColorBrush x:Key="QuickFetchAchFg"       Color="#6D28D9"/>
-    <SolidColorBrush x:Key="QuickFetchCcBg"        Color="#e5f4fd"/>
-    <SolidColorBrush x:Key="QuickFetchCcBorder"    Color="#93C5FD"/>
-    <SolidColorBrush x:Key="QuickFetchCcFg"        Color="#296598"/>
+    <SolidColorBrush x:Key="QuickFetchAchBg"       Color="#EFF6FF"/>
+    <SolidColorBrush x:Key="QuickFetchAchBorder"   Color="#BFDBFE"/>
+    <SolidColorBrush x:Key="QuickFetchAchFg"       Color="#1D4ED8"/>
+    <SolidColorBrush x:Key="QuickFetchCcBg"        Color="#EEF8FF"/>
+    <SolidColorBrush x:Key="QuickFetchCcBorder"    Color="#BAE3FF"/>
+    <SolidColorBrush x:Key="QuickFetchCcFg"        Color="#0067C0"/>
 
     <!-- ── Cards / tiles ─────────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="CardBorder2"        Color="#E1E8F0"/>
+    <SolidColorBrush x:Key="CardBorder2"        Color="#E5E5E5"/>
     <SolidColorBrush x:Key="TileCardBg"         Color="#FFFFFF"/>
-    <SolidColorBrush x:Key="PanelTitleFg"       Color="#1E293B"/>
+    <SolidColorBrush x:Key="PanelTitleFg"       Color="#1A1A1A"/>
 
     <!-- ── JSON formatter ────────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="JsonInputBg"              Color="#F9FAFC"/>
-    <SolidColorBrush x:Key="JsonInputBorder"          Color="#CBD5E1"/>
-    <SolidColorBrush x:Key="JsonOutputGreenBg"        Color="#DCFCE7"/>
-    <SolidColorBrush x:Key="JsonOutputGreenBorder"    Color="#17A34A"/>
-    <SolidColorBrush x:Key="JsonOutputYellowBg"       Color="#FEF3C7"/>
-    <SolidColorBrush x:Key="JsonOutputYellowBorder"   Color="#D87706"/>
+    <SolidColorBrush x:Key="JsonInputBg"              Color="#F9F9F9"/>
+    <SolidColorBrush x:Key="JsonInputBorder"          Color="#D1D1D1"/>
+    <SolidColorBrush x:Key="JsonOutputGreenBg"        Color="#F0FDF4"/>
+    <SolidColorBrush x:Key="JsonOutputGreenBorder"    Color="#22C55E"/>
+    <SolidColorBrush x:Key="JsonOutputYellowBg"       Color="#FFFBEB"/>
+    <SolidColorBrush x:Key="JsonOutputYellowBorder"   Color="#F59E0B"/>
 
     <!-- ── Labels ────────────────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="LabelFg"            Color="#1E293B"/>
-    <SolidColorBrush x:Key="SubLabelFg"         Color="#64748B"/>
-    <SolidColorBrush x:Key="HintFg"             Color="#94A3B8"/>
+    <SolidColorBrush x:Key="LabelFg"            Color="#1A1A1A"/>
+    <SolidColorBrush x:Key="SubLabelFg"         Color="#666666"/>
+    <SolidColorBrush x:Key="HintFg"             Color="#999999"/>
 
     <!-- ── Info banner ───────────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="InfoBannerBg"       Color="#e5f4fd"/>
-    <SolidColorBrush x:Key="InfoBannerBorder"   Color="#2c99f0"/>
-    <SolidColorBrush x:Key="InfoBannerTitleFg"  Color="#296598"/>
-    <SolidColorBrush x:Key="InfoBannerNumFg"    Color="#2c99f0"/>
-    <SolidColorBrush x:Key="InfoBannerTextFg"   Color="#465568"/>
+    <SolidColorBrush x:Key="InfoBannerBg"       Color="#EEF8FF"/>
+    <SolidColorBrush x:Key="InfoBannerBorder"   Color="#0078D4"/>
+    <SolidColorBrush x:Key="InfoBannerTitleFg"  Color="#0067C0"/>
+    <SolidColorBrush x:Key="InfoBannerNumFg"    Color="#0078D4"/>
+    <SolidColorBrush x:Key="InfoBannerTextFg"   Color="#444444"/>
 
     <!-- ── Search card ───────────────────────────────────────────────────── -->
     <SolidColorBrush x:Key="SearchCardBg"       Color="#FFFFFF"/>
-    <SolidColorBrush x:Key="SearchCardBorder"   Color="#D3DAE1"/>
+    <SolidColorBrush x:Key="SearchCardBorder"   Color="#E0E0E0"/>
 
     <!-- ── Logo badge ────────────────────────────────────────────────────── -->
     <LinearGradientBrush x:Key="LogoBadgeBg" StartPoint="0,0" EndPoint="1,1">
-        <GradientStop Color="#2c99f0" Offset="0"/>
-        <GradientStop Color="#296598" Offset="1"/>
+        <GradientStop Color="#0078D4" Offset="0"/>
+        <GradientStop Color="#0067C0" Offset="1"/>
     </LinearGradientBrush>
 
     <!-- ── Section headers ───────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="EmailSectionBg"     Color="#EDE9FF"/>
-    <SolidColorBrush x:Key="EmailSectionBorder" Color="#C4B5FD"/>
-    <SolidColorBrush x:Key="EmailSectionFg"     Color="#6D28D9"/>
+    <SolidColorBrush x:Key="EmailSectionBg"     Color="#EFF6FF"/>
+    <SolidColorBrush x:Key="EmailSectionBorder" Color="#BFDBFE"/>
+    <SolidColorBrush x:Key="EmailSectionFg"     Color="#1D4ED8"/>
 
-    <SolidColorBrush x:Key="TxnSectionBg"       Color="#e5f4fd"/>
-    <SolidColorBrush x:Key="TxnSectionBorder"   Color="#2c99f0"/>
-    <SolidColorBrush x:Key="TxnSectionFg"       Color="#296598"/>
+    <SolidColorBrush x:Key="TxnSectionBg"       Color="#EEF8FF"/>
+    <SolidColorBrush x:Key="TxnSectionBorder"   Color="#0078D4"/>
+    <SolidColorBrush x:Key="TxnSectionFg"       Color="#0067C0"/>
 
-    <SolidColorBrush x:Key="DisbSectionBg"      Color="#DCFCE7"/>
-    <SolidColorBrush x:Key="DisbSectionBorder"  Color="#17A34A"/>
-    <SolidColorBrush x:Key="DisbSectionFg"      Color="#166535"/>
+    <SolidColorBrush x:Key="DisbSectionBg"      Color="#F0FDF4"/>
+    <SolidColorBrush x:Key="DisbSectionBorder"  Color="#22C55E"/>
+    <SolidColorBrush x:Key="DisbSectionFg"      Color="#166534"/>
 
     <!-- ── Webhook panel ─────────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="WebhookPanelBg"       Color="#DCFCE7"/>
-    <SolidColorBrush x:Key="WebhookPanelBorder"   Color="#17A34A"/>
+    <SolidColorBrush x:Key="WebhookPanelBg"       Color="#F0FDF4"/>
+    <SolidColorBrush x:Key="WebhookPanelBorder"   Color="#22C55E"/>
     <SolidColorBrush x:Key="WebhookConfigBg"      Color="#FFFFFF"/>
-    <SolidColorBrush x:Key="WebhookConfigBorder"  Color="#17A34A"/>
-    <SolidColorBrush x:Key="WebhookConfigFg"      Color="#1E293B"/>
+    <SolidColorBrush x:Key="WebhookConfigBorder"  Color="#22C55E"/>
+    <SolidColorBrush x:Key="WebhookConfigFg"      Color="#1A1A1A"/>
 
     <!-- ── Info strips ───────────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="InfoStripGreenBorder"     Color="#17A34A"/>
-    <SolidColorBrush x:Key="InfoStripBlueBorder"      Color="#2c99f0"/>
-    <SolidColorBrush x:Key="InfoStripGreenFg"         Color="#1E293B"/>
-    <SolidColorBrush x:Key="InfoStripBlueFg"          Color="#1E293B"/>
-    <SolidColorBrush x:Key="InfoStripGreenBtnBg"      Color="#DCFCE7"/>
-    <SolidColorBrush x:Key="InfoStripGreenBtnHover"   Color="#BBF7D0"/>
-    <SolidColorBrush x:Key="InfoStripBlueBtnBg"       Color="#e5f4fd"/>
-    <SolidColorBrush x:Key="InfoStripBlueBtnHover"    Color="#e7f3fd"/>
-    <SolidColorBrush x:Key="InfoStripBlueBtnBg2"      Color="#e5f4fd"/>
+    <SolidColorBrush x:Key="InfoStripGreenBorder"     Color="#22C55E"/>
+    <SolidColorBrush x:Key="InfoStripBlueBorder"      Color="#0078D4"/>
+    <SolidColorBrush x:Key="InfoStripGreenFg"         Color="#1A1A1A"/>
+    <SolidColorBrush x:Key="InfoStripBlueFg"          Color="#1A1A1A"/>
+    <SolidColorBrush x:Key="InfoStripGreenBtnBg"      Color="#F0FDF4"/>
+    <SolidColorBrush x:Key="InfoStripGreenBtnHover"   Color="#DCFCE7"/>
+    <SolidColorBrush x:Key="InfoStripBlueBtnBg"       Color="#EEF8FF"/>
+    <SolidColorBrush x:Key="InfoStripBlueBtnHover"    Color="#DBEAFE"/>
+    <SolidColorBrush x:Key="InfoStripBlueBtnBg2"      Color="#EEF8FF"/>
 
     <!-- ── Orange / amber ────────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="OrangePanelBg"       Color="#FEF3C7"/>
-    <SolidColorBrush x:Key="OrangePanelBorder"   Color="#D87706"/>
-    <SolidColorBrush x:Key="OrangePanelFg"       Color="#1E293B"/>
+    <SolidColorBrush x:Key="OrangePanelBg"       Color="#FFFBEB"/>
+    <SolidColorBrush x:Key="OrangePanelBorder"   Color="#F59E0B"/>
+    <SolidColorBrush x:Key="OrangePanelFg"       Color="#1A1A1A"/>
 
     <!-- ── DB config ─────────────────────────────────────────────────────── -->
     <SolidColorBrush x:Key="DbConfigBg"          Color="#FFFFFF"/>
-    <SolidColorBrush x:Key="DbConfigBlueBg"      Color="#e5f4fd"/>
-    <SolidColorBrush x:Key="DbConfigBorder"      Color="#D3DAE1"/>
-    <SolidColorBrush x:Key="DbConfigBlueBorder"  Color="#2c99f0"/>
+    <SolidColorBrush x:Key="DbConfigBlueBg"      Color="#EEF8FF"/>
+    <SolidColorBrush x:Key="DbConfigBorder"      Color="#E0E0E0"/>
+    <SolidColorBrush x:Key="DbConfigBlueBorder"  Color="#0078D4"/>
 
     <!-- ── Summary bar ───────────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="SummaryBarBg"        Color="#F9FAFC"/>
-    <SolidColorBrush x:Key="SummaryBarBorder"    Color="#D3DAE1"/>
+    <SolidColorBrush x:Key="SummaryBarBg"        Color="#F9F9F9"/>
+    <SolidColorBrush x:Key="SummaryBarBorder"    Color="#E0E0E0"/>
 
     <!-- ── Test row states ───────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="TestRowPassBg"       Color="#DCFCE7"/>
-    <SolidColorBrush x:Key="TestRowFailBg"       Color="#FEE2E1"/>
-    <SolidColorBrush x:Key="TestRowRunningBg"    Color="#FEF3C7"/>
+    <SolidColorBrush x:Key="TestRowPassBg"       Color="#F0FDF4"/>
+    <SolidColorBrush x:Key="TestRowFailBg"       Color="#FFF1F2"/>
+    <SolidColorBrush x:Key="TestRowRunningBg"    Color="#FFFBEB"/>
 
     <!-- ── Surface / convenience ─────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="DarkSurface"         Color="#F9FAFC"/>
+    <SolidColorBrush x:Key="DarkSurface"         Color="#F5F5F5"/>
     <SolidColorBrush x:Key="DarkSurface2"        Color="#FFFFFF"/>
-    <SolidColorBrush x:Key="DarkBorder"          Color="#E1E8F0"/>
-    <SolidColorBrush x:Key="DarkText"            Color="#1E293B"/>
-    <SolidColorBrush x:Key="DarkSubText"         Color="#64748B"/>
-    <SolidColorBrush x:Key="DarkAccent"          Color="#2c99f0"/>
-    <SolidColorBrush x:Key="DarkBtnBg"           Color="#F1F4F9"/>
-    <SolidColorBrush x:Key="DarkBtnBgHover"      Color="#E1E8F0"/>
-    <SolidColorBrush x:Key="DarkScrollBg"        Color="#F9FAFC"/>
+    <SolidColorBrush x:Key="DarkBorder"          Color="#E5E5E5"/>
+    <SolidColorBrush x:Key="DarkText"            Color="#1A1A1A"/>
+    <SolidColorBrush x:Key="DarkSubText"         Color="#666666"/>
+    <SolidColorBrush x:Key="DarkAccent"          Color="#0078D4"/>
+    <SolidColorBrush x:Key="DarkBtnBg"           Color="#F5F5F5"/>
+    <SolidColorBrush x:Key="DarkBtnBgHover"      Color="#EBEBEB"/>
+    <SolidColorBrush x:Key="DarkScrollBg"        Color="#F3F3F3"/>
 
     <!-- ── Env toggle ────────────────────────────────────────────────────── -->
-    <SolidColorBrush x:Key="EnvBtnInactiveBg"     Color="#F1F4F9"/>
-    <SolidColorBrush x:Key="EnvBtnInactiveBorder" Color="#CBD5E1"/>
-    <SolidColorBrush x:Key="EnvBtnInactiveFg"     Color="#344056"/>
+    <SolidColorBrush x:Key="EnvBtnInactiveBg"     Color="#F5F5F5"/>
+    <SolidColorBrush x:Key="EnvBtnInactiveBorder" Color="#D1D1D1"/>
+    <SolidColorBrush x:Key="EnvBtnInactiveFg"     Color="#1A1A1A"/>
 
-    <SolidColorBrush x:Key="FgDefault"           Color="#1E293B"/>
+    <SolidColorBrush x:Key="FgDefault"           Color="#1A1A1A"/>
 
 
     <!-- ═══════════════════════════════════════════════════════════════════
-         SCROLLBAR — Core style: 8px, #CBD5E1 thumb
+         SCROLLBAR — Win11 thin auto-hide style, appears on hover
          ═══════════════════════════════════════════════════════════════════ -->
 
-    <Style x:Key="CoreScrollThumb" TargetType="Thumb">
+    <Style x:Key="Win11ScrollThumb" TargetType="Thumb">
         <Setter Property="OverridesDefaultStyle" Value="True"/>
         <Setter Property="IsTabStop"             Value="False"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Thumb">
-                    <Border x:Name="Bd" Background="#CBD5E1" CornerRadius="4"/>
+                    <Border x:Name="Bd" Background="#ADADAD" CornerRadius="3"
+                            Margin="2,0"/>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Bd" Property="Background" Value="#94A3B8"/>
+                            <Setter TargetName="Bd" Property="Background" Value="#737373"/>
                         </Trigger>
                         <Trigger Property="IsDragging" Value="True">
-                            <Setter TargetName="Bd" Property="Background" Value="#2c99f0"/>
+                            <Setter TargetName="Bd" Property="Background" Value="#0078D4"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -200,7 +200,7 @@
         </Setter>
     </Style>
 
-    <Style x:Key="CoreScrollPageBtn" TargetType="RepeatButton">
+    <Style x:Key="Win11ScrollPageBtn" TargetType="RepeatButton">
         <Setter Property="OverridesDefaultStyle" Value="True"/>
         <Setter Property="IsTabStop"             Value="False"/>
         <Setter Property="Focusable"             Value="False"/>
@@ -213,33 +213,33 @@
         </Setter>
     </Style>
 
-    <ControlTemplate x:Key="CoreVScrollBar" TargetType="ScrollBar">
-        <Border Background="Transparent" Width="8" Padding="2,4">
+    <ControlTemplate x:Key="Win11VScrollBar" TargetType="ScrollBar">
+        <Border Background="Transparent" Width="6" Padding="0,4">
             <Track x:Name="PART_Track" IsDirectionReversed="True">
                 <Track.DecreaseRepeatButton>
-                    <RepeatButton Style="{StaticResource CoreScrollPageBtn}" Command="ScrollBar.PageUpCommand"/>
+                    <RepeatButton Style="{StaticResource Win11ScrollPageBtn}" Command="ScrollBar.PageUpCommand"/>
                 </Track.DecreaseRepeatButton>
                 <Track.Thumb>
-                    <Thumb Style="{StaticResource CoreScrollThumb}" Margin="0,2"/>
+                    <Thumb Style="{StaticResource Win11ScrollThumb}"/>
                 </Track.Thumb>
                 <Track.IncreaseRepeatButton>
-                    <RepeatButton Style="{StaticResource CoreScrollPageBtn}" Command="ScrollBar.PageDownCommand"/>
+                    <RepeatButton Style="{StaticResource Win11ScrollPageBtn}" Command="ScrollBar.PageDownCommand"/>
                 </Track.IncreaseRepeatButton>
             </Track>
         </Border>
     </ControlTemplate>
 
-    <ControlTemplate x:Key="CoreHScrollBar" TargetType="ScrollBar">
-        <Border Background="Transparent" Height="8" Padding="4,2">
+    <ControlTemplate x:Key="Win11HScrollBar" TargetType="ScrollBar">
+        <Border Background="Transparent" Height="6" Padding="4,0">
             <Track x:Name="PART_Track">
                 <Track.DecreaseRepeatButton>
-                    <RepeatButton Style="{StaticResource CoreScrollPageBtn}" Command="ScrollBar.PageLeftCommand"/>
+                    <RepeatButton Style="{StaticResource Win11ScrollPageBtn}" Command="ScrollBar.PageLeftCommand"/>
                 </Track.DecreaseRepeatButton>
                 <Track.Thumb>
-                    <Thumb Style="{StaticResource CoreScrollThumb}" Margin="2,0"/>
+                    <Thumb Style="{StaticResource Win11ScrollThumb}"/>
                 </Track.Thumb>
                 <Track.IncreaseRepeatButton>
-                    <RepeatButton Style="{StaticResource CoreScrollPageBtn}" Command="ScrollBar.PageRightCommand"/>
+                    <RepeatButton Style="{StaticResource Win11ScrollPageBtn}" Command="ScrollBar.PageRightCommand"/>
                 </Track.IncreaseRepeatButton>
             </Track>
         </Border>
@@ -250,12 +250,12 @@
         <Setter Property="Stylus.IsFlicksEnabled" Value="False"/>
         <Style.Triggers>
             <Trigger Property="Orientation" Value="Vertical">
-                <Setter Property="Width"    Value="8"/>
-                <Setter Property="Template" Value="{StaticResource CoreVScrollBar}"/>
+                <Setter Property="Width"    Value="6"/>
+                <Setter Property="Template" Value="{StaticResource Win11VScrollBar}"/>
             </Trigger>
             <Trigger Property="Orientation" Value="Horizontal">
-                <Setter Property="Height"   Value="8"/>
-                <Setter Property="Template" Value="{StaticResource CoreHScrollBar}"/>
+                <Setter Property="Height"   Value="6"/>
+                <Setter Property="Template" Value="{StaticResource Win11HScrollBar}"/>
             </Trigger>
         </Style.Triggers>
     </Style>
@@ -298,32 +298,33 @@
 
 
     <!-- ═══════════════════════════════════════════════════════════════════
-         CONTROL STYLES — Exact BQE Core Light
-         Font: Open Sans / Inter · Radius: 8px (buttons) 5px (fields)
+         CONTROL STYLES — Windows 11 Fluent Design Light
+         Font: Segoe UI Variable · Radius: 4px controls / 8px cards
          ═══════════════════════════════════════════════════════════════════ -->
 
     <Style TargetType="Window">
-        <Setter Property="Foreground" Value="#1E293B"/>
-        <Setter Property="FontFamily" Value="Open Sans, Inter, Segoe UI, Arial"/>
+        <Setter Property="Foreground" Value="#1A1A1A"/>
+        <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
         <Setter Property="FontSize"   Value="14"/>
     </Style>
 
     <Style TargetType="TextBlock">
-        <Setter Property="Foreground"                     Value="#1E293B"/>
-        <Setter Property="FontFamily"                     Value="Open Sans, Inter, Segoe UI, Arial"/>
+        <Setter Property="Foreground"                     Value="#1A1A1A"/>
+        <Setter Property="FontFamily"                     Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
         <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
         <Setter Property="TextOptions.TextRenderingMode"  Value="ClearType"/>
     </Style>
 
-    <!-- TextBox: 5px radius, #CBD5E1 border, focus #38BDF8 glow -->
+    <!-- TextBox — Win11 rounded 4px, subtle bottom-border on normal, full on focus -->
     <Style TargetType="TextBox">
         <Setter Property="Background"      Value="#FFFFFF"/>
-        <Setter Property="Foreground"      Value="#1E293B"/>
-        <Setter Property="BorderBrush"     Value="#CBD5E1"/>
+        <Setter Property="Foreground"      Value="#1A1A1A"/>
+        <Setter Property="BorderBrush"     Value="#D1D1D1"/>
         <Setter Property="BorderThickness" Value="1"/>
-        <Setter Property="CaretBrush"      Value="#2c99f0"/>
-        <Setter Property="SelectionBrush"  Value="#38BDF8"/>
-        <Setter Property="FontFamily"      Value="Open Sans, Inter, Segoe UI, Arial"/>
+        <Setter Property="CaretBrush"      Value="#0078D4"/>
+        <Setter Property="SelectionBrush"  Value="#0078D4"/>
+        <Setter Property="SelectionOpacity" Value="0.3"/>
+        <Setter Property="FontFamily"      Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
         <Setter Property="Padding"         Value="8,6"/>
         <Setter Property="Template">
             <Setter.Value>
@@ -332,7 +333,7 @@
                             Background="{TemplateBinding Background}"
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}"
-                            CornerRadius="5">
+                            CornerRadius="4">
                         <ScrollViewer x:Name="PART_ContentHost"
                                       Padding="{TemplateBinding Padding}"
                                       VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
@@ -340,17 +341,18 @@
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsFocused" Value="True">
-                            <Setter TargetName="Bd" Property="BorderBrush" Value="#38BDF8"/>
+                            <Setter TargetName="Bd" Property="BorderBrush" Value="#0078D4"/>
+                            <Setter TargetName="Bd" Property="BorderThickness" Value="1,1,1,2"/>
                         </Trigger>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Bd" Property="BorderBrush" Value="#94A3B8"/>
+                            <Setter TargetName="Bd" Property="BorderBrush" Value="#888888"/>
                         </Trigger>
                         <Trigger Property="IsReadOnly" Value="True">
-                            <Setter TargetName="Bd" Property="Background" Value="#F9FAFC"/>
-                            <Setter Property="Foreground"                 Value="#64748B"/>
+                            <Setter TargetName="Bd" Property="Background" Value="#F9F9F9"/>
+                            <Setter Property="Foreground"                 Value="#666666"/>
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
-                            <Setter Property="Opacity" Value="0.50"/>
+                            <Setter Property="Opacity" Value="0.45"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -360,12 +362,11 @@
 
     <Style TargetType="PasswordBox">
         <Setter Property="Background"      Value="#FFFFFF"/>
-        <Setter Property="Foreground"      Value="#1E293B"/>
-        <Setter Property="BorderBrush"     Value="#CBD5E1"/>
+        <Setter Property="Foreground"      Value="#1A1A1A"/>
+        <Setter Property="BorderBrush"     Value="#D1D1D1"/>
         <Setter Property="BorderThickness" Value="1"/>
-        <Setter Property="CaretBrush"      Value="#2c99f0"/>
-        <Setter Property="SelectionBrush"  Value="#38BDF8"/>
-        <Setter Property="FontFamily"      Value="Open Sans, Inter, Segoe UI, Arial"/>
+        <Setter Property="CaretBrush"      Value="#0078D4"/>
+        <Setter Property="FontFamily"      Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
         <Setter Property="Padding"         Value="8,6"/>
         <Setter Property="Template">
             <Setter.Value>
@@ -374,20 +375,21 @@
                             Background="{TemplateBinding Background}"
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}"
-                            CornerRadius="5">
+                            CornerRadius="4">
                         <ScrollViewer x:Name="PART_ContentHost"
                                       Padding="{TemplateBinding Padding}"
                                       VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsFocused" Value="True">
-                            <Setter TargetName="Bd" Property="BorderBrush" Value="#38BDF8"/>
+                            <Setter TargetName="Bd" Property="BorderBrush" Value="#0078D4"/>
+                            <Setter TargetName="Bd" Property="BorderThickness" Value="1,1,1,2"/>
                         </Trigger>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Bd" Property="BorderBrush" Value="#94A3B8"/>
+                            <Setter TargetName="Bd" Property="BorderBrush" Value="#888888"/>
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
-                            <Setter Property="Opacity" Value="0.50"/>
+                            <Setter Property="Opacity" Value="0.45"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -395,12 +397,12 @@
         </Setter>
     </Style>
 
-    <!-- ComboBox: 5px radius, Core dropdown shadow -->
+    <!-- ComboBox — Win11 4px radius, clean dropdown with 8px shadow -->
     <Style TargetType="ComboBox">
         <Setter Property="Background"  Value="#FFFFFF"/>
-        <Setter Property="Foreground"  Value="#1E293B"/>
-        <Setter Property="BorderBrush" Value="#CBD5E1"/>
-        <Setter Property="FontFamily"  Value="Open Sans, Inter, Segoe UI, Arial"/>
+        <Setter Property="Foreground"  Value="#1A1A1A"/>
+        <Setter Property="BorderBrush" Value="#D1D1D1"/>
+        <Setter Property="FontFamily"  Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="ComboBox">
@@ -419,24 +421,27 @@
                                             Background="{TemplateBinding Background}"
                                             BorderBrush="{TemplateBinding BorderBrush}"
                                             BorderThickness="{TemplateBinding BorderThickness}"
-                                            CornerRadius="5">
+                                            CornerRadius="4">
                                         <Grid>
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="24"/>
+                                                <ColumnDefinition Width="30"/>
                                             </Grid.ColumnDefinitions>
-                                            <Path Grid.Column="1" HorizontalAlignment="Center"
-                                                  VerticalAlignment="Center"
-                                                  Data="M0,0 L4,5 L8,0 Z"
-                                                  Fill="#94A3B8"/>
+                                            <!-- Win11 chevron -->
+                                            <TextBlock Grid.Column="1"
+                                                       Text="&#xE70D;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                                       FontSize="10" Foreground="#666666"
+                                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                         </Grid>
                                     </Border>
                                     <ControlTemplate.Triggers>
                                         <Trigger Property="IsMouseOver" Value="True">
-                                            <Setter TargetName="TBd" Property="BorderBrush" Value="#94A3B8"/>
+                                            <Setter TargetName="TBd" Property="Background"  Value="#F5F5F5"/>
+                                            <Setter TargetName="TBd" Property="BorderBrush" Value="#888888"/>
                                         </Trigger>
                                         <Trigger Property="IsChecked" Value="True">
-                                            <Setter TargetName="TBd" Property="BorderBrush" Value="#38BDF8"/>
+                                            <Setter TargetName="TBd" Property="BorderBrush" Value="#0078D4"/>
+                                            <Setter TargetName="TBd" Property="BorderThickness" Value="1,1,1,2"/>
                                         </Trigger>
                                     </ControlTemplate.Triggers>
                                 </ControlTemplate>
@@ -446,12 +451,12 @@
                                           IsHitTestVisible="False"
                                           Content="{TemplateBinding SelectionBoxItem}"
                                           ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
-                                          Margin="10,0,28,0"
+                                          Margin="10,0,30,0"
                                           VerticalAlignment="Center"/>
                         <TextBox x:Name="PART_EditableTextBox"
                                  Visibility="Hidden" IsReadOnly="{TemplateBinding IsReadOnly}"
-                                 Margin="8,0,28,0" VerticalAlignment="Center"
-                                 Background="Transparent" Foreground="#1E293B"
+                                 Margin="8,0,30,0" VerticalAlignment="Center"
+                                 Background="Transparent" Foreground="#1A1A1A"
                                  BorderThickness="0"/>
                         <Popup x:Name="Popup" Placement="Bottom"
                                IsOpen="{TemplateBinding IsDropDownOpen}"
@@ -460,12 +465,11 @@
                             <Grid x:Name="DropDown"
                                   MinWidth="{TemplateBinding ActualWidth}"
                                   MaxHeight="{TemplateBinding MaxDropDownHeight}">
-                                <!-- Core dropdown shadow: 0px 12px 16px -4px rgba(16,24,40,0.1) -->
-                                <Border Background="#FFFFFF" BorderBrush="#E1E8F0"
-                                        BorderThickness="1" CornerRadius="5" Padding="4">
+                                <Border Background="#FFFFFF" BorderBrush="#E0E0E0"
+                                        BorderThickness="1" CornerRadius="8" Padding="4">
                                     <Border.Effect>
-                                        <DropShadowEffect BlurRadius="20" ShadowDepth="6"
-                                                          Opacity="0.10" Color="#101828"/>
+                                        <DropShadowEffect BlurRadius="24" ShadowDepth="4"
+                                                          Opacity="0.14" Color="#000000"/>
                                     </Border.Effect>
                                     <ScrollViewer>
                                         <StackPanel IsItemsHost="True"
@@ -487,25 +491,24 @@
     </Style>
 
     <Style TargetType="ComboBoxItem">
-        <Setter Property="Background" Value="#FFFFFF"/>
-        <Setter Property="Foreground" Value="#1E293B"/>
-        <Setter Property="Padding"    Value="10,8"/>
-        <Setter Property="FontFamily" Value="Open Sans, Inter, Segoe UI, Arial"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="Foreground" Value="#1A1A1A"/>
+        <Setter Property="Padding"    Value="10,7"/>
+        <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="ComboBoxItem">
                     <Border x:Name="Bd" Background="{TemplateBinding Background}"
-                            Padding="{TemplateBinding Padding}">
+                            CornerRadius="4" Padding="{TemplateBinding Padding}" Margin="0,1">
                         <ContentPresenter/>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsHighlighted" Value="True">
-                            <Setter TargetName="Bd" Property="Background" Value="#f5f5f5"/>
-                            <Setter Property="Foreground"                 Value="#1E293B"/>
+                            <Setter TargetName="Bd" Property="Background" Value="#F0F0F0"/>
                         </Trigger>
                         <Trigger Property="IsSelected" Value="True">
-                            <Setter TargetName="Bd" Property="Background" Value="#e5f4fd"/>
-                            <Setter Property="Foreground"                 Value="#296598"/>
+                            <Setter TargetName="Bd" Property="Background" Value="#CCE4FF"/>
+                            <Setter Property="Foreground"                 Value="#003E92"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -515,18 +518,18 @@
 
     <Style TargetType="TabControl">
         <Setter Property="Background"      Value="#FFFFFF"/>
-        <Setter Property="BorderBrush"     Value="#E1E8F0"/>
+        <Setter Property="BorderBrush"     Value="#E5E5E5"/>
         <Setter Property="BorderThickness" Value="0"/>
     </Style>
 
-    <!-- TabItem: Core blue underline, Open Sans -->
+    <!-- TabItem — Win11 underline indicator style -->
     <Style TargetType="TabItem">
         <Setter Property="Background"  Value="Transparent"/>
-        <Setter Property="Foreground"  Value="#64748B"/>
+        <Setter Property="Foreground"  Value="#666666"/>
         <Setter Property="BorderBrush" Value="Transparent"/>
         <Setter Property="Padding"     Value="16,10"/>
         <Setter Property="FontSize"    Value="14"/>
-        <Setter Property="FontFamily"  Value="Open Sans, Inter, Segoe UI, Arial"/>
+        <Setter Property="FontFamily"  Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="TabItem">
@@ -536,16 +539,16 @@
                         <ContentPresenter ContentSource="Header"
                                           HorizontalAlignment="Center" VerticalAlignment="Center"
                                           TextBlock.Foreground="{TemplateBinding Foreground}"
-                                          TextBlock.FontWeight="SemiBold"/>
+                                          TextBlock.FontWeight="Medium"/>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsSelected" Value="True">
-                            <Setter TargetName="TabBorder" Property="BorderBrush" Value="#2c99f0"/>
-                            <Setter Property="Foreground" Value="#2c99f0"/>
+                            <Setter TargetName="TabBorder" Property="BorderBrush" Value="#0078D4"/>
+                            <Setter Property="Foreground" Value="#0078D4"/>
                         </Trigger>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter Property="Foreground" Value="#296598"/>
-                            <Setter TargetName="TabBorder" Property="Background" Value="#F9FAFC"/>
+                            <Setter Property="Foreground" Value="#1A1A1A"/>
+                            <Setter TargetName="TabBorder" Property="Background" Value="#F0F0F0"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -553,15 +556,15 @@
         </Setter>
     </Style>
 
-    <!-- Button: 8px radius (primary/secondary), Core blue solid primary -->
+    <!-- Button — Win11 subtle fill, 4px radius -->
     <Style TargetType="Button">
-        <Setter Property="Background"      Value="#F1F4F9"/>
-        <Setter Property="Foreground"      Value="#1E293B"/>
-        <Setter Property="BorderBrush"     Value="#CBD5E1"/>
+        <Setter Property="Background"      Value="#F5F5F5"/>
+        <Setter Property="Foreground"      Value="#1A1A1A"/>
+        <Setter Property="BorderBrush"     Value="#D1D1D1"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Cursor"          Value="Hand"/>
-        <Setter Property="Padding"         Value="20,8"/>
-        <Setter Property="FontFamily"      Value="Open Sans, Inter, Segoe UI, Arial"/>
+        <Setter Property="Padding"         Value="16,6"/>
+        <Setter Property="FontFamily"      Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
         <Setter Property="FontSize"        Value="14"/>
         <Setter Property="Template">
             <Setter.Value>
@@ -570,19 +573,20 @@
                             Background="{TemplateBinding Background}"
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}"
-                            CornerRadius="8" Padding="{TemplateBinding Padding}">
+                            CornerRadius="4" Padding="{TemplateBinding Padding}">
                         <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Bd" Property="Background"  Value="#F9FAFC"/>
-                            <Setter TargetName="Bd" Property="BorderBrush" Value="#94A3B8"/>
+                            <Setter TargetName="Bd" Property="Background"  Value="#EBEBEB"/>
+                            <Setter TargetName="Bd" Property="BorderBrush" Value="#ADADAD"/>
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="Bd" Property="Background"  Value="#E1E8F0"/>
+                            <Setter TargetName="Bd" Property="Background"  Value="#E0E0E0"/>
+                            <Setter Property="Foreground" Value="#444444"/>
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
-                            <Setter Property="Opacity" Value="0.50"/>
+                            <Setter Property="Opacity" Value="0.40"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -590,68 +594,68 @@
         </Setter>
     </Style>
 
-    <!-- PrimaryButton style — Core solid blue: #2c99f0 bg, white text, 8px radius -->
+    <!-- PrimaryButton — Win11 accent fill (#0078D4) -->
     <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-        <Setter Property="Background"  Value="#2c99f0"/>
+        <Setter Property="Background"  Value="#0078D4"/>
         <Setter Property="Foreground"  Value="#FFFFFF"/>
-        <Setter Property="BorderBrush" Value="#2c99f0"/>
+        <Setter Property="BorderBrush" Value="#0067C0"/>
     </Style>
 
     <Style TargetType="CheckBox">
-        <Setter Property="Foreground" Value="#1E293B"/>
-        <Setter Property="FontFamily" Value="Open Sans, Inter, Segoe UI, Arial"/>
+        <Setter Property="Foreground" Value="#1A1A1A"/>
+        <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
     </Style>
 
     <Style TargetType="RadioButton">
-        <Setter Property="Foreground" Value="#1E293B"/>
-        <Setter Property="FontFamily" Value="Open Sans, Inter, Segoe UI, Arial"/>
+        <Setter Property="Foreground" Value="#1A1A1A"/>
+        <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
     </Style>
 
     <Style TargetType="DatePicker">
         <Setter Property="Background"  Value="#FFFFFF"/>
-        <Setter Property="Foreground"  Value="#1E293B"/>
-        <Setter Property="BorderBrush" Value="#CBD5E1"/>
-        <Setter Property="FontFamily"  Value="Open Sans, Inter, Segoe UI, Arial"/>
+        <Setter Property="Foreground"  Value="#1A1A1A"/>
+        <Setter Property="BorderBrush" Value="#D1D1D1"/>
+        <Setter Property="FontFamily"  Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
     </Style>
 
-    <!-- DataGrid: Core table style — #F9FAFC header, #E1E8F0 lines -->
+    <!-- DataGrid — Win11 clean table, subtle alt rows -->
     <Style TargetType="DataGrid">
         <Setter Property="Background"               Value="#FFFFFF"/>
-        <Setter Property="Foreground"               Value="#1E293B"/>
-        <Setter Property="BorderBrush"              Value="#D3DAE1"/>
+        <Setter Property="Foreground"               Value="#1A1A1A"/>
+        <Setter Property="BorderBrush"              Value="#E5E5E5"/>
         <Setter Property="BorderThickness"          Value="0"/>
         <Setter Property="RowBackground"            Value="#FFFFFF"/>
-        <Setter Property="AlternatingRowBackground" Value="#F9FAFC"/>
-        <Setter Property="HorizontalGridLinesBrush" Value="#E1E8F0"/>
+        <Setter Property="AlternatingRowBackground" Value="#FAFAFA"/>
+        <Setter Property="HorizontalGridLinesBrush" Value="#F0F0F0"/>
         <Setter Property="VerticalGridLinesBrush"   Value="Transparent"/>
         <Setter Property="ColumnHeaderHeight"       Value="36"/>
         <Setter Property="RowHeight"                Value="38"/>
-        <Setter Property="FontFamily"               Value="Open Sans, Inter, Segoe UI, Arial"/>
+        <Setter Property="FontFamily"               Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
         <Setter Property="FontSize"                 Value="13"/>
         <Setter Property="SelectionUnit"            Value="FullRow"/>
     </Style>
 
     <Style TargetType="DataGridColumnHeader">
-        <Setter Property="Background"      Value="#F9FAFC"/>
-        <Setter Property="Foreground"      Value="#465568"/>
-        <Setter Property="BorderBrush"     Value="#D3DAE1"/>
-        <Setter Property="BorderThickness" Value="0,0,0,1.5"/>
+        <Setter Property="Background"      Value="#F9F9F9"/>
+        <Setter Property="Foreground"      Value="#444444"/>
+        <Setter Property="BorderBrush"     Value="#E5E5E5"/>
+        <Setter Property="BorderThickness" Value="0,0,0,1"/>
         <Setter Property="Padding"         Value="12,0"/>
         <Setter Property="FontWeight"      Value="SemiBold"/>
         <Setter Property="FontSize"        Value="12"/>
-        <Setter Property="FontFamily"      Value="Open Sans, Inter, Segoe UI, Arial"/>
+        <Setter Property="FontFamily"      Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
         <Setter Property="Height"          Value="36"/>
     </Style>
 
     <Style TargetType="DataGridCell">
-        <Setter Property="Foreground"      Value="#1E293B"/>
+        <Setter Property="Foreground"      Value="#1A1A1A"/>
         <Setter Property="BorderBrush"     Value="Transparent"/>
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding"         Value="4,0"/>
         <Style.Triggers>
             <Trigger Property="IsSelected" Value="True">
-                <Setter Property="Background" Value="#e5f4fd"/>
-                <Setter Property="Foreground" Value="#296598"/>
+                <Setter Property="Background" Value="#CCE4FF"/>
+                <Setter Property="Foreground" Value="#003E92"/>
             </Trigger>
         </Style.Triggers>
     </Style>
@@ -662,26 +666,26 @@
         <Setter Property="Margin"          Value="0"/>
         <Style.Triggers>
             <Trigger Property="IsSelected" Value="True">
-                <Setter Property="Background" Value="#e7f3fd"/>
+                <Setter Property="Background" Value="#E5F3FF"/>
             </Trigger>
             <Trigger Property="IsMouseOver" Value="True">
-                <Setter Property="Background" Value="#f5f5f5"/>
+                <Setter Property="Background" Value="#F0F0F0"/>
             </Trigger>
         </Style.Triggers>
     </Style>
 
     <Style TargetType="Label">
-        <Setter Property="Foreground" Value="#1E293B"/>
-        <Setter Property="FontFamily" Value="Open Sans, Inter, Segoe UI, Arial"/>
+        <Setter Property="Foreground" Value="#1A1A1A"/>
+        <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
     </Style>
 
     <Style TargetType="GroupBox">
-        <Setter Property="Foreground"  Value="#1E293B"/>
-        <Setter Property="BorderBrush" Value="#D3DAE1"/>
-        <Setter Property="FontFamily"  Value="Open Sans, Inter, Segoe UI, Arial"/>
+        <Setter Property="Foreground"  Value="#1A1A1A"/>
+        <Setter Property="BorderBrush" Value="#E0E0E0"/>
+        <Setter Property="FontFamily"  Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
     </Style>
 
-    <!-- ToolTip: Core dark tooltip — dark bg, white text -->
+    <!-- ToolTip — Win11 Fluent tooltip: white bg, 8px radius, soft shadow -->
     <Style TargetType="ToolTip">
         <Setter Property="Background"      Value="Transparent"/>
         <Setter Property="BorderThickness" Value="0"/>
@@ -690,15 +694,15 @@
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="ToolTip">
-                    <Border Background="#1E293B" CornerRadius="5"
-                            Padding="12,8" BorderBrush="#344056" BorderThickness="1">
+                    <Border Background="#FFFFFF" CornerRadius="8"
+                            Padding="14,10" BorderBrush="#E0E0E0" BorderThickness="1">
                         <Border.Effect>
-                            <DropShadowEffect BlurRadius="16" ShadowDepth="4"
-                                              Opacity="0.15" Color="#101828"/>
+                            <DropShadowEffect BlurRadius="28" ShadowDepth="4"
+                                              Opacity="0.18" Color="#000000"/>
                         </Border.Effect>
                         <TextBlock Text="{TemplateBinding Content}"
-                                   Foreground="#FFFFFF" FontSize="13"
-                                   FontFamily="Open Sans, Inter, Segoe UI, Arial"
+                                   Foreground="#1A1A1A" FontSize="13"
+                                   FontFamily="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"
                                    TextWrapping="Wrap" MaxWidth="440"/>
                     </Border>
                 </ControlTemplate>
@@ -708,17 +712,17 @@
 
     <Style TargetType="ContextMenu">
         <Setter Property="Background"  Value="#FFFFFF"/>
-        <Setter Property="Foreground"  Value="#1E293B"/>
-        <Setter Property="BorderBrush" Value="#E1E8F0"/>
-        <Setter Property="FontFamily"  Value="Open Sans, Inter, Segoe UI, Arial"/>
+        <Setter Property="Foreground"  Value="#1A1A1A"/>
+        <Setter Property="BorderBrush" Value="#E0E0E0"/>
+        <Setter Property="FontFamily"  Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="ContextMenu">
-                    <Border Background="#FFFFFF" BorderBrush="#E1E8F0"
-                            BorderThickness="1" CornerRadius="5" Padding="4">
+                    <Border Background="#FFFFFF" BorderBrush="#E0E0E0"
+                            BorderThickness="1" CornerRadius="8" Padding="4">
                         <Border.Effect>
-                            <DropShadowEffect BlurRadius="20" ShadowDepth="6"
-                                              Opacity="0.10" Color="#101828"/>
+                            <DropShadowEffect BlurRadius="28" ShadowDepth="4"
+                                              Opacity="0.16" Color="#000000"/>
                         </Border.Effect>
                         <ItemsPresenter/>
                     </Border>
@@ -729,20 +733,19 @@
 
     <Style TargetType="MenuItem">
         <Setter Property="Background" Value="Transparent"/>
-        <Setter Property="Foreground" Value="#1E293B"/>
-        <Setter Property="FontFamily" Value="Open Sans, Inter, Segoe UI, Arial"/>
-        <Setter Property="Padding"    Value="12,8"/>
+        <Setter Property="Foreground" Value="#1A1A1A"/>
+        <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI Variable Text, Segoe UI"/>
+        <Setter Property="Padding"    Value="12,7"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="MenuItem">
                     <Border x:Name="Bd" Background="{TemplateBinding Background}"
-                            Padding="{TemplateBinding Padding}" Margin="0,1">
+                            CornerRadius="4" Padding="{TemplateBinding Padding}" Margin="0,1">
                         <ContentPresenter ContentSource="Header"/>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsHighlighted" Value="True">
-                            <Setter TargetName="Bd" Property="Background" Value="#f5f5f5"/>
-                            <Setter Property="Foreground"                 Value="#296598"/>
+                            <Setter TargetName="Bd" Property="Background" Value="#F0F0F0"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -754,7 +757,7 @@
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Separator">
-                    <Border Height="1" Background="#E1E8F0" Margin="8,3"/>
+                    <Border Height="1" Background="#E5E5E5" Margin="8,3"/>
                 </ControlTemplate>
             </Setter.Value>
         </Setter>

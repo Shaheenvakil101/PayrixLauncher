@@ -317,6 +317,7 @@
                     <RowDefinition Height="Auto"/>   <!-- Logo -->
                     <RowDefinition Height="*"/>      <!-- Nav items -->
                     <RowDefinition Height="Auto"/>   <!-- User profile -->
+                    <RowDefinition Height="Auto"/>   <!-- BQE Core account badge -->
                 </Grid.RowDefinitions>
 
                 <!-- Logo area -->
@@ -409,31 +410,21 @@
                     </ScrollViewer.Resources>
                     <StackPanel>
 
-                        <!-- Tab 0: Transaction Viewer -->
+                        <!-- ── Main tabs (match top tab bar exactly) ─── -->
+
+                        <!-- 0: Overview -->
                         <Button x:Name="NavTxnViewer" Tag="0"
                                 Style="{StaticResource NavBtnActive}"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="🗂" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
+                                <TextBlock Text="📊" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
                                            Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                                <TextBlock Text="Transaction Viewer" FontSize="12.5" FontWeight="SemiBold" VerticalAlignment="Center"
-                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                            </StackPanel>
-                        </Button>
-
-                        <!-- Tab NEW: Dashboard -->
-                        <Button x:Name="NavDashboard" Tag="11"
-                                Style="{StaticResource NavBtn}"
-                                Click="SidebarNav_Click">
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="🏠" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
-                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                                <TextBlock Text="Dashboard" FontSize="12.5" VerticalAlignment="Center"
+                                <TextBlock Text="Overview" FontSize="12.5" FontWeight="SemiBold" VerticalAlignment="Center"
                                            Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                             </StackPanel>
                         </Button>
 
-                        <!-- Tab 1: Transactions -->
+                        <!-- 1: Transactions -->
                         <Button x:Name="NavTxn" Tag="1"
                                 Style="{StaticResource NavBtn}"
                                 Click="SidebarNav_Click">
@@ -445,95 +436,83 @@
                             </StackPanel>
                         </Button>
 
-                        <!-- Tab NEW: Disbursements -->
-                        <Button x:Name="NavDisbursements" Tag="12"
+                        <!-- 2: Line Items -->
+                        <Button x:Name="NavLineItems" Tag="2"
                                 Style="{StaticResource NavBtn}"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="💳" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
+                                <TextBlock Text="📋" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
                                            Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                                <TextBlock Text="Disbursements" FontSize="12.5" VerticalAlignment="Center"
+                                <TextBlock Text="Line Items" FontSize="12.5" VerticalAlignment="Center"
                                            Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                             </StackPanel>
                         </Button>
 
-                        <!-- Tab 3: Webhooks -->
-                        <Button x:Name="NavWebhooks" Tag="4"
+                        <!-- 3: Webhook Tests -->
+                        <Button x:Name="NavWebhooks" Tag="3"
                                 Style="{StaticResource NavBtn}"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="⚡" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
                                            Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                                <TextBlock Text="Webhooks" FontSize="12.5" VerticalAlignment="Center"
+                                <TextBlock Text="Webhook Tests" FontSize="12.5" VerticalAlignment="Center"
                                            Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                             </StackPanel>
                         </Button>
 
-                        <!-- Tab NEW: Accounts -->
-                        <Button x:Name="NavAccounts" Tag="13"
+                        <!-- 4: Raw JSON -->
+                        <Button x:Name="NavRawJson" Tag="4"
                                 Style="{StaticResource NavBtn}"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="🏦" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
+                                <TextBlock Text="{}{  }" FontSize="12" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,10,0"
                                            Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                                <TextBlock Text="Accounts" FontSize="12.5" VerticalAlignment="Center"
-                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                            </StackPanel>
-                        </Button>
-
-                        <!-- Tab NEW: Merchants -->
-                        <Button x:Name="NavMerchants" Tag="14"
-                                Style="{StaticResource NavBtn}"
-                                Click="SidebarNav_Click">
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="🏪" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
-                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                                <TextBlock Text="Merchants" FontSize="12.5" VerticalAlignment="Center"
+                                <TextBlock Text="Raw JSON" FontSize="12.5" VerticalAlignment="Center"
                                            Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                             </StackPanel>
                         </Button>
 
-                        <!-- Tab NEW: Reports -->
-                        <Button x:Name="NavReports" Tag="15"
-                                Style="{StaticResource NavBtn}"
-                                Click="SidebarNav_Click">
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="📊" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
-                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                                <TextBlock Text="Reports" FontSize="12.5" VerticalAlignment="Center"
-                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                            </StackPanel>
-                        </Button>
-
-                        <!-- Divider -->
-                        <Border Height="1" Background="#FFFFFF12" Margin="4,10"/>
-
-                        <!-- Tab 8: Settings -->
-                        <Button x:Name="NavSettings" Tag="9"
-                                Style="{StaticResource NavBtn}"
-                                Click="SidebarNav_Click">
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="⚙" FontSize="14" VerticalAlignment="Center" Margin="0,0,10,0"
-                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                                <TextBlock Text="Settings" FontSize="12.5" VerticalAlignment="Center"
-                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                            </StackPanel>
-                        </Button>
-
-                        <!-- Tab 5: API Tools -->
-                        <Button x:Name="NavJsonTools" Tag="6"
+                        <!-- 5: JSON Tools -->
+                        <Button x:Name="NavJsonTools" Tag="5"
                                 Style="{StaticResource NavBtn}"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="🔧" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
                                            Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                                <TextBlock Text="API Tools" FontSize="12.5" VerticalAlignment="Center"
+                                <TextBlock Text="JSON Tools" FontSize="12.5" VerticalAlignment="Center"
                                            Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                             </StackPanel>
                         </Button>
 
-                        <!-- Tab 15: HTTP Client -->
-                        <Button x:Name="NavHttpClient" Tag="16"
+                        <!-- 6: Crypto -->
+                        <Button x:Name="NavCrypto" Tag="6"
+                                Style="{StaticResource NavBtn}"
+                                Click="SidebarNav_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="🔐" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                <TextBlock Text="Crypto" FontSize="12.5" VerticalAlignment="Center"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </StackPanel>
+                        </Button>
+
+                        <!-- 7: Payrix Portal -->
+                        <Button x:Name="NavPortal" Tag="7"
+                                Style="{StaticResource NavBtn}"
+                                Click="SidebarNav_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="🌐" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                <TextBlock Text="Payrix Portal" FontSize="12.5" VerticalAlignment="Center"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </StackPanel>
+                        </Button>
+
+                        <!-- Divider -->
+                        <Border Height="1" Background="#FFFFFF12" Margin="4,8"/>
+
+                        <!-- 15: HTTP Client -->
+                        <Button x:Name="NavHttpClient" Tag="15"
                                 Style="{StaticResource NavBtn}"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
@@ -544,8 +523,8 @@
                             </StackPanel>
                         </Button>
 
-                        <!-- Tab 16: Performance -->
-                        <Button x:Name="NavPerf" Tag="17"
+                        <!-- 16: Performance -->
+                        <Button x:Name="NavPerf" Tag="16"
                                 Style="{StaticResource NavBtn}"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
@@ -556,8 +535,88 @@
                             </StackPanel>
                         </Button>
 
-                        <!-- Tab 9: Help & Docs -->
-                        <Button x:Name="NavHelp" Tag="10"
+                        <!-- Divider -->
+                        <Border Height="1" Background="#FFFFFF12" Margin="4,8"/>
+
+                        <!-- Hidden tabs (accessible via sidebar only) -->
+
+                        <!-- 10: Dashboard -->
+                        <Button x:Name="NavDashboard" Tag="10"
+                                Style="{StaticResource NavBtn}"
+                                Click="SidebarNav_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="🏠" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                <TextBlock Text="Dashboard" FontSize="12.5" VerticalAlignment="Center"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </StackPanel>
+                        </Button>
+
+                        <!-- 11: Disbursements -->
+                        <Button x:Name="NavDisbursements" Tag="11"
+                                Style="{StaticResource NavBtn}"
+                                Click="SidebarNav_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="💳" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                <TextBlock Text="Disbursements" FontSize="12.5" VerticalAlignment="Center"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </StackPanel>
+                        </Button>
+
+                        <!-- 12: Accounts -->
+                        <Button x:Name="NavAccounts" Tag="12"
+                                Style="{StaticResource NavBtn}"
+                                Click="SidebarNav_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="🏦" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                <TextBlock Text="Accounts" FontSize="12.5" VerticalAlignment="Center"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </StackPanel>
+                        </Button>
+
+                        <!-- 13: Merchants -->
+                        <Button x:Name="NavMerchants" Tag="13"
+                                Style="{StaticResource NavBtn}"
+                                Click="SidebarNav_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="🏪" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                <TextBlock Text="Merchants" FontSize="12.5" VerticalAlignment="Center"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </StackPanel>
+                        </Button>
+
+                        <!-- 14: Reports -->
+                        <Button x:Name="NavReports" Tag="14"
+                                Style="{StaticResource NavBtn}"
+                                Click="SidebarNav_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="📈" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                <TextBlock Text="Reports" FontSize="12.5" VerticalAlignment="Center"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </StackPanel>
+                        </Button>
+
+                        <!-- Divider -->
+                        <Border Height="1" Background="#FFFFFF12" Margin="4,8"/>
+
+                        <!-- 8: Settings -->
+                        <Button x:Name="NavSettings" Tag="8"
+                                Style="{StaticResource NavBtn}"
+                                Click="SidebarNav_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="⚙" FontSize="14" VerticalAlignment="Center" Margin="0,0,10,0"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                <TextBlock Text="Settings" FontSize="12.5" VerticalAlignment="Center"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </StackPanel>
+                        </Button>
+
+                        <!-- 9: Help & Docs -->
+                        <Button x:Name="NavHelp" Tag="9"
                                 Style="{StaticResource NavBtn}"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
@@ -568,7 +627,19 @@
                             </StackPanel>
                         </Button>
 
-                        <!-- Tab 17: Core DB Utility -->
+                        <!-- 17: Subscriptions -->
+                        <Button x:Name="NavSubscriptions" Tag="17"
+                                Style="{StaticResource NavBtn}"
+                                Click="SidebarNav_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="📦" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                <TextBlock Text="Subscriptions" FontSize="12.5" VerticalAlignment="Center"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </StackPanel>
+                        </Button>
+
+                        <!-- 18: Core DB Utility -->
                         <Button x:Name="NavCoreDb" Tag="18"
                                 Style="{StaticResource NavBtn}"
                                 Click="SidebarNav_Click">
@@ -613,10 +684,10 @@
                             </StackPanel>
                         </StackPanel>
 
-                        <!-- Logout button -->
+                        <!-- Sign Out button -->
                         <Border Grid.Column="1" Width="30" Height="30" CornerRadius="8"
                                 Background="Transparent" Cursor="Hand"
-                                ToolTip="Sign out"
+                                ToolTip="Sign out — returns to login screen"
                                 MouseLeftButtonDown="LogoutBtn_Click"
                                 VerticalAlignment="Center" Margin="6,0,0,0">
                             <Border.Style>
@@ -643,6 +714,27 @@
                         </Border>
 
                     </Grid>
+                </Border>
+
+                <!-- BQE Core account badge (shown after sign-in) -->
+                <Border x:Name="SidebarBqeBadge" Grid.Row="3"
+                        Padding="12,8" Margin="0,0,0,0"
+                        Visibility="Collapsed"
+                        Background="#0078D414"
+                        BorderBrush="#0078D430" BorderThickness="0,1,0,0">
+                    <StackPanel Orientation="Horizontal">
+                        <Border Width="8" Height="8" CornerRadius="4"
+                                Background="#22C55E" Margin="0,0,8,0"
+                                VerticalAlignment="Center"/>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="BQE Core" FontSize="9" FontWeight="SemiBold"
+                                       Foreground="#60A0D0" Margin="0,0,0,1"/>
+                            <TextBlock x:Name="SidebarBqeUserText"
+                                       FontSize="10.5" FontWeight="SemiBold"
+                                       Foreground="#A0C8F0"
+                                       TextTrimming="CharacterEllipsis" MaxWidth="130"/>
+                        </StackPanel>
+                    </StackPanel>
                 </Border>
 
             </Grid>
@@ -1913,7 +2005,8 @@
                                                 <!-- Reason lines — only visible when there are issues -->
                                                 <TextBlock Text="{Binding DiscrepancySummary}"
                                                            FontSize="10.5" TextWrapping="Wrap"
-                                                           Foreground="#7F1D1D" MaxWidth="260">
+                                                           Foreground="#7F1D1D" MaxWidth="260"
+                                                           Margin="0,0,0,4">
                                                     <TextBlock.Style>
                                                         <Style TargetType="TextBlock">
                                                             <Setter Property="Visibility" Value="Collapsed"/>
@@ -1925,12 +2018,50 @@
                                                         </Style>
                                                     </TextBlock.Style>
                                                 </TextBlock>
+                                                <!-- Fix button — visible only when there is a discrepancy -->
+                                                <Button Content="🔧 Fix Discrepancy"
+                                                        Height="24" Padding="8,0" FontSize="11"
+                                                        FontWeight="SemiBold" Cursor="Hand"
+                                                        BorderThickness="1" BorderBrush="#DC2626"
+                                                        Background="#FFF1F2" Foreground="#991B1B"
+                                                        Tag="{Binding}"
+                                                        Click="TxnGridFixDiscrepancyBtn_Click">
+                                                    <Button.Style>
+                                                        <Style TargetType="Button">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                            <Setter Property="Template">
+                                                                <Setter.Value>
+                                                                    <ControlTemplate TargetType="Button">
+                                                                        <Border x:Name="Bd"
+                                                                                Background="{TemplateBinding Background}"
+                                                                                BorderBrush="{TemplateBinding BorderBrush}"
+                                                                                BorderThickness="{TemplateBinding BorderThickness}"
+                                                                                CornerRadius="4"
+                                                                                Padding="{TemplateBinding Padding}">
+                                                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                                        </Border>
+                                                                        <ControlTemplate.Triggers>
+                                                                            <Trigger Property="IsMouseOver" Value="True">
+                                                                                <Setter TargetName="Bd" Property="Background" Value="#FEE2E2"/>
+                                                                            </Trigger>
+                                                                        </ControlTemplate.Triggers>
+                                                                    </ControlTemplate>
+                                                                </Setter.Value>
+                                                            </Setter>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding HasDiscrepancy}" Value="True">
+                                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Button.Style>
+                                                </Button>
                                             </StackPanel>
                                         </Border>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTextColumn Header="Gateway" Binding="{Binding Gateway}" Width="110"/>
+                            <DataGridTextColumn Header="Gateway" Binding="{Binding GatewayDisplay}" Width="110"/>
                             <DataGridTextColumn Header="Payment Type" Binding="{Binding PaymentTypeLabel}" Width="110"/>
                             <DataGridTextColumn Header="Payment Method" Binding="{Binding PaymentMethodDisplay}" Width="160"/>
                             <DataGridTemplateColumn Header="Status" Width="130">
@@ -2205,9 +2336,37 @@
                                 <StackPanel x:Name="ItemsMismatchIcon" Orientation="Horizontal"
                                             Visibility="Collapsed">
                                     <TextBlock Text="⚠ Mismatch — difference: " FontWeight="Bold"
-                                               FontSize="12" Foreground="#991B1B"/>
+                                               FontSize="12" Foreground="#991B1B" VerticalAlignment="Center"/>
                                     <TextBlock x:Name="ItemsDiffText" FontWeight="Bold"
-                                               FontSize="12" Foreground="#991B1B"/>
+                                               FontSize="12" Foreground="#991B1B" VerticalAlignment="Center"/>
+                                    <!-- Fix button: adjusts last line item Total to reconcile -->
+                                    <Button x:Name="FixDiscrepancyBtn"
+                                            Content="🔧 Fix" Height="26" Padding="10,0"
+                                            FontSize="11" FontWeight="SemiBold" Cursor="Hand"
+                                            Margin="10,0,0,0" BorderThickness="1"
+                                            BorderBrush="#DC2626" Background="#FFF1F2"
+                                            Foreground="#991B1B"
+                                            Click="FixDiscrepancyBtn_Click"
+                                            ToolTip="Auto-adjust the last line item's Total so the&#x0a;line items sum matches the transaction Approved amount">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                                        BorderBrush="{TemplateBinding BorderBrush}"
+                                                        BorderThickness="{TemplateBinding BorderThickness}"
+                                                        CornerRadius="4" Padding="{TemplateBinding Padding}">
+                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="Bd" Property="Background" Value="#FEE2E2"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                    </Button>
+                                    <TextBlock x:Name="FixDiscrepancyStatus"
+                                               FontSize="11" Foreground="#166534"
+                                               VerticalAlignment="Center" Margin="8,0,0,0"/>
                                 </StackPanel>
                             </StackPanel>
 
@@ -4198,6 +4357,184 @@
                                 <TextBlock Text="Configure appearance, environment, and preferences."
                                            FontSize="12.5" Foreground="{DynamicResource SubText}" Margin="0,5,0,0"/>
                             </StackPanel>
+
+                            <!-- ── BQE Core Account ─────────────────────────────── -->
+                            <TextBlock Text="BQE Core Account" FontSize="15" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource PrimaryText}" Margin="0,0,0,12"/>
+                            <Border x:Name="BqeAccountCard"
+                                    Background="{DynamicResource CardBg}" CornerRadius="8"
+                                    Padding="20,16" Margin="0,0,0,24"
+                                    BorderBrush="{DynamicResource CardBorder}" BorderThickness="1">
+                                <StackPanel>
+
+                                    <!-- Signed-in banner (hidden until signed in) -->
+                                    <Border x:Name="BqeSignedInBanner"
+                                            Background="{DynamicResource InfoBannerBg}"
+                                            BorderBrush="{DynamicResource InfoBannerBorder}"
+                                            BorderThickness="1" CornerRadius="6"
+                                            Padding="14,10" Margin="0,0,0,16"
+                                            Visibility="Collapsed">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="✅  Signed in as " FontSize="13"
+                                                               Foreground="{DynamicResource InfoBannerTextFg}"/>
+                                                    <TextBlock x:Name="BqeSignedInUserText"
+                                                               FontSize="13" FontWeight="SemiBold"
+                                                               Foreground="{DynamicResource InfoBannerTitleFg}"/>
+                                                </StackPanel>
+                                                <TextBlock x:Name="BqeTokenPreviewText"
+                                                           FontFamily="Consolas" FontSize="10"
+                                                           Foreground="{DynamicResource HintFg}"
+                                                           Margin="0,4,0,0" TextTrimming="CharacterEllipsis"/>
+                                            </StackPanel>
+                                            <Button x:Name="BqeSignOutBtn" Grid.Column="1"
+                                                    Content="Sign out" Height="30" Padding="14,0"
+                                                    FontSize="12" Cursor="Hand"
+                                                    Click="BqeSignOutBtn_Click"
+                                                    Background="{DynamicResource DarkBtnBg}"
+                                                    BorderBrush="{DynamicResource CardBorder}"
+                                                    Foreground="{DynamicResource PrimaryText}"
+                                                    BorderThickness="1" VerticalAlignment="Center"/>
+                                        </Grid>
+                                    </Border>
+
+                                    <!-- Core base URL -->
+                                    <TextBlock Text="BQE Core URL" FontSize="12" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,5"/>
+                                    <TextBox x:Name="BqeCoreUrlBox"
+                                             Height="34" Padding="10,0" FontSize="13"
+                                             VerticalContentAlignment="Center"
+                                             BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
+                                             ToolTip="Base URL of your BQE Core instance&#x0a;e.g. https://local.bqecore.com:8443"
+                                             Text="https://local.bqecore.com:8443"/>
+
+                                    <!-- Environment presets -->
+                                    <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                        <TextBlock Text="Quick:" FontSize="11"
+                                                   Foreground="{DynamicResource HintFg}"
+                                                   VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                        <Button x:Name="BqeUrlLocalBtn"   Content="Local"   Height="24" Padding="10,0" FontSize="11"
+                                                Margin="0,0,4,0" Click="BqeUrlPreset_Click" Tag="https://local.bqecore.com:8443"/>
+                                        <Button x:Name="BqeUrlStagingBtn" Content="Staging" Height="24" Padding="10,0" FontSize="11"
+                                                Margin="0,0,4,0" Click="BqeUrlPreset_Click" Tag="https://staging.bqecore.com"/>
+                                        <Button x:Name="BqeUrlSprintBtn"  Content="Sprint"  Height="24" Padding="10,0" FontSize="11"
+                                                Click="BqeUrlPreset_Click" Tag="https://sprint.bqecore.com"/>
+                                    </StackPanel>
+
+                                    <!-- Email -->
+                                    <TextBlock Text="Email" FontSize="12" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource SubLabelFg}" Margin="0,14,0,5"/>
+                                    <TextBox x:Name="BqeEmailBox"
+                                             Height="34" Padding="10,0" FontSize="13"
+                                             VerticalContentAlignment="Center"
+                                             BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"/>
+
+                                    <!-- Password -->
+                                    <TextBlock Text="Password" FontSize="12" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource SubLabelFg}" Margin="0,12,0,5"/>
+                                    <PasswordBox x:Name="BqePasswordBox"
+                                                 Height="34" Padding="10,0" FontSize="13"
+                                                 PasswordChar="●"/>
+
+                                    <!-- Company picker (shown only when account has multiple companies) -->
+                                    <StackPanel x:Name="BqeCompanyPickerRow"
+                                                Visibility="Collapsed" Margin="0,12,0,0">
+                                        <TextBlock Text="Company" FontSize="12" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,5"/>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="10"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <ComboBox x:Name="BqeCompanyBox"
+                                                      Height="34" FontSize="13"
+                                                      VerticalContentAlignment="Center"
+                                                      BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"/>
+                                            <Button x:Name="BqeCompanySignInBtn" Grid.Column="2"
+                                                    Content="Select &amp; Sign In"
+                                                    Height="34" Padding="14,0" FontSize="13" FontWeight="SemiBold"
+                                                    Cursor="Hand" BorderThickness="0"
+                                                    Background="#0078D4" Foreground="White"
+                                                    Click="BqeCompanySignInBtn_Click">
+                                                <Button.Template>
+                                                    <ControlTemplate TargetType="Button">
+                                                        <Border Background="{TemplateBinding Background}"
+                                                                CornerRadius="4" Padding="{TemplateBinding Padding}">
+                                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                        </Border>
+                                                    </ControlTemplate>
+                                                </Button.Template>
+                                            </Button>
+                                        </Grid>
+                                    </StackPanel>
+
+                                    <!-- Sign in button + status -->
+                                    <Grid Margin="0,16,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="12"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Button x:Name="BqeSignInBtn"
+                                                Content="Sign in to BQE Core"
+                                                Height="36" Padding="20,0" FontSize="13" FontWeight="SemiBold"
+                                                Cursor="Hand" BorderThickness="0"
+                                                Background="#0078D4" Foreground="White"
+                                                Click="BqeSignInBtn_Click">
+                                            <Button.Template>
+                                                <ControlTemplate TargetType="Button">
+                                                    <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                                            CornerRadius="4" Padding="{TemplateBinding Padding}">
+                                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter TargetName="Bd" Property="Background" Value="#106EBE"/>
+                                                        </Trigger>
+                                                        <Trigger Property="IsEnabled" Value="False">
+                                                            <Setter TargetName="Bd" Property="Background" Value="#A8D0F0"/>
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </Button.Template>
+                                        </Button>
+                                        <TextBlock x:Name="BqeSignInStatus" Grid.Column="2"
+                                                   FontSize="12" VerticalAlignment="Center"
+                                                   TextWrapping="Wrap"
+                                                   Foreground="{DynamicResource SubText}"/>
+                                    </Grid>
+
+                                    <!-- Raw response (debug) -->
+                                    <Border x:Name="BqeRawResponseCard"
+                                            Visibility="Collapsed" Margin="0,12,0,0"
+                                            Background="{DynamicResource CodeBg}"
+                                            CornerRadius="4">
+                                        <TextBox x:Name="BqeRawResponseBox"
+                                                 IsReadOnly="True" TextWrapping="Wrap"
+                                                 FontFamily="Consolas" FontSize="10"
+                                                 Background="Transparent"
+                                                 Foreground="{DynamicResource CodeFg}"
+                                                 BorderThickness="0" Padding="8,6"
+                                                 MaxHeight="160" VerticalScrollBarVisibility="Auto">
+                                            <TextBox.Template>
+                                                <ControlTemplate TargetType="TextBox">
+                                                    <ScrollViewer x:Name="PART_ContentHost"
+                                                                  Background="Transparent"
+                                                                  Padding="{TemplateBinding Padding}"
+                                                                  VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"/>
+                                                </ControlTemplate>
+                                            </TextBox.Template>
+                                        </TextBox>
+                                    </Border>
+
+                                </StackPanel>
+                            </Border>
 
                             <!-- ── Appearance ───────────────────────────────────── -->
                             <TextBlock Text="Appearance" FontSize="15" FontWeight="SemiBold"
@@ -8705,7 +9042,246 @@
                     </Grid>
                 </TabItem>
 
-                <!-- Tab 17: Core DB Utility -->
+                <!-- Tab 17: Subscriptions (was 17, now push CoreDB to 18) -->
+                <TabItem Visibility="Collapsed">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="20,16,20,20">
+                        <StackPanel MaxWidth="960">
+
+                            <!-- Header -->
+                            <StackPanel Margin="0,0,0,20">
+                                <TextBlock Text="📦  Subscriptions" FontSize="20" FontWeight="Bold"
+                                           Foreground="{DynamicResource PrimaryText}"/>
+                                <TextBlock Text="View and manage BQE Core company subscriptions. Requires BQE Core sign-in (Settings tab)."
+                                           FontSize="12" Foreground="{DynamicResource SubText}" Margin="0,4,0,0"/>
+                            </StackPanel>
+
+                            <!-- Fetch card -->
+                            <Border Background="{DynamicResource CardBg}" BorderBrush="{DynamicResource CardBorder}"
+                                    BorderThickness="1" CornerRadius="8" Padding="18,14" Margin="0,0,0,16">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="8"/>
+                                        <ColumnDefinition Width="280"/>
+                                        <ColumnDefinition Width="12"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="8"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="Company ID:" FontSize="13" FontWeight="SemiBold"
+                                               VerticalAlignment="Center" Foreground="{DynamicResource LabelFg}"/>
+                                    <TextBox x:Name="SubCompanyIdBox" Grid.Column="2"
+                                             Height="34" Padding="10,0" FontFamily="Consolas" FontSize="12"
+                                             VerticalContentAlignment="Center"
+                                             BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
+                                             ToolTip="BQE Core Company GUID"/>
+                                    <Button x:Name="SubFetchBtn" Grid.Column="4"
+                                            Content="📦  Fetch Subscriptions" Height="34" Padding="16,0"
+                                            FontSize="13" FontWeight="SemiBold" Cursor="Hand" BorderThickness="0"
+                                            Background="#0078D4" Foreground="White"
+                                            Click="SubFetchBtn_Click">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border Background="{TemplateBinding Background}" CornerRadius="4"
+                                                        Padding="{TemplateBinding Padding}">
+                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter Property="Background" Value="#106EBE"/>
+                                                    </Trigger>
+                                                    <Trigger Property="IsEnabled" Value="False">
+                                                        <Setter Property="Background" Value="#A8D0F0"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                    </Button>
+                                    <CheckBox x:Name="SubShowInactiveChk" Grid.Column="6"
+                                              Content="Include inactive" FontSize="12"
+                                              VerticalAlignment="Center"
+                                              Foreground="{DynamicResource SubLabelFg}"/>
+                                    <TextBlock x:Name="SubStatusText" Grid.Column="8"
+                                               FontSize="12" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource SubText}" TextWrapping="Wrap"/>
+                                </Grid>
+                            </Border>
+
+                            <!-- Subscriptions DataGrid -->
+                            <Border Background="{DynamicResource CardBg}" BorderBrush="{DynamicResource CardBorder}"
+                                    BorderThickness="1" CornerRadius="8" ClipToBounds="True">
+                                <StackPanel>
+                                    <!-- Grid header bar -->
+                                    <Border Background="{DynamicResource KpiHeaderBg}" Padding="14,8">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="8"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock x:Name="SubCountText"
+                                                       Text="No subscriptions loaded"
+                                                       FontSize="12" FontWeight="SemiBold"
+                                                       Foreground="White" VerticalAlignment="Center"/>
+                                            <!-- Change Expiry button -->
+                                            <Button x:Name="SubChangeExpiryBtn" Grid.Column="1"
+                                                    Content="📅  Change Expiry" Height="28" Padding="12,0"
+                                                    FontSize="11" FontWeight="SemiBold" Cursor="Hand"
+                                                    BorderThickness="0" Background="#F59E0B" Foreground="White"
+                                                    IsEnabled="False"
+                                                    Click="SubChangeExpiryBtn_Click"
+                                                    ToolTip="Change expiry date of selected subscription">
+                                                <Button.Template>
+                                                    <ControlTemplate TargetType="Button">
+                                                        <Border Background="{TemplateBinding Background}" CornerRadius="4"
+                                                                Padding="{TemplateBinding Padding}">
+                                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                        </Border>
+                                                        <ControlTemplate.Triggers>
+                                                            <Trigger Property="IsMouseOver" Value="True">
+                                                                <Setter Property="Background" Value="#D97706"/>
+                                                            </Trigger>
+                                                            <Trigger Property="IsEnabled" Value="False">
+                                                                <Setter Property="Background" Value="#FCD34D"/>
+                                                                <Setter Property="Foreground" Value="#92400E"/>
+                                                            </Trigger>
+                                                        </ControlTemplate.Triggers>
+                                                    </ControlTemplate>
+                                                </Button.Template>
+                                            </Button>
+                                            <Button x:Name="SubRefreshBtn" Grid.Column="3"
+                                                    Content="↻  Refresh" Height="28" Padding="12,0"
+                                                    FontSize="11" Cursor="Hand" BorderThickness="0"
+                                                    Background="#374151" Foreground="White"
+                                                    Click="SubFetchBtn_Click">
+                                                <Button.Template>
+                                                    <ControlTemplate TargetType="Button">
+                                                        <Border Background="{TemplateBinding Background}" CornerRadius="4"
+                                                                Padding="{TemplateBinding Padding}">
+                                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                        </Border>
+                                                    </ControlTemplate>
+                                                </Button.Template>
+                                            </Button>
+                                        </Grid>
+                                    </Border>
+
+                                    <DataGrid x:Name="SubscriptionsGrid"
+                                              AutoGenerateColumns="False" IsReadOnly="True"
+                                              CanUserResizeColumns="True"
+                                              GridLinesVisibility="Horizontal"
+                                              HeadersVisibility="Column"
+                                              BorderThickness="0"
+                                              SelectionUnit="FullRow" SelectionMode="Single"
+                                              HorizontalScrollBarVisibility="Auto"
+                                              VerticalScrollBarVisibility="Auto"
+                                              MaxHeight="480" FontSize="12.5"
+                                              SelectionChanged="SubscriptionsGrid_SelectionChanged">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="Package"      Binding="{Binding PackageName}"    Width="160"/>
+                                            <DataGridTextColumn Header="Plan"         Binding="{Binding PlanName}"       Width="120"/>
+                                            <DataGridTextColumn Header="Licenses"     Binding="{Binding NumberOfLicense}" Width="80"/>
+                                            <DataGridTextColumn Header="Used"         Binding="{Binding LicenseUsed}"    Width="70"/>
+                                            <DataGridTextColumn Header="Remaining"    Binding="{Binding LicenseRemaining}" Width="90"/>
+                                            <DataGridTemplateColumn Header="Auto Renew" Width="90">
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <TextBlock Text="{Binding AutoRenewLabel}"
+                                                                   FontWeight="Bold" FontSize="13"
+                                                                   HorizontalAlignment="Center"
+                                                                   Foreground="{DynamicResource GridFg}"/>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
+                                            <DataGridTextColumn Header="Starts"       Binding="{Binding StartFormatted}"  Width="110"/>
+                                            <DataGridTextColumn Header="Expires"      Binding="{Binding ExpiryFormatted}" Width="110"/>
+                                            <DataGridTemplateColumn Header="Status" Width="100">
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <Border CornerRadius="4" Padding="7,3"
+                                                                HorizontalAlignment="Left" Margin="2,3">
+                                                            <Border.Background>
+                                                                <Binding Path="StatusColor"
+                                                                         Converter="{StaticResource StringToBrushConverter}"/>
+                                                            </Border.Background>
+                                                            <TextBlock Text="{Binding StatusLabel}"
+                                                                       FontWeight="SemiBold" FontSize="11"
+                                                                       Foreground="White"/>
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
+                                            <DataGridTextColumn Header="ID" Binding="{Binding Id}" Width="260"/>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- Change Expiry form (shown when row selected) -->
+                            <Border x:Name="SubChangeExpiryCard"
+                                    Visibility="Collapsed" Margin="0,14,0,0"
+                                    Background="{DynamicResource CardBg}"
+                                    BorderBrush="{DynamicResource InfoBannerBorder}"
+                                    BorderThickness="1" CornerRadius="8" Padding="18,14">
+                                <StackPanel>
+                                    <TextBlock Text="Change Expiry Date" FontSize="14" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource PrimaryText}" Margin="0,0,0,12"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="10"/>
+                                            <ColumnDefinition Width="160"/>
+                                            <ColumnDefinition Width="16"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="10"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="16"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="New Expiry:" FontSize="13" FontWeight="SemiBold"
+                                                   VerticalAlignment="Center" Foreground="{DynamicResource LabelFg}"/>
+                                        <DatePicker x:Name="SubNewExpiryPicker" Grid.Column="2"
+                                                    Height="34" FontSize="13"
+                                                    BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"/>
+                                        <TextBlock Grid.Column="4" Text="Auto Renew:" FontSize="13" FontWeight="SemiBold"
+                                                   VerticalAlignment="Center" Foreground="{DynamicResource LabelFg}"/>
+                                        <CheckBox x:Name="SubAutoRenewChk" Grid.Column="6"
+                                                  VerticalAlignment="Center"
+                                                  Foreground="{DynamicResource LabelFg}"/>
+                                        <Button x:Name="SubSaveExpiryBtn" Grid.Column="8"
+                                                Content="✓  Save" Height="34" Padding="16,0"
+                                                FontSize="13" FontWeight="SemiBold" Cursor="Hand"
+                                                BorderThickness="0" Background="#17A34A" Foreground="White"
+                                                Click="SubSaveExpiryBtn_Click">
+                                            <Button.Template>
+                                                <ControlTemplate TargetType="Button">
+                                                    <Border Background="{TemplateBinding Background}" CornerRadius="4"
+                                                            Padding="{TemplateBinding Padding}">
+                                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter Property="Background" Value="#15803D"/>
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </Button.Template>
+                                        </Button>
+                                    </Grid>
+                                    <TextBlock x:Name="SubChangeExpiryStatus"
+                                               FontSize="12" Foreground="{DynamicResource SubText}"
+                                               Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </Border>
+
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+
+                <!-- Tab 18: Core DB Utility (was 17) -->
                 <TabItem Visibility="Collapsed">
                     <Grid>
                         <Grid.RowDefinitions>
