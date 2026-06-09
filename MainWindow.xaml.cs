@@ -84,9 +84,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         InitWebhookTests();   // must run AFTER LoadSettings so EntityCustomBox is populated
         UpdateEnvironmentUI();
         AutoDetectLocalSettingsOnStartup();   // fill Local DB boxes from INI if not already saved
-        // Apply restricted mode nav (must run after LoadSettings which sets the checkbox state)
-        ApplyRestrictedMode(RestrictedModeChk.IsChecked == true);
-        // Sidebar: always start on Transaction Viewer (visible in both modes)
+        // Apply restricted mode — forced on all non-dev machines
+        bool restricted = !_isDevMachine || RestrictedModeChk.IsChecked == true;
+        ApplyRestrictedMode(restricted);
+        // Always start on Transaction Viewer (visible in both modes)
         _activeNavBtn = (System.Windows.Controls.Button)NavTxnViewer;
         MainTabControl.SelectedIndex = 0;
         // Refresh Overview KPIs whenever the transaction collection changes
@@ -167,41 +168,46 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _activeNavBtn = btn;
     }
 
+    // ── Dev-machine detection ─────────────────────────────────────────────────
+    // True only on Shaheen's machine — everyone else gets restricted mode forced on.
+    private static readonly bool _isDevMachine =
+        Environment.UserName.Equals("Shaheen.Vakil", StringComparison.OrdinalIgnoreCase) ||
+        Environment.UserName.Equals("Shaheen",       StringComparison.OrdinalIgnoreCase);
+
     // ── Restricted Mode ──────────────────────────────────────────────────────
 
     /// <summary>
-    /// Hide/show nav buttons that are only relevant to internal devs (transaction viewer,
-    /// line items, disbursements, dashboard, merchants, accounts, reports, subscriptions).
-    /// In restricted mode only Webhook Tests + dev tools remain visible.
+    /// Restricted mode (forced on all non-dev machines):
+    /// Visible  — Transaction Viewer, Transactions, Line Items, Webhook Tests, Settings (connection strings).
+    /// Hidden   — everything else (dev/admin tools not needed by QA users).
     /// </summary>
     private void ApplyRestrictedMode(bool restricted)
     {
-        // Restricted mode: show only Transaction Viewer, Transactions, Line Items,
-        // Webhook Tests, Settings (connection config), and Help.
-        // Everything else is hidden for shared users.
         var hiddenInRestricted = new[]
         {
             NavRawJson,      // Tag 4  — Raw JSON
             NavJsonTools,    // Tag 5  — JSON Tools
             NavCrypto,       // Tag 6  — Crypto
-            NavPortal,       // Tag 7  — Portal (Payrix signup wizard)
-            NavHttpClient,   // Tag 15 — HTTP Client
-            NavPerf,         // Tag 16 — Performance Tester
+            NavPortal,       // Tag 7  — Payrix Portal (signup wizard)
+            NavHelp,         // Tag 9  — Help & Docs
             NavDashboard,    // Tag 10 — Dashboard
             NavDisbursements,// Tag 11 — Disbursements
             NavAccounts,     // Tag 12 — Accounts
             NavMerchants,    // Tag 13 — Merchants
             NavReports,      // Tag 14 — Reports
+            NavHttpClient,   // Tag 15 — HTTP Client
+            NavPerf,         // Tag 16 — Performance Tester
             NavSubscriptions,// Tag 17 — Subscriptions
             NavFiddler,      // Tag 18 — Fiddler / Proxy
             NavCoreDb,       // Tag 19 — Core DB Utility
-            NavSettings,     // Tag 8  — Settings
-            NavHelp,         // Tag 9  — Help & Docs
         };
 
         var vis = restricted ? Visibility.Collapsed : Visibility.Visible;
         foreach (var btn in hiddenInRestricted)
             btn.Visibility = vis;
+
+        // Settings stays visible in restricted mode so users can enter API keys / connection strings
+        NavSettings.Visibility = Visibility.Visible;
     }
 
     private void RestrictedModeChk_Changed(object sender, RoutedEventArgs e)
@@ -402,12 +408,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _isDarkMode = s.IsDarkMode;
         ApplyTheme(_isDarkMode);
 
-        // Access mode — developer machines (Shaheen.Vakil / Shaheen) default to full mode
-        // on first run; all other users default to restricted (webhook-only).
-        var firstRun = !System.IO.File.Exists(Services.SettingsService.SettingsFilePath);
-        var isDev    = Environment.UserName.Equals("Shaheen.Vakil", StringComparison.OrdinalIgnoreCase)
-                    || Environment.UserName.Equals("Shaheen",       StringComparison.OrdinalIgnoreCase);
-        RestrictedModeChk.IsChecked = firstRun ? !isDev : s.IsRestrictedMode;
+        // Access mode:
+        //   Dev machine  → use saved preference (defaults to unrestricted)
+        //   Other machine → always force restricted, saved value ignored
+        RestrictedModeChk.IsChecked = _isDevMachine ? s.IsRestrictedMode : true;
 
         // Host DB connection strings per environment
         // Migrate legacy single value into Local slot if present

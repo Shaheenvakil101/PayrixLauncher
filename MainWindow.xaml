@@ -463,7 +463,6 @@
                         <!-- 4: Raw JSON -->
                         <Button x:Name="NavRawJson" Tag="4"
                                 Style="{StaticResource NavBtn}"
-                                Visibility="Collapsed"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="{}{  }" FontSize="12" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,10,0"
@@ -476,7 +475,6 @@
                         <!-- 5: JSON Tools -->
                         <Button x:Name="NavJsonTools" Tag="5"
                                 Style="{StaticResource NavBtn}"
-                                Visibility="Collapsed"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="🔧" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
@@ -489,7 +487,6 @@
                         <!-- 6: Crypto -->
                         <Button x:Name="NavCrypto" Tag="6"
                                 Style="{StaticResource NavBtn}"
-                                Visibility="Collapsed"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="🔐" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
@@ -502,7 +499,6 @@
                         <!-- 7: Payrix Portal -->
                         <Button x:Name="NavPortal" Tag="7"
                                 Style="{StaticResource NavBtn}"
-                                Visibility="Collapsed"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="⬡" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
@@ -518,7 +514,6 @@
                         <!-- 15: HTTP Client -->
                         <Button x:Name="NavHttpClient" Tag="15"
                                 Style="{StaticResource NavBtn}"
-                                Visibility="Collapsed"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="📡" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
@@ -531,7 +526,6 @@
                         <!-- 16: Performance -->
                         <Button x:Name="NavPerf" Tag="16"
                                 Style="{StaticResource NavBtn}"
-                                Visibility="Collapsed"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="⚡" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
@@ -612,7 +606,6 @@
                         <!-- 8: Settings -->
                         <Button x:Name="NavSettings" Tag="8"
                                 Style="{StaticResource NavBtn}"
-                                Visibility="Collapsed"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="⚙" FontSize="14" VerticalAlignment="Center" Margin="0,0,10,0"
@@ -625,7 +618,6 @@
                         <!-- 9: Help & Docs -->
                         <Button x:Name="NavHelp" Tag="9"
                                 Style="{StaticResource NavBtn}"
-                                Visibility="Collapsed"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="❓" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
