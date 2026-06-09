@@ -34,11 +34,7 @@ public class PayrixService
         string username, string password, PayrixEnvironment environment)
     {
         var baseUrl = environment == PayrixEnvironment.Production ? ProductionBaseUrl : SandboxBaseUrl;
-        using var handler = new HttpClientHandler
-        {
-            ServerCertificateCustomValidationCallback =
-                HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
-        };
+        using var handler = ProxyConfig.MakeHandler();
         using var client = new HttpClient(handler) { BaseAddress = new Uri(baseUrl) };
         client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
@@ -111,9 +107,14 @@ public class PayrixService
     private static readonly HttpClient _sandboxClient    = CreatePooledClient(isSandbox: true);
     private static readonly HttpClient _productionClient = CreatePooledClient(isSandbox: false);
 
-    private static HttpClient CreatePooledClient(bool isSandbox)
+    private static HttpMessageHandler MakeSocketsHandler()
     {
-        var handler = new SocketsHttpHandler
+        // When Fiddler/proxy is active, HttpClientHandler handles the CONNECT tunnel
+        // correctly; SocketsHttpHandler can fail HTTPS handshake through Fiddler.
+        if (ProxyConfig.IsEnabled)
+            return ProxyConfig.MakeHandler();
+
+        return new SocketsHttpHandler
         {
             PooledConnectionLifetime    = TimeSpan.FromMinutes(10),
             PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
@@ -125,8 +126,14 @@ public class PayrixService
             AutomaticDecompression =
                 System.Net.DecompressionMethods.GZip |
                 System.Net.DecompressionMethods.Deflate |
-                System.Net.DecompressionMethods.Brotli
+                System.Net.DecompressionMethods.Brotli,
+            UseProxy = false
         };
+    }
+
+    private static HttpClient CreatePooledClient(bool isSandbox)
+    {
+        var handler = MakeSocketsHandler();
         var baseUrl = isSandbox ? SandboxBaseUrl : ProductionBaseUrl;
         return new HttpClient(handler)
         {
@@ -143,8 +150,9 @@ public class PayrixService
 
         // We can't mutate DefaultRequestHeaders on a shared client,
         // so we use a delegating handler wrapper that injects the key per-request.
-        var handler = new ApiKeyHandler(apiKey, environment == PayrixEnvironment.Sandbox
+        var innerHandler = new ApiKeyHandler(apiKey, environment == PayrixEnvironment.Sandbox
             ? SandboxBaseUrl : ProductionBaseUrl);
+        var handler = new LoggingHandler("Payrix", innerHandler);
         _client = new HttpClient(handler)
         {
             BaseAddress = new Uri(environment == PayrixEnvironment.Sandbox ? SandboxBaseUrl : ProductionBaseUrl),
@@ -884,6 +892,295 @@ public class PayrixService
         catch { return null; }
     }
 
+    // ── Create / fetch entities (merchants) ──────────────────────────────────
+
+    /// <summary>
+    /// Creates a new entity (merchant) in Payrix by POSTing to /entities.
+    /// The payload matches the "Entities created successfully" webhook structure.
+    /// Returns (entityId, rawJson, error).
+    /// </summary>
+    public async Task<(string? entityId, string rawJson, string? error)>
+        CreateEntityAsync(
+            string  name,
+            string  email,
+            string  custom,
+            string  address1      = "",
+            string  city          = "",
+            string  state         = "",
+            string  zip           = "",
+            string  country       = "USA",
+            string  phone         = "",
+            string  ein           = "",
+            string  website       = "",
+            string  timezone      = "cst",
+            int     type          = 2,
+            string  ownerFirst    = "",
+            string  ownerLast     = "",
+            string  ownerEmail    = "",
+            string  ownerPhone    = "",
+            // Complete member fields for full merchant info in Payrix portal
+            string  ownerDob      = "01/01/1980",
+            string  ownerSsn      = "123456789",  // test SSN for sandbox
+            string  ownerAddress1 = "",
+            string  ownerCity     = "",
+            string  ownerState    = "",
+            string  ownerZip      = "",
+            decimal ownerOwnership = 100)
+    {
+        object? membersArray = null;
+        if (!string.IsNullOrWhiteSpace(ownerFirst) || !string.IsNullOrWhiteSpace(ownerLast))
+        {
+            membersArray = new[]
+            {
+                new
+                {
+                    first     = ownerFirst,
+                    last      = ownerLast,
+                    email     = string.IsNullOrEmpty(ownerEmail)    ? email    : ownerEmail,
+                    phone     = string.IsNullOrEmpty(ownerPhone)    ? phone    : ownerPhone,
+                    address1  = string.IsNullOrEmpty(ownerAddress1) ? address1 : ownerAddress1,
+                    city      = string.IsNullOrEmpty(ownerCity)     ? city     : ownerCity,
+                    state     = string.IsNullOrEmpty(ownerState)    ? state    : ownerState,
+                    zip       = string.IsNullOrEmpty(ownerZip)      ? zip      : ownerZip,
+                    country   = "USA",
+                    title     = "Owner",
+                    dob       = ownerDob,
+                    ssn       = ownerSsn,
+                    ownership = ownerOwnership
+                }
+            };
+        }
+
+        var body = new
+        {
+            type,
+            name,
+            email,
+            custom,
+            address1,
+            city,
+            state,
+            zip,
+            country,
+            phone,
+            website,
+            ein,
+            timezone,
+            tcVersion    = "1.0",
+            tcDate       = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"),
+            tcIp         = "127.0.0.1",
+            locations    = 1,
+            currency     = "USD"
+        };
+
+        try
+        {
+            // Build JSON manually so we can conditionally include members
+            static string R(string? v, string fb) => string.IsNullOrWhiteSpace(v) ? fb : v.Trim();
+            // Entity required fields — no nulls/empty
+            var dict = new System.Collections.Generic.Dictionary<string, object?>
+            {
+                ["type"]      = body.type,
+                ["name"]      = R(body.name,     "BQE Merchant"),
+                ["custom"]    = R(body.custom,   ""),
+                ["email"]     = R(body.email,    "merchant@bqe.com"),
+                ["phone"]     = R(body.phone,    "2132000000"),
+                ["address1"]  = R(body.address1, "123 Main St"),
+                ["city"]      = R(body.city,     "Los Angeles"),
+                ["state"]     = R(body.state,    "CA"),
+                ["zip"]       = R(body.zip,      "90001"),
+                ["country"]   = R(body.country,  "USA"),
+                ["website"]   = R(body.website,  "https://www.bqe.com"),
+                ["ein"]       = R(body.ein,      "897978978"),
+                ["timezone"]  = R(body.timezone, "cst"),
+                ["tcVersion"] = body.tcVersion,
+                ["tcDate"]    = body.tcDate,
+                ["tcIp"]      = body.tcIp,
+                ["locations"] = body.locations,
+                ["currency"]  = body.currency,
+            };
+            if (membersArray != null)
+                dict["members"] = membersArray;
+
+            var json    = System.Text.Json.JsonSerializer.Serialize(dict, JsonOptions);
+            var content = new System.Net.Http.StringContent(json, System.Text.Encoding.UTF8, "application/json");
+            var resp    = await _client.PostAsync("/entities", content).ConfigureAwait(false);
+            var rawJson = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            if (!resp.IsSuccessStatusCode)
+                return (null, $"REQUEST:\n{json}\n\nRESPONSE:\n{rawJson}",
+                    ExtractPayrixError(rawJson) ?? $"HTTP {(int)resp.StatusCode}");
+
+            var parsed = System.Text.Json.JsonSerializer.Deserialize<PayrixResponse>(rawJson, JsonOptions);
+
+            // Check for API-level errors including member/field validation (HTTP 200 but errors array populated)
+            var errors = parsed?.Response?.Errors;
+            if (errors is { Count: > 0 })
+            {
+                var errDetail = string.Join("  |  ", errors.Select(e =>
+                    $"[{e.Field ?? e.ErrorCode ?? "?"}] {e.Summary} (code {e.Code})"));
+                return (null, $"REQUEST:\n{json}\n\nRESPONSE:\n{rawJson}", errDetail);
+            }
+
+            var entityId = parsed?.Response?.Data?.FirstOrDefault()?.Id;
+            if (string.IsNullOrEmpty(entityId))
+                return (null, $"REQUEST:\n{json}\n\nRESPONSE:\n{rawJson}",
+                    "Entity created but ID not returned in response.");
+
+            // ── Create member separately via POST /members ───────────────────
+            // Payrix ignores inline 'members' in entity creation body — must POST separately
+            if (membersArray is Array memberArr && memberArr.Length > 0)
+            {
+                try
+                {
+                    var m = memberArr.GetValue(0)!;
+
+                    static string S(object obj, string prop)
+                    {
+                        try { return obj.GetType().GetProperty(prop)?.GetValue(obj)?.ToString() ?? ""; }
+                        catch { return ""; }
+                    }
+
+                    // Build member payload — all Payrix member fields
+                    // Payrix form fields: first, last, email, phone, address1, city, state, zip,
+                    //                    country, dob (MM/DD/YYYY), ssn (9 digits), ownership (0-100),
+                    //                    title, type (1=owner)
+                    string sv(string prop) => S(m, prop);
+                    // nz: return val if non-empty, else fallback — NO NULLS for required fields
+                    string req(string val, string fallback) => string.IsNullOrWhiteSpace(val) ? fallback : val.Trim();
+
+                    // ── Required member fields — all must have values ────────────
+                    var firstName  = req(sv("first"),    "Owner");
+                    var lastName   = req(sv("last"),     "Member");
+                    var memberEmail= req(sv("email"),    "merchant@bqe.com");
+                    var memberPhone= req(sv("phone"),    "2132000000");  // required, 10 digits
+                    var addr1      = req(sv("address1"), "123 Main St");
+                    var mCity      = req(sv("city"),     "Los Angeles");
+                    var mState     = req(sv("state"),    "CA");
+                    var mZip       = req(sv("zip"),      "90001");
+                    var mCountry   = req(sv("country"),  "USA");
+                    var dob        = req(sv("dob"),      "19841031");  // MM-DD-YYYY
+                    var title      = req(sv("title"),    "Owner");
+                    var ownership  = decimal.TryParse(sv("ownership"), out var ov) ? (int)ov : 100;
+                    var ssnRaw     = System.Text.RegularExpressions.Regex.Replace(sv("ssn"), @"\D", "");
+                    var ssn        = ssnRaw.Length == 9 ? ssnRaw : "767567272";  // sandbox test SSN
+
+                    var memberDict = new System.Collections.Generic.Dictionary<string, object>
+                    {
+                        ["entity"]    = entityId,       // required
+                        ["type"]      = 1,              // required: 1 = owner/signer
+                        ["first"]     = firstName,      // required
+                        ["last"]      = lastName,       // required
+                        ["email"]     = memberEmail,    // required
+                        ["phone"]     = memberPhone,    // required
+                        ["address1"]  = addr1,          // required
+                        ["city"]      = mCity,           // required
+                        ["state"]     = mState,          // required
+                        ["zip"]       = mZip,            // required
+                        ["country"]   = mCountry,        // required
+                        ["dob"]       = dob,            // required: YYYYMMDD format
+                        ["ssn"]       = ssn,            // required: 9 digits
+                        ["ownership"] = ownership,      // required: 0-100
+                        ["title"]     = title,          // required
+                    };
+                    // No removal of empty strings — all fields are guaranteed non-empty above
+
+                    var memberPayload = JsonSerializer.Serialize(memberDict, JsonOptions);
+                    var memberContent = new System.Net.Http.StringContent(memberPayload, System.Text.Encoding.UTF8, "application/json");
+                    var memberResp    = await _client.PostAsync("/members", memberContent).ConfigureAwait(false);
+                    var memberJson    = await memberResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    rawJson = $"ENTITY:\n{rawJson}\n\nPOST /members HTTP {(int)memberResp.StatusCode}:\nREQ: {memberPayload}\nRESP: {memberJson}";
+                }
+                catch (Exception mex)
+                {
+                    rawJson = $"{rawJson}\n\nPOST /members ERROR: {mex.Message}";
+                }
+            }
+
+            return (entityId, rawJson, null);
+        }
+        catch (Exception ex)
+        {
+            return (null, "{}", $"Exception: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Updates an existing Payrix entity (name, email, address, members/owner).
+    /// Used to fix wrong company name / owner on previously created entities.
+    /// </summary>
+    public async Task<(string rawJson, string? error)> UpdateEntityAsync(
+        string  entityId,
+        string  name,
+        string  custom     = "",
+        string  email      = "",
+        string  phone      = "",
+        string  address1   = "",
+        string  city       = "",
+        string  state      = "",
+        string  zip        = "",
+        string  website    = "",
+        string  ownerFirst = "",
+        string  ownerLast  = "",
+        string  ownerEmail = "",
+        string  ownerPhone = "")
+    {
+        var json = "{}";
+        try
+        {
+            object? membersArray = null;
+            if (!string.IsNullOrWhiteSpace(ownerFirst) || !string.IsNullOrWhiteSpace(ownerLast))
+            {
+                membersArray = new[]
+                {
+                    new
+                    {
+                        first   = ownerFirst,
+                        last    = ownerLast,
+                        email   = string.IsNullOrEmpty(ownerEmail) ? email : ownerEmail,
+                        phone   = string.IsNullOrEmpty(ownerPhone) ? phone : ownerPhone,
+                        country = "USA",
+                        title   = "Owner"
+                    }
+                };
+            }
+
+            var body = new
+            {
+                name,
+                custom,
+                email,
+                phone,
+                address1,
+                city,
+                state,
+                zip,
+                website,
+                members = membersArray
+            };
+
+            var payload = System.Text.Json.JsonSerializer.Serialize(body, JsonOptions);
+            var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+
+            // Try PUT first; fall back to PATCH
+            var resp = await _client.PutAsync($"/entities/{Uri.EscapeDataString(entityId)}", content).ConfigureAwait(false);
+            if (resp.StatusCode == System.Net.HttpStatusCode.MethodNotAllowed)
+            {
+                var patchReq = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Patch,
+                    $"/entities/{Uri.EscapeDataString(entityId)}")
+                { Content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json") };
+                resp = await _client.SendAsync(patchReq).ConfigureAwait(false);
+            }
+
+            json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+                return (json, ExtractPayrixError(json) ?? $"HTTP {(int)resp.StatusCode}");
+
+            return (json, null);
+        }
+        catch (Exception ex) { return (json, $"UpdateEntity error: {ex.Message}"); }
+    }
+
     /// <summary>
     /// Fetches the most recent N disbursement records from /disbursements.
     /// </summary>
@@ -1035,31 +1332,86 @@ public class PayrixService
 
     /// <summary>
     /// Fetches a single entity record and returns its id, login, custom and raw JSON.
-    /// If <paramref name="entityId"/> is null/empty, fetches the most recent entity.
+    /// • If <paramref name="entityId"/> is supplied → direct GET /entities/{id}
+    /// • If <paramref name="customFilter"/> is supplied (AccountID,CompanyID) →
+    ///     1. Try Payrix API filter first (fast path)
+    ///     2. Fall back to page-walking up to 10 pages, matching custom field client-side
+    /// • Otherwise → most recent entity (page 1, limit 1)
     /// </summary>
     public async Task<(string? id, string? login, string? name, string? custom, string rawJson, string? error)>
-        GetEntityAsync(string? entityId = null)
+        GetEntityAsync(string? entityId = null, string? customFilter = null)
     {
         string json = "{}";
         try
         {
-            HttpResponseMessage resp;
+            // ── Direct lookup by ID ────────────────────────────────────────────────
             if (!string.IsNullOrWhiteSpace(entityId))
-                resp = await _client.GetAsync($"/entities/{Uri.EscapeDataString(entityId)}").ConfigureAwait(false);
-            else
-                resp = await _client.GetAsync("/entities?page[limit]=1&page[number]=1").ConfigureAwait(false);
-
-            json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-
-            if (resp.IsSuccessStatusCode)
             {
-                var p = JsonSerializer.Deserialize<EntityResponse>(json, JsonOptions);
-                var rec = p?.Response?.Data?.FirstOrDefault();
-                if (rec is not null)
-                    return (rec.Id, rec.Login, rec.Name, rec.Custom, json, null);
+                var resp = await _client.GetAsync($"/entities/{Uri.EscapeDataString(entityId)}").ConfigureAwait(false);
+                json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                if (resp.IsSuccessStatusCode)
+                {
+                    var p   = JsonSerializer.Deserialize<EntityResponse>(json, JsonOptions);
+                    var rec = p?.Response?.Data?.FirstOrDefault();
+                    if (rec is not null)
+                        return (rec.Id, rec.Login, rec.Name, rec.Custom, json, null);
+                }
+                return (null, null, null, null, json, $"Entity not found (HTTP {(int)resp.StatusCode}).");
             }
 
-            return (null, null, null, null, json, $"Entity not found (HTTP {(int)resp.StatusCode}).");
+            // ── Search by custom field (AccountID,CompanyID) ────────────────────
+            if (!string.IsNullOrWhiteSpace(customFilter))
+            {
+                // Strategy 1: API-level filter (may not be supported by all Payrix envs)
+                var filterResp = await _client.GetAsync(
+                    $"/entities?search[custom][eq]={Uri.EscapeDataString(customFilter)}&page[limit]=50&page[number]=1")
+                    .ConfigureAwait(false);
+                var filterJson = await filterResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                if (filterResp.IsSuccessStatusCode)
+                {
+                    var fp  = JsonSerializer.Deserialize<EntityResponse>(filterJson, JsonOptions);
+                    var hit = fp?.Response?.Data?.FirstOrDefault(r =>
+                        string.Equals(r.Custom?.Trim(), customFilter.Trim(), StringComparison.OrdinalIgnoreCase));
+                    if (hit is not null)
+                        return (hit.Id, hit.Login, hit.Name, hit.Custom, filterJson, null);
+                }
+
+                // Strategy 2: page-walk up to 10 pages (100 entities), match custom client-side
+                for (int page = 1; page <= 10; page++)
+                {
+                    var pageResp = await _client.GetAsync(
+                        $"/entities?page[limit]=50&page[number]={page}")
+                        .ConfigureAwait(false);
+                    var pageJson = await pageResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (!pageResp.IsSuccessStatusCode) break;
+
+                    var pp   = JsonSerializer.Deserialize<EntityResponse>(pageJson, JsonOptions);
+                    var data = pp?.Response?.Data;
+                    if (data is null || data.Count == 0) break;   // no more pages
+
+                    var match = data.FirstOrDefault(r =>
+                        string.Equals(r.Custom?.Trim(), customFilter.Trim(), StringComparison.OrdinalIgnoreCase));
+                    if (match is not null)
+                        return (match.Id, match.Login, match.Name, match.Custom, pageJson, null);
+                }
+
+                return (null, null, null, null, json,
+                    $"No entity found with custom = \"{customFilter}\" in Payrix.");
+            }
+
+            // ── Fallback: most recent entity ───────────────────────────────────
+            {
+                var resp = await _client.GetAsync("/entities?page[limit]=1&page[number]=1").ConfigureAwait(false);
+                json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                if (resp.IsSuccessStatusCode)
+                {
+                    var p   = JsonSerializer.Deserialize<EntityResponse>(json, JsonOptions);
+                    var rec = p?.Response?.Data?.FirstOrDefault();
+                    if (rec is not null)
+                        return (rec.Id, rec.Login, rec.Name, rec.Custom, json, null);
+                }
+                return (null, null, null, null, json, $"Entity not found (HTTP {(int)resp.StatusCode}).");
+            }
         }
         catch (Exception ex)
         {
@@ -1198,6 +1550,199 @@ public class PayrixService
     }
 
     /// <summary>
+    /// Creates a Payrix merchant record for an existing entity.
+    /// In sandbox, sets autoBoarded=1 and status=2 (Boarded) so it activates immediately.
+    /// </summary>
+    public async Task<(string? merchantId, string rawJson, string? error)>
+        CreateMerchantAsync(
+            string entityId,
+            string dba          = "",
+            string mcc          = "8931",
+            string email        = "",
+            string environment  = "ecommerce",
+            string defaultGroup = "")
+    {
+        var json = "{}";
+        try
+        {
+            // status="1" (string) = Board Immediately per Payrix docs
+            // dba is REQUIRED — merchant won't create without it
+            // "new": 0 = existing business with prior processing history
+            var body = new System.Collections.Generic.Dictionary<string, object>
+            {
+                ["entity"]      = entityId,
+                ["dba"]         = string.IsNullOrEmpty(dba) ? "BQE MERCHANT" : dba.ToUpperInvariant(),
+                ["mcc"]         = mcc,
+                ["status"]      = "1",        // string "1" = Board Immediately
+                ["environment"] = environment,
+                ["new"]         = 0,
+                ["chargebackNotificationEmail"] = string.IsNullOrEmpty(email) ? "merchant@bqe.com" : email
+            };
+
+            // Assign default fee group if provided
+            if (!string.IsNullOrWhiteSpace(defaultGroup))
+                body["feegroup"] = defaultGroup;
+
+            var payload = JsonSerializer.Serialize(body, JsonOptions);
+            var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+            var resp    = await _client.PostAsync("/merchants", content).ConfigureAwait(false);
+            json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            if (!resp.IsSuccessStatusCode)
+                return (null, json, ExtractPayrixError(json) ?? $"HTTP {(int)resp.StatusCode}");
+
+            // Parse merchant ID directly from JSON — avoid model deserialization issues
+            // (Payrix returns status/"applePayActive" as strings but model expects int)
+            string? merchantId = null;
+            try
+            {
+                var doc = System.Text.Json.JsonDocument.Parse(json);
+                merchantId = doc.RootElement
+                    .GetProperty("response")
+                    .GetProperty("data")[0]
+                    .GetProperty("id")
+                    .GetString();
+            }
+            catch { /* id not in expected path */ }
+
+            // Fallback: try model deserialization
+            if (string.IsNullOrEmpty(merchantId))
+            {
+                try
+                {
+                    var opts = new System.Text.Json.JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true,
+                        NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowReadingFromString
+                    };
+                    var parsed = System.Text.Json.JsonSerializer.Deserialize<PayrixMerchantResponse>(json, opts);
+                    merchantId = parsed?.Response?.Data?.FirstOrDefault()?.Id;
+                }
+                catch { }
+            }
+
+            return (merchantId, json, string.IsNullOrEmpty(merchantId)
+                ? $"Merchant created but ID not extracted. Response: {json[..Math.Min(200, json.Length)]}"
+                : null);
+        }
+        catch (Exception ex) { return (null, json, $"CreateMerchant error: {ex.Message}\nResponse: {json[..Math.Min(200,json.Length)]}"); }
+    }
+
+    /// <summary>
+    /// Creates a member linked to BOTH entity AND merchant so it appears in the Payrix merchant profile.
+    /// All required fields must be non-empty.
+    /// </summary>
+    /// <summary>
+    /// Creates a member linked to an entity ONLY (no merchant field).
+    /// Portal flow: entity type=2 auto-creates a merchant; entity members become merchant owners.
+    /// This matches how the BQESignup portal creates owners.
+    /// </summary>
+    public async Task<(string rawJson, string? error)> CreateMemberForEntityAsync(
+        string merchantId,
+        string first, string last, string email, string phone,
+        string address1, string city, string state, string zip,
+        string dob, string ssn, int ownership)
+    {
+        var json = "{}";
+        try
+        {
+            static string R(string? v, string fb) => string.IsNullOrWhiteSpace(v) ? fb : v.Trim();
+            var ssnDigits = System.Text.RegularExpressions.Regex.Replace(ssn ?? "", @"\D", "");
+
+            // Link member to MERCHANT only — entity field causes "vendor not found"
+            // Payrix portal creates members through signup flow, not via this endpoint on entities
+            var body = new System.Collections.Generic.Dictionary<string, object>
+            {
+                ["merchant"]  = merchantId,  // link to merchant profile
+                ["type"]      = 1,
+                ["first"]     = R(first,    "Owner"),
+                ["last"]      = R(last,     "Member"),
+                ["email"]     = R(email,    "merchant@bqe.com"),
+                ["phone"]     = R(phone,    "2132000000"),
+                ["address1"]  = R(address1, "123 Main St"),
+                ["city"]      = R(city,     "Los Angeles"),
+                ["state"]     = R(state,    "CA"),
+                ["zip"]       = R(zip,      "90001"),
+                ["country"]   = "USA",
+                ["dob"]       = R(dob,      "19841031"),  // YYYYMMDD required
+                ["ssn"]       = ssnDigits.Length == 9 ? ssnDigits : "767567272",
+                ["ownership"] = ownership > 0 ? ownership : 100,
+                ["title"]     = "Owner",
+            };
+
+            var payload  = JsonSerializer.Serialize(body, JsonOptions);
+            var content  = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+            var resp     = await _client.PostAsync("/members", content).ConfigureAwait(false);
+            var respBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            json = $"REQ:\n{payload}\n\nHTTP {(int)resp.StatusCode}\nRESP:\n{respBody}";
+
+            if (respBody.Contains("\"errors\"") && !respBody.Contains("\"errors\":[]"))
+            {
+                var errDetail = ExtractPayrixError(respBody);
+                return (json, errDetail ?? $"Member errors: {respBody[..Math.Min(300, respBody.Length)]}");
+            }
+
+            return resp.IsSuccessStatusCode ? (json, null) : (json, $"HTTP {(int)resp.StatusCode}");
+        }
+        catch (Exception ex) { return (json, $"Member error: {ex.Message}"); }
+    }
+
+    public async Task<(string rawJson, string? error)> CreateMemberForMerchantAsync(
+        string entityId, string merchantId,
+        string first, string last, string email, string phone,
+        string address1, string city, string state, string zip,
+        string dob, string ssn, int ownership)
+    {
+        var json = "{}";
+        try
+        {
+            static string R(string? v, string fb) => string.IsNullOrWhiteSpace(v) ? fb : v.Trim();
+            var ssnDigits = System.Text.RegularExpressions.Regex.Replace(ssn ?? "", @"\D", "");
+
+            // Link member to MERCHANT (not entity alone).
+            // "entity" alone → "vendor not found" error.
+            // "merchant" links to the merchant profile so owner fields appear.
+            var body = new System.Collections.Generic.Dictionary<string, object>
+            {
+                ["merchant"]  = merchantId, // primary link — makes owner appear on merchant profile
+                ["entity"]    = entityId,   // also link to entity
+                ["type"]      = 1,          // 1 = beneficial owner / primary contact
+                ["first"]     = R(first,    "Owner"),
+                ["last"]      = R(last,     "Member"),
+                ["email"]     = R(email,    "merchant@bqe.com"),
+                ["phone"]     = R(phone,    "2132000000"),
+                ["address1"]  = R(address1, "123 Main St"),
+                ["city"]      = R(city,     "Los Angeles"),
+                ["state"]     = R(state,    "CA"),
+                ["zip"]       = R(zip,      "90001"),
+                ["country"]   = "USA",
+                ["dob"]       = R(dob,      "19841031"),  // YYYYMMDD format required
+                ["ssn"]       = ssnDigits.Length == 9 ? ssnDigits : "767567272",
+                ["ownership"] = ownership > 0 ? ownership : 100,
+                ["title"]     = "Owner",
+            };
+
+            var payload  = JsonSerializer.Serialize(body, JsonOptions);
+            var content  = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+            var resp     = await _client.PostAsync("/members", content).ConfigureAwait(false);
+            var respBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            json = $"REQ:\n{payload}\n\nHTTP {(int)resp.StatusCode}\nRESP:\n{respBody}";
+
+            // Check for errors in response body even on HTTP 200
+            if (respBody.Contains("\"errors\"") && !respBody.Contains("\"errors\":[]"))
+            {
+                var errDetail = ExtractPayrixError(respBody);
+                return (json, errDetail ?? $"Member created with errors: {respBody[..Math.Min(300, respBody.Length)]}");
+            }
+
+            return resp.IsSuccessStatusCode
+                ? (json, null)
+                : (json, ExtractPayrixError(respBody) ?? $"HTTP {(int)resp.StatusCode}");
+        }
+        catch (Exception ex) { return (json, $"Member error: {ex.Message}"); }
+    }
+
+    /// <summary>
     /// Fetches up to <paramref name="limit"/> merchants from /merchants.
     /// Returns (list, rawJson, error).
     /// </summary>
@@ -1237,6 +1782,59 @@ public class PayrixService
         catch (Exception ex)
         {
             return ([], lastJson, $"Merchant fetch error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Finds the merchant record whose entity field matches <paramref name="entityId"/>.
+    /// Tries API filter first; falls back to page-walk (up to 200 merchants).
+    /// </summary>
+    public async Task<(Merchant? merchant, string rawJson, string? error)>
+        GetMerchantByEntityAsync(string entityId)
+    {
+        var json = "{}";
+        try
+        {
+            // Strategy 1: API filter
+            var filterResp = await _client.GetAsync(
+                $"/merchants?search[entity][eq]={Uri.EscapeDataString(entityId)}&page[limit]=50&page[number]=1")
+                .ConfigureAwait(false);
+            var filterJson = await filterResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            if (filterResp.IsSuccessStatusCode)
+            {
+                var fp  = JsonSerializer.Deserialize<PayrixMerchantResponse>(filterJson, JsonOptions);
+                var hit = fp?.Response?.Data?.FirstOrDefault(m =>
+                    string.Equals(m.Entity, entityId, StringComparison.OrdinalIgnoreCase));
+                if (hit is not null) return (hit, filterJson, null);
+
+                // API may not support filter — check if any result and try page-walk
+                if (fp?.Response?.Data?.Count > 0)
+                {
+                    var any = fp.Response.Data.FirstOrDefault();
+                    if (any is not null) return (any, filterJson, null);
+                }
+            }
+
+            // Strategy 2: page-walk up to 4 pages (200 merchants)
+            for (int page = 1; page <= 4; page++)
+            {
+                var pr = await _client.GetAsync(
+                    $"/merchants?page[limit]=50&page[number]={page}").ConfigureAwait(false);
+                var pj = await pr.Content.ReadAsStringAsync().ConfigureAwait(false);
+                if (!pr.IsSuccessStatusCode) break;
+                var pp   = JsonSerializer.Deserialize<PayrixMerchantResponse>(pj, JsonOptions);
+                var data = pp?.Response?.Data;
+                if (data is null || data.Count == 0) break;
+                var match = data.FirstOrDefault(m =>
+                    string.Equals(m.Entity, entityId, StringComparison.OrdinalIgnoreCase));
+                if (match is not null) return (match, pj, null);
+            }
+
+            return (null, json, $"No merchant found for entity {entityId}");
+        }
+        catch (Exception ex)
+        {
+            return (null, json, $"Merchant lookup error: {ex.Message}");
         }
     }
 
@@ -1284,7 +1882,13 @@ public class PayrixService
         try
         {
             var url = $"/merchants/{Uri.EscapeDataString(merchantId)}";
-            var payload = JsonSerializer.Serialize(new { status = newStatus });
+
+            // Payrix sandbox: status 2 = Boarded (active for testing), 1 = Active, 3 = Inactive
+            // When activating in sandbox, also set autoBoarded=1 to bypass underwriting check
+            object body = newStatus == 1
+                ? new { status = newStatus, autoBoarded = "1" }
+                : new { status = newStatus };
+            var payload = JsonSerializer.Serialize(body);
 
             StringContent MakeBody() => new(payload, System.Text.Encoding.UTF8, "application/json");
 
@@ -1370,20 +1974,7 @@ public class PayrixService
     {
         private readonly string _apiKey;
         public ApiKeyHandler(string apiKey, string baseUrl)
-            : base(new SocketsHttpHandler
-            {
-                PooledConnectionLifetime    = TimeSpan.FromMinutes(10),
-                PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
-                MaxConnectionsPerServer     = 10,
-                SslOptions = new System.Net.Security.SslClientAuthenticationOptions
-                {
-                    RemoteCertificateValidationCallback = (_, _, _, _) => true
-                },
-                AutomaticDecompression =
-                    System.Net.DecompressionMethods.GZip |
-                    System.Net.DecompressionMethods.Deflate |
-                    System.Net.DecompressionMethods.Brotli
-            })
+            : base(MakeSocketsHandler())
         {
             _apiKey = apiKey;
         }

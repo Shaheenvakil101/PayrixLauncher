@@ -35,6 +35,26 @@ public class FlexibleStringConverter : JsonConverter<string?>
 /// Needed because some Payrix fields (e.g. lineItemDetailIndicator, discountTreatment)
 /// are sometimes returned as "1" (string) rather than 1 (number).
 /// </summary>
+/// <summary>Handles non-nullable int that Payrix sometimes returns as string "1" or "2".</summary>
+public class FlexibleIntToNonNullableConverter : JsonConverter<int>
+{
+    public override int Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        return reader.TokenType switch
+        {
+            JsonTokenType.Number => reader.TryGetInt32(out var i) ? i : 0,
+            JsonTokenType.String => int.TryParse(reader.GetString(), out var p) ? p : 0,
+            JsonTokenType.True   => 1,
+            JsonTokenType.False  => 0,
+            JsonTokenType.Null   => 0,
+            _                    => 0
+        };
+    }
+
+    public override void Write(Utf8JsonWriter writer, int value, JsonSerializerOptions options)
+        => writer.WriteNumberValue(value);
+}
+
 public class FlexibleIntConverter : JsonConverter<int?>
 {
     public override int? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)

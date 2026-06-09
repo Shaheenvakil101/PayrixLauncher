@@ -1453,6 +1453,154 @@ public static class WebhookTestService
     // ── Onboarding payloads (Entities Created / Merchant Boarded) ────────────
 
     /// <summary>
+    /// Builds a Merchant Boarded webhook payload using real merchant + entity data.
+    /// Matches the exact structure Payrix sends for the "Merchant Boarded" alert.
+    /// </summary>
+    public static string BuildMerchantBoardedPayload(
+        string merchantId       = "t1_mer_626f798aec3d7dea43bb707",
+        string entityId         = "t1_ent_626f798ae3f3897d0fa4d44",
+        string entityName       = "Luettgen - Koepp",
+        string? dba             = null,
+        string merchantCreated  = "05-02-2022",
+        string merchantStatus   = "Boarded",
+        string mcc              = "1799",
+        string ownerFirstName   = "James",
+        string ownerLastName    = "Foster",
+        string created          = "2022-05-02 02:26:18.972",
+        string modified         = "2022-05-02 02:26:23.5837",
+        string login            = "t1_log_61f884eb1e0b6066b1c546f",
+        string email            = "Shaheen@bqe.com",
+        string? boarded         = "20220502",
+        string environment      = "cardPresent",
+        string custom           = StdCustom)
+    {
+        var dbaJson    = dba    == null ? "null" : $"\"{dba}\"";
+
+        return $$"""
+        {
+          "response": {
+            "alert": {
+              "subject": "Merchant has been boarded",
+              "entityName": "{{entityName}}",
+              "merchantId": "{{merchantId}}",
+              "merchantDba": {{dbaJson}},
+              "merchantCreated": "{{merchantCreated}}",
+              "merchantStatus": "{{merchantStatus}}",
+              "merchantMcc": "{{mcc}}",
+              "ownerFirstName": "{{ownerFirstName}}",
+              "ownerLastName": "{{ownerLastName}}",
+              "entityCustom": "{{custom}}"
+            },
+            "data": [
+              {
+                "id": "{{merchantId}}",
+                "created": "{{created}}",
+                "modified": "{{modified}}",
+                "creator": "{{login}}",
+                "modifier": "{{login}}",
+                "lastActivity": null,
+                "entity": "{{entityId}}",
+                "dba": {{dbaJson}},
+                "new": 1,
+                "established": null,
+                "annualCCSales": 0,
+                "avgTicket": 0,
+                "amex": null,
+                "discover": null,
+                "mcc": "{{mcc}}",
+                "status": "2",
+                "boarded": "{{boarded}}",
+                "inactive": 0,
+                "frozen": 0,
+                "environment": "{{environment}}",
+                "visaMvv": null,
+                "chargebackNotificationEmail": "{{email}}",
+                "statusReason": null,
+                "totalApprovedSales": 0,
+                "autoBoarded": "1",
+                "saqType": null,
+                "saqDate": null,
+                "qsa": null,
+                "letterStatus": 0,
+                "letterDate": null,
+                "tcAttestation": 0,
+                "visaDisclosure": 0,
+                "disclosureIP": null,
+                "disclosureDate": null,
+                "accountClosureReasonCode": null,
+                "accountClosureReasonDate": null,
+                "annualCCSaleVolume": null,
+                "annualACHSaleVolume": null,
+                "riskLevel": null,
+                "creditRatio": null,
+                "creditTimeliness": null,
+                "chargebackRatio": null,
+                "ndxDays": null,
+                "ndxPercentage": null,
+                "advancedBilling": null,
+                "locationType": null,
+                "percentKeyed": null,
+                "totalVolume": null,
+                "percentEcomm": null,
+                "seasonal": null,
+                "amexVolume": null,
+                "incrementalAuthSupported": null,
+                "tmxSessionId": null,
+                "percentBusiness": null,
+                "applePayActive": 1,
+                "applePayStatus": null,
+                "googlePayActive": 1
+              }
+            ]
+          }
+        }
+        """;
+    }
+
+    /// <summary>
+    /// Builds a Merchant Boarded payload from real Payrix merchant + entity records.
+    /// Falls back to the template if data is incomplete.
+    /// </summary>
+    public static string BuildMerchantBoardedPayloadFromData(
+        Models.Merchant merchant,
+        string entityId,
+        string entityName,
+        string ownerFirstName = "James",
+        string ownerLastName  = "Foster",
+        string custom         = StdCustom)
+    {
+        // Format boarded date: "20220502" → "05-02-2022"
+        string FormatBoarded(string? b)
+        {
+            if (string.IsNullOrWhiteSpace(b) || b.Length < 8) return DateTime.UtcNow.ToString("MM-dd-yyyy");
+            return $"{b[4..6]}-{b[6..8]}-{b[0..4]}";
+        }
+
+        string statusLabel = merchant.Status switch { 1 => "Active", 2 => "Boarded", 3 => "Suspended", _ => "Boarded" };
+        string createdDate = FormatBoarded(merchant.Boarded) != DateTime.UtcNow.ToString("MM-dd-yyyy")
+            ? FormatBoarded(merchant.Boarded)
+            : FormatBoarded(merchant.Created?.Replace("-","").Replace(" ","").Replace(":","")[..8]);
+
+        return BuildMerchantBoardedPayload(
+            merchantId      : merchant.Id,
+            entityId        : entityId,
+            entityName      : entityName,
+            dba             : merchant.Dba,
+            merchantCreated : createdDate,
+            merchantStatus  : statusLabel,
+            mcc             : merchant.Mcc ?? "1799",
+            ownerFirstName  : ownerFirstName,
+            ownerLastName   : ownerLastName,
+            created         : merchant.Created ?? DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fff"),
+            modified        : merchant.Modified ?? DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.ffff"),
+            login           : merchant.Creator ?? "t1_log_000000000000000000000000",
+            email           : merchant.ChargebackNotificationEmail ?? merchant.Email ?? "merchant@bqe.com",
+            boarded         : merchant.Boarded ?? DateTime.UtcNow.ToString("yyyyMMdd"),
+            environment     : merchant.Environment ?? "cardPresent",
+            custom          : custom);
+    }
+
+    /// <summary>
     /// Builds an onboarding webhook payload with the given entity custom field
     /// (format: "AccountID,CompanyID").
     /// </summary>
@@ -1588,7 +1736,7 @@ public static class WebhookTestService
             {
                 Name        = "Merchant Boarded",
                 Description = "Merchant has been boarded — triggers merchant approval flow",
-                Payload     = BuildOnboardingPayload("Merchant has been boarded", "t1_ent_boarded_001", custom)
+                Payload     = BuildMerchantBoardedPayload(custom: custom)
             },
             new()
             {

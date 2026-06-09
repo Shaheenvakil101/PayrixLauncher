@@ -16,6 +16,7 @@ public class Merchant : INotifyPropertyChanged
 
     private int _status;
     [JsonPropertyName("status")]
+    [System.Text.Json.Serialization.JsonConverter(typeof(FlexibleIntToNonNullableConverter))]
     public int Status
     {
         get => _status;
@@ -65,6 +66,57 @@ public class Merchant : INotifyPropertyChanged
 
     [JsonPropertyName("currency")]
     public string? Currency { get; set; }
+
+    [JsonPropertyName("entity")]
+    public string? Entity { get; set; }
+
+    [JsonPropertyName("dba")]
+    public string? Dba { get; set; }
+
+    [JsonPropertyName("mcc")]
+    public string? Mcc { get; set; }
+
+    [JsonPropertyName("boarded")]
+    public string? Boarded { get; set; }
+
+    [JsonPropertyName("new")]
+    public int? New { get; set; }
+
+    [JsonPropertyName("established")]
+    public string? Established { get; set; }
+
+    [JsonPropertyName("annualCCSales")]
+    public long? AnnualCCSales { get; set; }
+
+    [JsonPropertyName("avgTicket")]
+    public long? AvgTicket { get; set; }
+
+    [JsonPropertyName("autoBoarded")]
+    public string? AutoBoarded { get; set; }
+
+    [JsonPropertyName("inactive")]
+    public int? Inactive { get; set; }
+
+    [JsonPropertyName("frozen")]
+    public int? Frozen { get; set; }
+
+    [JsonPropertyName("environment")]
+    public string? Environment { get; set; }
+
+    [JsonPropertyName("chargebackNotificationEmail")]
+    public string? ChargebackNotificationEmail { get; set; }
+
+    [JsonPropertyName("creator")]
+    public string? Creator { get; set; }
+
+    [JsonPropertyName("modifier")]
+    public string? Modifier { get; set; }
+
+    [JsonPropertyName("applePayActive")]
+    public int? ApplePayActive { get; set; }
+
+    [JsonPropertyName("googlePayActive")]
+    public int? GooglePayActive { get; set; }
 
     [JsonPropertyName("kyc")]
     public MerchantKyc? Kyc { get; set; }

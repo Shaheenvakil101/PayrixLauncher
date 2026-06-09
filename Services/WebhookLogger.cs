@@ -126,6 +126,62 @@ public static class WebhookLogger
         Write(sb.ToString());
     }
 
+    /// <summary>
+    /// Log any error with context — entity creation, merchant creation, DB errors,
+    /// signup failures, etc.  Always written regardless of success/failure.
+    /// </summary>
+    public static void LogError(
+        string operation,
+        string error,
+        string? details     = null,
+        string? requestJson = null,
+        Exception? exception = null)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine(Separator('─'));
+        sb.AppendLine($"[{Timestamp()}]  ❌ ERROR  ▸  {operation}");
+        sb.AppendLine($"Error    : {error}");
+
+        if (!string.IsNullOrWhiteSpace(details))
+        {
+            sb.AppendLine();
+            sb.AppendLine("── DETAILS ──────────────────────────────────────────────────────────────────");
+            sb.AppendLine(details.Trim());
+        }
+
+        if (!string.IsNullOrWhiteSpace(requestJson))
+        {
+            sb.AppendLine();
+            sb.AppendLine("── REQUEST ──────────────────────────────────────────────────────────────────");
+            sb.AppendLine(requestJson.Trim());
+        }
+
+        if (exception is not null)
+        {
+            sb.AppendLine();
+            sb.AppendLine("── EXCEPTION ────────────────────────────────────────────────────────────────");
+            var ex = exception;
+            while (ex != null)
+            {
+                sb.AppendLine($"  {ex.GetType().Name}: {ex.Message}");
+                ex = ex.InnerException;
+            }
+            sb.AppendLine($"StackTrace: {exception.StackTrace}");
+        }
+
+        sb.AppendLine();
+        Write(sb.ToString());
+    }
+
+    /// <summary>Log a successful operation for audit trail.</summary>
+    public static void LogSuccess(string operation, string details)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"[{Timestamp()}]  ✅ OK  ▸  {operation}  —  {details}");
+        sb.AppendLine();
+        Write(sb.ToString());
+    }
+
     /// <summary>Returns the path of today's log file (creates if needed) — for "Open" button.</summary>
     public static string EnsureAndGetPath()
     {

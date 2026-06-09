@@ -24,6 +24,7 @@ public class UserSubscribePackage
     public string? PlanName { get; set; }
 
     [JsonPropertyName("PackageEnum")]
+    [JsonConverter(typeof(FlexibleStringConverter))]   // API returns int (enum value), not string
     public string? PackageEnum { get; set; }
 
     [JsonPropertyName("PackageType")]
@@ -59,23 +60,33 @@ public class UserSubscribePackage
     [JsonIgnore]
     public string AutoRenewLabel => AutoRenew ? "✓" : "—";
 
+    // SubscriptionStatus enum from BQECoreSharedLib:
+    // Active=0, InActive=1, Pending=2, Refunded=3, Expired=4, Renewed=5, Canceled=6, LicenseAdded=7, UnPaid=8, IncompleteExpired=9
     [JsonIgnore]
     public string StatusLabel => Status switch
     {
-        1 => "Active",
-        2 => "Inactive",
-        3 => "Expired",
-        4 => "Cancelled",
+        0 => "Active",
+        1 => "Inactive",
+        2 => "Pending",
+        3 => "Refunded",
+        4 => "Expired",
+        5 => "Renewed",
+        6 => "Cancelled",
+        7 => "License Added",
+        8 => "Unpaid",
+        9 => "Incomplete",
         _ => Status.HasValue ? $"Status {Status}" : "—"
     };
 
     [JsonIgnore]
     public string StatusColor => Status switch
     {
-        1 => "#17A34A",
-        2 or 4 => "#64748B",
-        3 => "#DC2625",
-        _ => "#64748B"
+        0 or 5 => "#17A34A",   // Active / Renewed — green
+        2      => "#F59E0B",   // Pending — amber
+        1 or 6 => "#64748B",   // Inactive / Cancelled — gray
+        3 or 4 or 8 or 9 => "#DC2625",  // Refunded / Expired / Unpaid — red
+        7      => "#2c99f0",   // License Added — blue
+        _      => "#64748B"
     };
 
     [JsonIgnore]
@@ -121,6 +132,42 @@ public class UserSubscribePackage
     }
 }
 
+// ── Add Subscription models ───────────────────────────────────────────────────
+
+public class BqePackage
+{
+    [JsonPropertyName("ID")]   public Guid   Id          { get; set; }
+    [JsonPropertyName("Name")] public string? Name        { get; set; }
+    [JsonPropertyName("PackageType")] [JsonConverter(typeof(FlexibleIntConverter))]
+                               public int?   PackageType { get; set; }
+    [JsonPropertyName("Plans")] public List<BqePlan> Plans { get; set; } = [];
+    public override string ToString() => Name ?? Id.ToString();
+}
+
+public class BqePlan
+{
+    [JsonPropertyName("ID")]               public Guid    Id              { get; set; }
+    [JsonPropertyName("Name")]             public string? Name            { get; set; }
+    [JsonPropertyName("MonthMultiplier")]  [JsonConverter(typeof(FlexibleIntConverter))]
+                                           public int?    MonthMultiplier { get; set; }
+    [JsonPropertyName("MonthlyPrice")]     public decimal? MonthlyPrice   { get; set; }
+    [JsonIgnore] public string DisplayName =>
+        $"{Name}  (×{MonthMultiplier} mo  —  ${MonthlyPrice:F2}/mo)";
+    public override string ToString() => DisplayName;
+}
+
+public class BqeOrderHelper
+{
+    [JsonPropertyName("Packages")]  public List<BqePackage> Packages  { get; set; } = [];
+    [JsonPropertyName("Region")]    public BqeRegion?       Region    { get; set; }
+}
+
+public class BqeRegion
+{
+    [JsonPropertyName("ID")]   public Guid   Id   { get; set; }
+    [JsonPropertyName("Name")] public string? Name { get; set; }
+}
+
 /// <summary>BQEParameters wrapper used by SubscribePackages endpoint.</summary>
 public class BqeParameters
 {
@@ -142,4 +189,8 @@ public class ChangePackageDateRequest
 
     [JsonPropertyName("AutoRenew")]
     public bool AutoRenew { get; set; }
+
+    /// <summary>Required by ValidateCall() — throws 409 if empty.</summary>
+    [JsonPropertyName("Note")]
+    public string Note { get; set; } = "Expiry date updated via BQE Core ePayment Tools";
 }

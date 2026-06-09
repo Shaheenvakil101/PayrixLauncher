@@ -191,6 +191,167 @@ WHERE  c.ID = @companyId", "Company.Account_ID", false),
     }
 
     /// <summary>
+    /// Returns the connection string to the company's actual Core application database.
+    /// Gets Company.DatabaseID from BQECoreHost, then builds a connection using the
+    /// same server/credentials as the host DB but with DatabaseID as the catalog.
+    /// ThirdPartySettings, BQSTable, PaymentService all live in this DB.
+    /// </summary>
+    public static async Task<(string? connStr, string? error)> GetCompanyDbConnectionAsync(
+        string? hostConnStr, string companyId, string accountId)
+    {
+        if (string.IsNullOrWhiteSpace(hostConnStr)) return (null, "No host connection string.");
+
+        if (!Guid.TryParse(companyId, out var cGuid)) return (null, $"Invalid companyId: {companyId}");
+        if (!Guid.TryParse(accountId, out var aGuid)) return (null, $"Invalid accountId: {accountId}");
+
+        hostConnStr = SanitizeConnectionString(hostConnStr);
+        if (!hostConnStr.Contains("TrustServerCertificate", StringComparison.OrdinalIgnoreCase))
+            hostConnStr = hostConnStr.TrimEnd(';') + ";TrustServerCertificate=True";
+
+        // Simple approach:
+        // 1. Query Company.DatabaseID from BQECoreHost (company & accountcompany are in host DB)
+        // 2. Swap the Initial Catalog in the host connection string to the company DB name
+        // This works because for local dev, all DBs are on the same SQL Server instance.
+        try
+        {
+            hostConnStr = SanitizeConnectionString(hostConnStr);
+            if (!hostConnStr.Contains("TrustServerCertificate", StringComparison.OrdinalIgnoreCase))
+                hostConnStr = hostConnStr.TrimEnd(';') + ";TrustServerCertificate=True";
+
+            await using var conn = new SqlConnection(hostConnStr);
+            await conn.OpenAsync();
+
+            // Get DatabaseID from Company table (joined via AccountCompany to verify ownership)
+            const string sql = @"
+SELECT TOP 1 c.DatabaseID
+FROM Company c
+LEFT JOIN AccountCompany ac ON ac.Company_ID = c.ID
+WHERE c.ID = @cid";
+
+            using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.Add(new SqlParameter("@cid", System.Data.SqlDbType.UniqueIdentifier) { Value = cGuid });
+
+            var dbIdRaw = await cmd.ExecuteScalarAsync();
+            var dbId = dbIdRaw?.ToString()?.Trim();
+            if (string.IsNullOrWhiteSpace(dbId))
+                return (null, $"Company.DatabaseID is null/empty for CompanyID={companyId}. Raw value='{dbIdRaw}'");
+
+            // Replace Initial Catalog in the host connection string with the company DB name
+            var coreConn = ReplaceInitialCatalog(hostConnStr, dbId);
+            return (coreConn, null);
+        }
+        catch (Exception ex)
+        {
+            return (null, $"DB error: {ex.Message}");
+        }
+    }
+
+    /// <summary>Replaces the Initial Catalog in a connection string.</summary>
+    private static string ReplaceInitialCatalog(string connStr, string newCatalog)
+    {
+        var sb = new System.Text.StringBuilder();
+        var parts = connStr.Split(';');
+        bool found = false;
+        foreach (var part in parts)
+        {
+            if (string.IsNullOrWhiteSpace(part)) continue;
+            if (part.Trim().StartsWith("Initial Catalog", StringComparison.OrdinalIgnoreCase) ||
+                part.Trim().StartsWith("Database", StringComparison.OrdinalIgnoreCase))
+            {
+                sb.Append($"Initial Catalog={newCatalog};");
+                found = true;
+            }
+            else
+            {
+                sb.Append(part.TrimEnd(';') + ";");
+            }
+        }
+        if (!found) sb.Append($"Initial Catalog={newCatalog};");
+        return sb.ToString().TrimEnd(';');
+    }
+
+    /// <summary>
+    /// Returns just the DatabaseID (= Core application DB name) for a company from BQECoreHost.
+    /// Used to tell the user which database to configure as Payment Service DB.
+    /// </summary>
+    public static async Task<string> GetCompanyDatabaseIdAsync(string? hostConnStr, string companyId)
+    {
+        if (string.IsNullOrWhiteSpace(hostConnStr) || !Guid.TryParse(companyId, out var cGuid))
+            return "(unknown)";
+
+        hostConnStr = SanitizeConnectionString(hostConnStr);
+        if (!hostConnStr.Contains("TrustServerCertificate", StringComparison.OrdinalIgnoreCase))
+            hostConnStr = hostConnStr.TrimEnd(';') + ";TrustServerCertificate=True";
+
+        try
+        {
+            await using var conn = new SqlConnection(hostConnStr);
+            await conn.OpenAsync();
+            using var cmd = new SqlCommand(
+                "SELECT TOP 1 DatabaseID FROM Company WHERE ID = @cid", conn);
+            cmd.Parameters.Add(new SqlParameter("@cid", System.Data.SqlDbType.UniqueIdentifier) { Value = cGuid });
+            var result = await cmd.ExecuteScalarAsync();
+            return result?.ToString() ?? "(null)";
+        }
+        catch (Exception ex) { return $"(error: {ex.Message})"; }
+    }
+
+    /// <summary>
+    /// Returns the CoreApiURI (e.g. "http://localhost/coreapi/") for the given company
+    /// from the Route table in BQECoreHost main DB.
+    /// The WebApp uses CookieHelper.Route.ApiURI (= CoreApiURI) when building API calls.
+    /// </summary>
+    public static async Task<(string? apiUrl, string? error)> GetCoreApiUrlAsync(
+        string? connectionString, string companyId)
+    {
+        if (string.IsNullOrWhiteSpace(connectionString) || string.IsNullOrWhiteSpace(companyId))
+            return (null, "Connection string or company ID missing.");
+
+        if (!Guid.TryParse(companyId, out var companyGuid))
+            return (null, $"Invalid company ID: {companyId}");
+
+        connectionString = SanitizeConnectionString(connectionString);
+        if (!connectionString.Contains("TrustServerCertificate", StringComparison.OrdinalIgnoreCase))
+            connectionString = connectionString.TrimEnd(';') + ";TrustServerCertificate=True";
+
+        // Join AccountCompany → Route to get the company's CoreApiURI
+        const string sql = @"
+SELECT TOP 1 r.CoreApiURI
+FROM   AccountCompany ac
+INNER JOIN Route r ON r.ID = ac.Route_ID
+WHERE  ac.Company_ID = @companyId
+UNION
+SELECT TOP 1 CoreApiURI FROM Route WHERE ID = (
+    SELECT TOP 1 Route_ID FROM Company WHERE ID = @companyId
+)";
+
+        try
+        {
+            await using var conn = new SqlConnection(connectionString);
+            await conn.OpenAsync();
+            using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.Add(new SqlParameter("@companyId", System.Data.SqlDbType.UniqueIdentifier)
+                { Value = companyGuid });
+            var result = await cmd.ExecuteScalarAsync();
+            if (result is not null && result != DBNull.Value)
+            {
+                var url = result.ToString()?.TrimEnd('/') + "/";
+                return (url, null);
+            }
+            // Fallback: return the first/only route
+            using var cmd2 = new SqlCommand("SELECT TOP 1 CoreApiURI FROM Route ORDER BY ID", conn);
+            var fallback = await cmd2.ExecuteScalarAsync();
+            return fallback is not null && fallback != DBNull.Value
+                ? (fallback.ToString()?.TrimEnd('/') + "/", null)
+                : (null, "No Route record found in DB.");
+        }
+        catch (Exception ex)
+        {
+            return (null, $"DB error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
     /// Queries the BQECoreHost MAIN DB by email to return AccountID + CompanyID in one shot.
     /// Strategy: Account.Email → AccountID, then AccountCompany → CompanyID.
     /// </summary>
@@ -350,9 +511,119 @@ WHERE  Account_ID = @accountId";
     }
 
     /// <summary>
+    /// Returns all companies linked to the given Account ID via AccountCompany table.
+    /// Used by the Subscriptions tab to show a company picker when an account has multiple companies.
+    /// </summary>
+    public static async Task<(List<(string companyId, string companyName)> results, string? error)>
+        GetCompaniesByAccountIdAsync(string? mainConnStr, string accountId)
+    {
+        var empty = new List<(string, string)>();
+        if (string.IsNullOrWhiteSpace(mainConnStr) || string.IsNullOrWhiteSpace(accountId))
+            return (empty, "Connection string or account ID is empty.");
+
+        if (!Guid.TryParse(accountId, out var accountGuid))
+            return (empty, $"Invalid Account ID: {accountId}");
+
+        mainConnStr = SanitizeConnectionString(mainConnStr);
+        if (!mainConnStr.Contains("TrustServerCertificate", StringComparison.OrdinalIgnoreCase))
+            mainConnStr = mainConnStr.TrimEnd(';') + ";TrustServerCertificate=True";
+
+        try
+        {
+            await using var conn = new SqlConnection(mainConnStr);
+            await conn.OpenAsync();
+
+            const string sql = @"
+SELECT CAST(ac.Company_ID AS NVARCHAR(50)),
+       ISNULL(c.Name, CAST(ac.Company_ID AS NVARCHAR(50))) AS CompanyName
+FROM   AccountCompany ac
+LEFT JOIN Company c ON c.ID = ac.Company_ID
+WHERE  ac.Account_ID = @accountId
+UNION
+SELECT CAST(c2.ID AS NVARCHAR(50)),
+       ISNULL(c2.Name, CAST(c2.ID AS NVARCHAR(50)))
+FROM   Company c2
+WHERE  c2.Account_ID = @accountId
+  AND  NOT EXISTS (
+         SELECT 1 FROM AccountCompany ac2 WHERE ac2.Account_ID = @accountId
+       )";
+
+            var results = new List<(string, string)>();
+            using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.Add(new SqlParameter("@accountId", System.Data.SqlDbType.UniqueIdentifier) { Value = accountGuid });
+            using var rdr = await cmd.ExecuteReaderAsync();
+            while (await rdr.ReadAsync())
+            {
+                if (rdr.IsDBNull(0)) continue;
+                results.Add((rdr.GetString(0), rdr.IsDBNull(1) ? rdr.GetString(0) : rdr.GetString(1)));
+            }
+
+            return results.Count == 0
+                ? (empty, "No companies found for this Account ID.")
+                : (results, null);
+        }
+        catch (Exception ex)
+        {
+            return (empty, $"DB error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
     /// Strips any accidental prefix before the first recognised SQL connection-string keyword
     /// (handles copy-paste of JSON key names, whitespace, quotes, etc.).
     /// </summary>
+    /// <summary>
+    /// Returns all companies from the main Core DB (AccountCompany JOIN Company).
+    /// Used to populate the Subscriptions tab Company ID dropdown with every company.
+    /// </summary>
+    public static async Task<(List<(string companyId, string companyName, string accountId)> results, string? error)>
+        GetAllCompaniesAsync(string? mainConnStr)
+    {
+        var empty = new List<(string, string, string)>();
+        if (string.IsNullOrWhiteSpace(mainConnStr)) return (empty, "No Core DB connection configured.");
+
+        mainConnStr = SanitizeConnectionString(mainConnStr);
+        if (!mainConnStr.Contains("TrustServerCertificate", StringComparison.OrdinalIgnoreCase))
+            mainConnStr = mainConnStr.TrimEnd(';') + ";TrustServerCertificate=True";
+
+        const string sql = @"
+SELECT DISTINCT
+    CAST(ac.Company_ID AS NVARCHAR(50)) AS CompanyId,
+    ISNULL(c.Name, CAST(ac.Company_ID AS NVARCHAR(50))) AS CompanyName,
+    CAST(ac.Account_ID AS NVARCHAR(50)) AS AccountId
+FROM AccountCompany ac
+LEFT JOIN Company c ON c.ID = ac.Company_ID
+WHERE ac.Company_ID IS NOT NULL
+ORDER BY c.Name";
+
+        try
+        {
+            await using var conn = new SqlConnection(mainConnStr);
+            await conn.OpenAsync();
+            await using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 15 };
+            await using var rdr = await cmd.ExecuteReaderAsync();
+
+            var results = new List<(string, string, string)>();
+            while (await rdr.ReadAsync())
+            {
+                var cid   = rdr.IsDBNull(0) ? "" : rdr.GetString(0);
+                var cname = rdr.IsDBNull(1) ? cid : rdr.GetString(1);
+                var aid   = rdr.IsDBNull(2) ? "" : rdr.GetString(2);
+                if (!string.IsNullOrEmpty(cid))
+                    results.Add((cid, cname, aid));
+            }
+
+            return results.Count > 0
+                ? (results, null)
+                : (empty, "No companies found in the Core DB.");
+        }
+        catch (Exception ex)
+        {
+            return (empty, $"DB error: {ex.Message}");
+        }
+    }
+
+    public static string SanitizeConnectionStringPublic(string cs) => SanitizeConnectionString(cs);
     private static string SanitizeConnectionString(string cs)
     {
         cs = cs.Trim().Trim('"').Trim('\'');
@@ -363,8 +634,202 @@ WHERE  Account_ID = @accountId";
         {
             var idx = cs.IndexOf(kw, StringComparison.OrdinalIgnoreCase);
             if (idx > 0)
-                return cs[idx..];   // strip garbage prefix
+                return cs[idx..];
         }
         return cs;
+    }
+
+    /// <summary>
+    /// Fetches ALL data needed to pre-fill the Payrix merchant signup portal URL.
+    /// Queries Company, Account, and Employee tables directly from BQECoreHost main DB.
+    /// Returns a strongly-typed record with every field; empty strings for missing values.
+    /// </summary>
+    public static async Task<MerchantSignupData> GetMerchantSignupDataAsync(
+        string? hostConnStr, string companyId, string accountId)
+    {
+        var result = new MerchantSignupData { Custom = $"{accountId},{companyId}" };
+
+        if (string.IsNullOrWhiteSpace(hostConnStr)) return result;
+
+        hostConnStr = SanitizeConnectionString(hostConnStr);
+        if (!hostConnStr.Contains("TrustServerCertificate", StringComparison.OrdinalIgnoreCase))
+            hostConnStr = hostConnStr.TrimEnd(';') + ";TrustServerCertificate=True";
+
+        try
+        {
+            await using var conn = new SqlConnection(hostConnStr);
+            await conn.OpenAsync();
+
+            // ── Company details from Company table in BQECoreHost ────────────
+            // Only Name is guaranteed; other fields depend on schema version
+            if (Guid.TryParse(companyId, out var cGuid))
+            {
+                // Detect which columns exist to avoid "Invalid column name" errors
+                var compCols = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                using (var colCmd = new SqlCommand(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Company'", conn))
+                using (var colRdr = await colCmd.ExecuteReaderAsync())
+                    while (await colRdr.ReadAsync()) compCols.Add(colRdr.GetString(0));
+
+                // Build SELECT dynamically — only include columns that exist
+                var selects = new System.Collections.Generic.List<string> { "ISNULL(c.Name,'') AS Name" };
+                void AddCol(string col, string alias)
+                { if (compCols.Contains(col)) selects.Add($"ISNULL(c.{col},'') AS {alias}"); }
+
+                AddCol("Email",   "Email");
+                AddCol("Phone",   "Phone");
+                AddCol("Address", "Address");
+                AddCol("Address2","Address2");
+                AddCol("City",    "City");
+                AddCol("State",   "State");
+                AddCol("Zip",     "Zip");
+                AddCol("Country", "Country");
+                AddCol("URL",     "URL");
+                AddCol("Website", "URL");
+
+                var sql = $"SELECT TOP 1 {string.Join(",", selects)} FROM Company c WHERE c.ID = @cid";
+                using var cmd = new SqlCommand(sql, conn);
+                cmd.Parameters.Add(new SqlParameter("@cid", System.Data.SqlDbType.UniqueIdentifier) { Value = cGuid });
+                using var rdr = await cmd.ExecuteReaderAsync();
+                if (await rdr.ReadAsync())
+                {
+                    result.CompanyName = rdr.IsDBNull(0) ? "" : rdr.GetString(0);
+                    // Read remaining columns by index (only those added above)
+                    int i = 1;
+                    if (compCols.Contains("Email"))   result.CompanyEmail = rdr.IsDBNull(i) ? "" : rdr.GetString(i++); else i++;
+                    if (compCols.Contains("Phone"))   result.CompanyPhone = (rdr.IsDBNull(i) ? "" : rdr.GetString(i++)).Replace(" ","").Replace("-","").Replace("(","").Replace(")",""); else i++;
+                    if (compCols.Contains("Address")) result.Address1     = rdr.IsDBNull(i) ? "" : rdr.GetString(i++); else i++;
+                    if (compCols.Contains("Address2"))result.Address2     = rdr.IsDBNull(i) ? "" : rdr.GetString(i++); else i++;
+                    if (compCols.Contains("City"))    result.City         = rdr.IsDBNull(i) ? "" : rdr.GetString(i++); else i++;
+                    if (compCols.Contains("State"))   result.State        = rdr.IsDBNull(i) ? "" : rdr.GetString(i++); else i++;
+                    if (compCols.Contains("Zip"))     result.Zip          = rdr.IsDBNull(i) ? "" : rdr.GetString(i++); else i++;
+                    if (compCols.Contains("Country")) result.Country      = (rdr.IsDBNull(i) ? "" : rdr.GetString(i++)) is { Length: > 0 } c2 ? c2 : "USA"; else i++;
+                    if (compCols.Contains("URL") || compCols.Contains("Website"))
+                        result.Website = rdr.IsDBNull(i) ? "" : rdr.GetString(i);
+                }
+            }
+
+            // ── Account / Owner details ─────────────────────────────────────
+            if (Guid.TryParse(accountId, out var aGuid))
+            {
+                // Step 1: Get email from Account table (always exists)
+                try
+                {
+                    using var emailCmd = new SqlCommand("SELECT TOP 1 ISNULL(Email,'') FROM Account WHERE ID=@aid", conn);
+                    emailCmd.Parameters.Add(new SqlParameter("@aid", System.Data.SqlDbType.UniqueIdentifier) { Value = aGuid });
+                    var emailVal = await emailCmd.ExecuteScalarAsync();
+                    if (emailVal is string em && !string.IsNullOrEmpty(em))
+                        result.OwnerEmail = em;
+                }
+                catch { }
+
+                // Step 2: Get name from Profile table (BQECoreHost) — columns: FirstName, LastName
+                try
+                {
+                    const string profileSql = @"
+SELECT TOP 1
+    ISNULL(p.FirstName, '') AS FirstName,
+    ISNULL(p.LastName,  '') AS LastName,
+    ISNULL(p.Phone,     '') AS Phone
+FROM Profile p WHERE p.Account_ID = @aid";
+                    using var cmd2 = new SqlCommand(profileSql, conn);
+                    cmd2.Parameters.Add(new SqlParameter("@aid", System.Data.SqlDbType.UniqueIdentifier) { Value = aGuid });
+                    using var rdr2 = await cmd2.ExecuteReaderAsync();
+                    if (await rdr2.ReadAsync())
+                    {
+                        if (!rdr2.IsDBNull(0)) result.OwnerFirst = rdr2.GetString(0);
+                        if (!rdr2.IsDBNull(1)) result.OwnerLast  = rdr2.GetString(1);
+                        if (!rdr2.IsDBNull(2)) result.OwnerPhone = rdr2.GetString(2).Replace(" ","").Replace("-","").Replace("(","").Replace(")","");
+                    }
+                }
+                catch { }
+
+                // Step 3: If name still empty, try Employee table in CORE DB
+                // Employee table columns: EmpFName, EmpLName (NOT FirstName/LastName)
+                if (string.IsNullOrEmpty(result.OwnerFirst) && !string.IsNullOrEmpty(result.OwnerEmail))
+                {
+                    try
+                    {
+                        // Get Core DB connection for this company
+                        var (coreConn3, _) = await GetCompanyDbConnectionAsync(hostConnStr, companyId, accountId);
+                        if (!string.IsNullOrEmpty(coreConn3))
+                        {
+                            await using var coreConn4 = new SqlConnection(coreConn3);
+                            await coreConn4.OpenAsync();
+                            using var empCmd = new SqlCommand(@"
+SELECT TOP 1 ISNULL(EmpFName,'') AS First, ISNULL(EmpLName,'') AS Last
+FROM Employee WHERE Email = @email", coreConn4);
+                            empCmd.Parameters.AddWithValue("@email", result.OwnerEmail);
+                            using var empRdr = await empCmd.ExecuteReaderAsync();
+                            if (await empRdr.ReadAsync())
+                            {
+                                if (!empRdr.IsDBNull(0) && string.IsNullOrEmpty(result.OwnerFirst)) result.OwnerFirst = empRdr.GetString(0);
+                                if (!empRdr.IsDBNull(1) && string.IsNullOrEmpty(result.OwnerLast))  result.OwnerLast  = empRdr.GetString(1);
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                // Legacy fallback — old Employee query with wrong column names (kept for safety)
+                if (string.IsNullOrEmpty(result.OwnerFirst))
+                {
+                    try
+                    {
+                        const string empSql = @"
+SELECT TOP 1
+    ISNULL(e.EmpFName, '') AS FirstName,
+    ISNULL(e.EmpLName, '') AS LastName,
+    ISNULL(e.Email,    '') AS Email,
+    ISNULL(e.Phone,    '') AS Phone
+FROM Employee e
+INNER JOIN AccountCompany ac ON ac.Company_ID = e.Company_ID
+WHERE ac.Account_ID = @aid";
+                        using var cmd4 = new SqlCommand(empSql, conn);
+                        cmd4.Parameters.Add(new SqlParameter("@aid", System.Data.SqlDbType.UniqueIdentifier) { Value = aGuid });
+                        using var rdr4 = await cmd4.ExecuteReaderAsync();
+                        if (await rdr4.ReadAsync())
+                        {
+                            if (string.IsNullOrEmpty(result.OwnerFirst)) result.OwnerFirst = rdr4.GetString(0);
+                            if (string.IsNullOrEmpty(result.OwnerLast))  result.OwnerLast  = rdr4.GetString(1);
+                            if (string.IsNullOrEmpty(result.OwnerEmail)) result.OwnerEmail = rdr4.GetString(2);
+                            if (string.IsNullOrEmpty(result.OwnerPhone)) result.OwnerPhone = rdr4.GetString(3);
+                        }
+                    }
+                    catch { }
+                }
+            }
+
+            // Derive username from email
+            if (!string.IsNullOrEmpty(result.OwnerEmail) && result.OwnerEmail.Contains('@'))
+                result.Username = System.Text.RegularExpressions.Regex.Replace(
+                    result.OwnerEmail[..result.OwnerEmail.IndexOf('@')], "[^a-zA-Z0-9]", "");
+        }
+        catch { /* return whatever we have */ }
+
+        return result;
+    }
+
+    /// <summary>All data needed to pre-fill the Payrix merchant signup portal URL.</summary>
+    public record MerchantSignupData
+    {
+        public string Custom       { get; set; } = "";
+        public string CompanyName  { get; set; } = "";
+        public string CompanyEmail { get; set; } = "";
+        public string CompanyPhone { get; set; } = "";
+        public string Address1     { get; set; } = "";
+        public string Address2     { get; set; } = "";
+        public string City         { get; set; } = "";
+        public string State        { get; set; } = "";
+        public string Zip          { get; set; } = "";
+        public string Country      { get; set; } = "USA";
+        public string Website      { get; set; } = "";
+        public string OwnerFirst   { get; set; } = "";
+        public string OwnerLast    { get; set; } = "";
+        public string OwnerEmail   { get; set; } = "";
+        public string OwnerPhone   { get; set; } = "";
+        public string OwnerMI      { get; set; } = "";
+        public string OwnerTitle   { get; set; } = "";
+        public string Username     { get; set; } = "";
     }
 }

@@ -99,6 +99,14 @@ public class TransactionItem
     public int? LineItemDetailIndicator { get; set; }
 
     /// <summary>
+    /// Set by the Launcher after loading items — true for the last item in the transaction's list.
+    /// Used to infer lineItemDetailIndicator when Payrix doesn't return it (Payrix uses it for
+    /// Level 3 processing but doesn't echo it back in GET responses).
+    /// </summary>
+    [JsonIgnore]
+    public bool IsLastItem { get; set; }
+
+    /// <summary>
     /// String bridge for the DataGrid ComboBox editor — avoids int?/string type-mismatch
     /// when using SelectedItem binding in the CellEditingTemplate.
     /// </summary>
@@ -113,17 +121,25 @@ public class TransactionItem
         }
     }
 
+    /// <summary>
+    /// Effective indicator value: uses the API value when present, otherwise
+    /// infers from position (IsLastItem = 1, otherwise = 0).
+    /// Payrix processes the field during Level 3 settlement but doesn't store/return it.
+    /// </summary>
+    [JsonIgnore]
+    public int EffectiveIndicator =>
+        LineItemDetailIndicator ?? (IsLastItem ? 1 : 0);
+
     /// <summary>Human-readable label for <see cref="LineItemDetailIndicator"/>.</summary>
     [JsonIgnore]
-    public string LineItemDetailIndicatorLabel => LineItemDetailIndicator switch
+    public string LineItemDetailIndicatorLabel => EffectiveIndicator switch
     {
-        0    => "0 — Normal",
-        1    => "1 — Normal (last)",
-        2    => "2 — Credit",
-        3    => "3 — Credit (last)",
-        4    => "4 — Payment",
-        5    => "5 — Payment (last)",
-        null => "0 — Normal",   // API returns null for items posted without an explicit indicator → treat as Normal
+        0 => "0 — Normal",
+        1 => "1 — Normal (last)",
+        2 => "2 — Credit",
+        3 => "3 — Credit (last)",
+        4 => "4 — Payment",
+        5 => "5 — Payment (last)",
         var n => $"{n}"
     };
 
@@ -133,7 +149,7 @@ public class TransactionItem
     {
         get
         {
-            int v = LineItemDetailIndicator ?? 0;
+            int v = EffectiveIndicator;
             if (v == 2 || v == 3) return "#17A34A";   // Credit — green
             if (v == 4 || v == 5) return "#2c99f0";   // Payment — Core blue
             return "#64748B";                           // Normal (0/1) — gray

@@ -45,6 +45,11 @@ public class AppSettings
     public string SprintMainDbConnectionString        { get; set; } = "";
     public string ProductionMainDbConnectionString    { get; set; } = "";
 
+    // Fiddler / HTTP proxy
+    public bool   ProxyEnabled     { get; set; } = false;
+    public string ProxyUrl         { get; set; } = "http://localhost:8888";
+    public bool   ProxyBypassLocal { get; set; } = false;
+
     // BQE Core account sign-in (JWT for API calls)
     public string BqeCoreBaseUrl    { get; set; } = "";   // e.g. https://local.bqecore.com:8443
     public string BqeLoginEmail     { get; set; } = "";

@@ -501,7 +501,7 @@
                                 Style="{StaticResource NavBtn}"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="🌐" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
+                                <TextBlock Text="⬡" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
                                            Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                                 <TextBlock Text="Payrix Portal" FontSize="12.5" VerticalAlignment="Center"
                                            Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
@@ -639,8 +639,20 @@
                             </StackPanel>
                         </Button>
 
-                        <!-- 18: Core DB Utility -->
-                        <Button x:Name="NavCoreDb" Tag="18"
+                        <!-- 18: Fiddler / Traffic Inspector -->
+                        <Button x:Name="NavFiddler" Tag="18"
+                                Style="{StaticResource NavBtn}"
+                                Click="SidebarNav_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="🔎" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                <TextBlock Text="Fiddler" FontSize="12.5" VerticalAlignment="Center"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </StackPanel>
+                        </Button>
+
+                        <!-- 19: Core DB Utility -->
+                        <Button x:Name="NavCoreDb" Tag="19"
                                 Style="{StaticResource NavBtn}"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
@@ -2464,9 +2476,11 @@
                                     <ColumnDefinition Width="8"/>
                                     <ColumnDefinition Width="Auto"/>
                                     <ColumnDefinition Width="6"/>
-                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>   <!-- 16: Fetch -->
                                     <ColumnDefinition Width="6"/>
-                                    <ColumnDefinition Width="Auto" MinWidth="160"/>
+                                    <ColumnDefinition Width="Auto"/>   <!-- 18: Create Merchant -->
+                                    <ColumnDefinition Width="Auto"/>   <!-- 19: Open Portal -->
+                                    <ColumnDefinition Width="Auto" MinWidth="160"/>  <!-- 20: Status -->
                                 </Grid.ColumnDefinitions>
 
                                 <!-- Badge — updated by WebhookTypeBox_SelectionChanged -->
@@ -2496,15 +2510,16 @@
                                     <ComboBoxItem Content="Merchant Boarded"/>
                                 </ComboBox>
 
-                                <!-- txnId -->
-                                <TextBlock Grid.Column="6" Text="txnId:" FontSize="12"
+                                <!-- txnId label — updated dynamically by WebhookTypeBox_SelectionChanged -->
+                                <TextBlock x:Name="TxnIdLabel" Grid.Column="6" Text="txnId:" FontSize="12"
                                            FontWeight="SemiBold" VerticalAlignment="Center"
-                                           Foreground="{DynamicResource LabelFg}"/>
+                                           Foreground="{DynamicResource LabelFg}"
+                                           ToolTip="Paste any Payrix ID here — merchant ID, entity ID, transaction ID or disbursement ID. Auto-resolved based on webhook type."/>
                                 <TextBox x:Name="AchTxnIdBox" Grid.Column="8"
                                          Height="32" Padding="8,0" FontFamily="Consolas"
                                          FontSize="11" VerticalContentAlignment="Center"
                                          BorderBrush="{DynamicResource InputBorder}" BorderThickness="1" Text=""
-                                         ToolTip="Transaction ID. Leave blank to auto-fetch the most recent matching transaction, or enter a specific ID."/>
+                                         ToolTip="ID depends on webhook type:&#x0a;• Types 0,1,2,3,6 → Transaction ID (t1_txn_...)&#x0a;• Types 4,5,7 → Disbursement ID (p1_dbm_...)&#x0a;• Type 8 → Entity ID (t1_ent_...)&#x0a;• Type 9 → Merchant ID (t1_mer_...) OR Entity ID — auto-resolved"/>
 
                                 <!-- Amount -->
                                 <TextBlock Grid.Column="10" Text="Amount:" FontSize="12"
@@ -2564,8 +2579,62 @@
                                     </Button.Template>
                                 </Button>
 
+                                <!-- Create Merchant in Payrix button (Entities Created / Merchant Boarded types) -->
+                                <Button x:Name="CreateMerchantInPayrixBtn" Grid.Column="18"
+                                        Content="🏪  Create in Payrix" Height="32" Padding="12,0"
+                                        FontWeight="SemiBold" FontSize="12" Cursor="Hand"
+                                        BorderThickness="0" Background="#DB2777" Foreground="White"
+                                        Margin="6,0,0,0"
+                                        Click="CreateMerchantInPayrixBtn_Click"
+                                        Visibility="Collapsed"
+                                        ToolTip="POST entity data directly to Payrix /entities endpoint to create a new merchant&#x0a;(Only available for Entities Created / Merchant Boarded types)">
+                                    <Button.Template>
+                                        <ControlTemplate TargetType="Button">
+                                            <Border Background="{TemplateBinding Background}"
+                                                    CornerRadius="6" Padding="{TemplateBinding Padding}">
+                                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter Property="Background" Value="#BE185D"/>
+                                                </Trigger>
+                                                <Trigger Property="IsEnabled" Value="False">
+                                                    <Setter Property="Background" Value="#FBCFE8"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Button.Template>
+                                </Button>
+
+                                <!-- Open Payrix Portal (same flow as BQE Core UI) -->
+                                <Button x:Name="OpenPayrixPortalBtn" Grid.Column="19"
+                                        Content="🚀  Open Payrix Portal" Height="32" Padding="12,0"
+                                        FontWeight="SemiBold" FontSize="12" Cursor="Hand"
+                                        BorderThickness="0" Background="#0369A1" Foreground="White"
+                                        Margin="6,0,0,0"
+                                        Click="OpenPayrixPortalBtn_Click"
+                                        Visibility="Collapsed"
+                                        ToolTip="Fetch company + owner info from BQE Core, then open the pre-filled Payrix signup portal (same flow as Settings → ePayments → Get Started)">
+                                    <Button.Template>
+                                        <ControlTemplate TargetType="Button">
+                                            <Border Background="{TemplateBinding Background}"
+                                                    CornerRadius="6" Padding="{TemplateBinding Padding}">
+                                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter Property="Background" Value="#0284C7"/>
+                                                </Trigger>
+                                                <Trigger Property="IsEnabled" Value="False">
+                                                    <Setter Property="Background" Value="#BAE6FD"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Button.Template>
+                                </Button>
+
                                 <!-- Status text — fills remaining space -->
-                                <TextBlock x:Name="AchPostStatus" Grid.Column="18"
+                                <TextBlock x:Name="AchPostStatus" Grid.Column="20"
                                            FontSize="12" VerticalAlignment="Center"
                                            Foreground="{DynamicResource LabelFg}"
                                            TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
@@ -3355,9 +3424,10 @@
                         <!-- ── Results + Summary + Payload wrapper ── -->
                         <Grid Grid.Row="3">
                             <Grid.RowDefinitions>
-                                <RowDefinition Height="*" MinHeight="120"/><!-- inner Row 0: results -->
-                                <RowDefinition Height="Auto"/>             <!-- inner Row 1: summary -->
-                                <RowDefinition Height="170"/>              <!-- inner Row 2: payload (fixed) -->
+                                <RowDefinition x:Name="TestListRow" Height="160" MinHeight="0"/><!-- Row 0: test list (fixed default, collapsible) -->
+                                <RowDefinition Height="Auto"/>   <!-- Row 1: summary bar -->
+                                <RowDefinition Height="5"/>      <!-- Row 2: drag splitter -->
+                                <RowDefinition Height="*" MinHeight="120"/><!-- Row 3: JSON payload (fills rest) -->
                             </Grid.RowDefinitions>
 
                         <!-- Results grid -->
@@ -3478,29 +3548,62 @@
                             </DataGrid.Columns>
                         </DataGrid>
 
-                        <!-- Summary bar -->
+                        <!-- Summary bar + collapse/expand toggle -->
                         <Border Grid.Row="1" Background="{DynamicResource SummaryBarBg}" BorderBrush="{DynamicResource SummaryBarBorder}"
-                                BorderThickness="1" CornerRadius="6" Padding="12,4" Margin="0,5,0,5">
+                                BorderThickness="1" CornerRadius="6" Padding="8,4" Margin="0,5,0,0">
                             <Grid>
                                 <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
-                                <TextBlock x:Name="WebhookTestSummary"
+                                <!-- Minimize/Expand toggle -->
+                                <Button x:Name="TestListCollapseBtn" Grid.Column="0"
+                                        Content="▲" Width="24" Height="22" Padding="0"
+                                        FontSize="10" FontWeight="Bold" Cursor="Hand"
+                                        Background="Transparent" BorderThickness="0"
+                                        Foreground="{DynamicResource SubText}"
+                                        Click="TestListCollapseBtn_Click"
+                                        ToolTip="Minimize test list to see full JSON payload">
+                                    <Button.Template>
+                                        <ControlTemplate TargetType="Button">
+                                            <Border Background="{TemplateBinding Background}" CornerRadius="4"
+                                                    Padding="{TemplateBinding Padding}" BorderThickness="1"
+                                                    BorderBrush="{DynamicResource CardBorder}">
+                                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter Property="Background" Value="{DynamicResource DarkBtnBgHover}"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Button.Template>
+                                </Button>
+                                <TextBlock x:Name="WebhookTestSummary" Grid.Column="1"
                                            Text="Select an environment and click Run All Tests"
-                                           FontSize="12" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
-                                <TextBlock x:Name="WebhookTestProgress"
-                                           Grid.Column="1" FontSize="11" Foreground="{DynamicResource SubText}"
-                                           VerticalAlignment="Center"/>
+                                           FontSize="12" Foreground="{DynamicResource SubLabelFg}"
+                                           VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                <TextBlock x:Name="WebhookTestProgress" Grid.Column="2"
+                                           FontSize="11" Foreground="{DynamicResource SubText}"
+                                           VerticalAlignment="Center" Margin="0,0,8,0"/>
                             </Grid>
                         </Border>
 
+                        <!-- Drag handle between test list and JSON editor -->
+                        <GridSplitter Grid.Row="2" Height="5" HorizontalAlignment="Stretch"
+                                      Background="{DynamicResource CardBorder2}" Cursor="SizeNS"
+                                      ResizeDirection="Rows" ResizeBehavior="PreviousAndNext"
+                                      ToolTip="Drag to resize test list / JSON editor"/>
+
                         <!-- Payload panel (editable + toolbar) -->
-                        <Border Grid.Row="2" BorderBrush="{DynamicResource CardBorder2}" BorderThickness="1" CornerRadius="6">
+                        <Border Grid.Row="3" BorderBrush="{DynamicResource CardBorder2}" BorderThickness="1" CornerRadius="6" Margin="0,2,0,0">
                             <Grid>
                                 <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="Auto"/>  <!-- Row 0: toolbar -->
+                                    <RowDefinition Height="Auto"/>  <!-- Row 1: signup guide (collapsible) -->
+                                    <RowDefinition Height="*" MinHeight="100"/><!-- Row 2: JSON editor (always visible) -->
                                 </Grid.RowDefinitions>
 
                                 <!-- Toolbar -->
@@ -3654,8 +3757,123 @@
                                     </StackPanel>
                                 </Border>
 
+                                <!-- ── Merchant Signup Flow Guide (shown only for types 8 & 9) ── -->
+                                <Border x:Name="MerchantSignupGuide"
+                                        Grid.Row="1" Margin="0,0,0,0"
+                                        Background="#0F172A" BorderBrush="#334155" BorderThickness="1"
+                                        CornerRadius="6" Padding="12,8"
+                                        Visibility="Collapsed">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- Step 1 -->
+                                        <Border Grid.Column="0" CornerRadius="5" Padding="10,6"
+                                                Background="#1E293B" BorderThickness="1"
+                                                BorderBrush="{Binding Tag, ElementName=SignupStep1Badge}">
+                                            <StackPanel>
+                                                <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                                    <Border x:Name="SignupStep1Badge"
+                                                            CornerRadius="10" Padding="7,2" Margin="0,0,6,0"
+                                                            Background="#4F46E5" Tag="#4F46E5">
+                                                        <TextBlock Text="Step 1" FontSize="10" FontWeight="Bold" Foreground="White"/>
+                                                    </Border>
+                                                    <TextBlock Text="Entities Created" FontSize="12" FontWeight="SemiBold"
+                                                               Foreground="#C7D2FE" VerticalAlignment="Center"/>
+                                                    <TextBlock x:Name="SignupStep1Done" Text=" ✓" FontSize="12"
+                                                               Foreground="#4ADE80" VerticalAlignment="Center"
+                                                               Visibility="Collapsed"/>
+                                                </StackPanel>
+                                                <TextBlock FontSize="11" Foreground="#94A3B8" TextWrapping="Wrap">
+                                                    Select type <Run FontWeight="Bold" Foreground="#C7D2FE">Entities Created</Run>, click
+                                                    <Run FontWeight="Bold" Foreground="#C7D2FE">Fetch</Run> then
+                                                    <Run FontWeight="Bold" Foreground="#C7D2FE">Send POST</Run>.
+                                                    Stores the entity in BQE Core's signup queue.
+                                                </TextBlock>
+                                            </StackPanel>
+                                        </Border>
+
+                                        <!-- Arrow -->
+                                        <TextBlock Grid.Column="1" Text="→" FontSize="20" Foreground="#475569"
+                                                   VerticalAlignment="Center" HorizontalAlignment="Center"
+                                                   Margin="10,0"/>
+
+                                        <!-- Step 2 -->
+                                        <Border Grid.Column="2" CornerRadius="5" Padding="10,6"
+                                                Background="#1E293B" BorderThickness="1"
+                                                BorderBrush="{Binding Tag, ElementName=SignupStep2Badge}">
+                                            <StackPanel>
+                                                <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                                    <Border x:Name="SignupStep2Badge"
+                                                            CornerRadius="10" Padding="7,2" Margin="0,0,6,0"
+                                                            Background="#7C3AED" Tag="#7C3AED">
+                                                        <TextBlock Text="Step 2" FontSize="10" FontWeight="Bold" Foreground="White"/>
+                                                    </Border>
+                                                    <TextBlock Text="Merchant Boarded" FontSize="12" FontWeight="SemiBold"
+                                                               Foreground="#DDD6FE" VerticalAlignment="Center"/>
+                                                    <TextBlock x:Name="SignupStep2Done" Text=" ✓" FontSize="12"
+                                                               Foreground="#4ADE80" VerticalAlignment="Center"
+                                                               Visibility="Collapsed"/>
+                                                </StackPanel>
+                                                <TextBlock FontSize="11" Foreground="#94A3B8" TextWrapping="Wrap">
+                                                    Select type <Run FontWeight="Bold" Foreground="#DDD6FE">Merchant Boarded</Run>, click
+                                                    <Run FontWeight="Bold" Foreground="#DDD6FE">Fetch</Run> then
+                                                    <Run FontWeight="Bold" Foreground="#DDD6FE">Send POST</Run>.
+                                                    Completes ePayments signup in BQE Core.
+                                                </TextBlock>
+                                            </StackPanel>
+                                        </Border>
+
+                                        <!-- Bottom row: diagnostics -->
+                                        <StackPanel Grid.Row="1" Grid.ColumnSpan="3"
+                                                    Orientation="Horizontal" Margin="0,8,0,0">
+                                            <Button x:Name="CheckSignupStateBtn"
+                                                    Content="🔎 Check DB State"
+                                                    Click="CheckSignupStateBtn_Click"
+                                                    Height="26" Padding="10,0"
+                                                    FontSize="11" FontWeight="SemiBold" Cursor="Hand"
+                                                    BorderThickness="0" Background="#0F172A"
+                                                    Foreground="#94A3B8">
+                                                <Button.Template>
+                                                    <ControlTemplate TargetType="Button">
+                                                        <Border Background="{TemplateBinding Background}" CornerRadius="4"
+                                                                BorderBrush="#334155" BorderThickness="1"
+                                                                Padding="{TemplateBinding Padding}">
+                                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                        </Border>
+                                                        <ControlTemplate.Triggers>
+                                                            <Trigger Property="IsMouseOver" Value="True">
+                                                                <Setter Property="Background" Value="#1E293B"/>
+                                                            </Trigger>
+                                                        </ControlTemplate.Triggers>
+                                                    </ControlTemplate>
+                                                </Button.Template>
+                                            </Button>
+                                            <TextBlock x:Name="SignupStateResult"
+                                                       FontSize="11" Foreground="#94A3B8"
+                                                       VerticalAlignment="Center" Margin="10,0,0,0"
+                                                       TextWrapping="Wrap" Text=""
+                                                       ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+                                        </StackPanel>
+
+                                    </Grid>
+                                </Border>
+
+                                <!-- Draggable splitter between guide and payload -->
+                                <GridSplitter Grid.Row="2" Height="4" HorizontalAlignment="Stretch"
+                                              Background="#334155" Cursor="SizeNS"
+                                              ResizeDirection="Rows" ResizeBehavior="PreviousAndNext"
+                                              Visibility="{Binding Visibility, ElementName=MerchantSignupGuide}"/>
+
                                 <!-- Editable JSON box -->
-                                <TextBox x:Name="WebhookPayloadBox" Grid.Row="1"
+                                <TextBox x:Name="WebhookPayloadBox" Grid.Row="2"
                                          IsReadOnly="False"
                                          FontFamily="Consolas" FontSize="11"
                                          Background="{DynamicResource CodeBg}" Foreground="{DynamicResource CodeFg}"
@@ -3665,7 +3883,8 @@
                                          VerticalScrollBarVisibility="Auto"
                                          HorizontalScrollBarVisibility="Auto"
                                          AcceptsReturn="True" AcceptsTab="True"
-                                         SpellCheck.IsEnabled="False"/>
+                                         SpellCheck.IsEnabled="False"
+                                         Tag="Select a webhook type and click Fetch to load payload — or paste / type JSON directly here"/>
                             </Grid>
                         </Border>
                         </Grid><!-- end Results+Summary+Payload wrapper -->
@@ -4410,8 +4629,8 @@
                                              Height="34" Padding="10,0" FontSize="13"
                                              VerticalContentAlignment="Center"
                                              BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
-                                             ToolTip="Base URL of your BQE Core instance&#x0a;e.g. https://local.bqecore.com:8443"
-                                             Text="https://local.bqecore.com:8443"/>
+                                             ToolTip="Host root URL — do NOT include /BQECoreWebApp or /BQECoreAdminPortalAPI&#x0a;Examples:&#x0a;  Local:   http://localhost&#x0a;  Staging: https://staging.bqecore.com"
+                                             Text="http://localhost"/>
 
                                     <!-- Environment presets -->
                                     <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
@@ -4419,7 +4638,7 @@
                                                    Foreground="{DynamicResource HintFg}"
                                                    VerticalAlignment="Center" Margin="0,0,8,0"/>
                                         <Button x:Name="BqeUrlLocalBtn"   Content="Local"   Height="24" Padding="10,0" FontSize="11"
-                                                Margin="0,0,4,0" Click="BqeUrlPreset_Click" Tag="https://local.bqecore.com:8443"/>
+                                                Margin="0,0,4,0" Click="BqeUrlPreset_Click" Tag="http://localhost"/>
                                         <Button x:Name="BqeUrlStagingBtn" Content="Staging" Height="24" Padding="10,0" FontSize="11"
                                                 Margin="0,0,4,0" Click="BqeUrlPreset_Click" Tag="https://staging.bqecore.com"/>
                                         <Button x:Name="BqeUrlSprintBtn"  Content="Sprint"  Height="24" Padding="10,0" FontSize="11"
@@ -9059,26 +9278,131 @@
                             <Border Background="{DynamicResource CardBg}" BorderBrush="{DynamicResource CardBorder}"
                                     BorderThickness="1" CornerRadius="8" Padding="18,14" Margin="0,0,0,16">
                                 <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>  <!-- 0: Email row -->
+                                        <RowDefinition Height="8"/>
+                                        <RowDefinition Height="Auto"/>  <!-- 2: Company ID row -->
+                                        <RowDefinition Height="8"/>
+                                        <RowDefinition Height="Auto"/>  <!-- 4: Resolved source -->
+                                        <RowDefinition Height="8"/>
+                                        <RowDefinition Height="Auto"/>  <!-- 6: Multi-company picker -->
+                                    </Grid.RowDefinitions>
                                     <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>   <!-- 0: label -->
                                         <ColumnDefinition Width="8"/>
-                                        <ColumnDefinition Width="280"/>
-                                        <ColumnDefinition Width="12"/>
-                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="240"/>    <!-- 2: textbox -->
+                                        <ColumnDefinition Width="6"/>
+                                        <ColumnDefinition Width="Auto"/>   <!-- 4: Email from Host DB button -->
+                                        <ColumnDefinition Width="6"/>
+                                        <ColumnDefinition Width="Auto"/>   <!-- 6 (was 4): Fetch by Email button -->
+                                        <ColumnDefinition Width="10"/>
+                                        <ColumnDefinition Width="Auto"/>   <!-- 6: DB button -->
+                                        <ColumnDefinition Width="6"/>
+                                        <ColumnDefinition Width="Auto"/>   <!-- 8: API button -->
+                                        <ColumnDefinition Width="10"/>
+                                        <ColumnDefinition Width="Auto"/>   <!-- 10: checkbox -->
+                                        <ColumnDefinition Width="8"/>
+                                        <ColumnDefinition Width="*"/>      <!-- 12: status -->
                                         <ColumnDefinition Width="8"/>
                                         <ColumnDefinition Width="Auto"/>
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Grid.Column="0" Text="Company ID:" FontSize="13" FontWeight="SemiBold"
+                                    <!-- Row 0: Email search -->
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Email:" FontSize="13" FontWeight="SemiBold"
                                                VerticalAlignment="Center" Foreground="{DynamicResource LabelFg}"/>
-                                    <TextBox x:Name="SubCompanyIdBox" Grid.Column="2"
-                                             Height="34" Padding="10,0" FontFamily="Consolas" FontSize="12"
+                                    <TextBox x:Name="SubEmailBox" Grid.Row="0" Grid.Column="2"
+                                             Height="34" Padding="10,0" FontSize="13"
                                              VerticalContentAlignment="Center"
                                              BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
-                                             ToolTip="BQE Core Company GUID"/>
-                                    <Button x:Name="SubFetchBtn" Grid.Column="4"
-                                            Content="📦  Fetch Subscriptions" Height="34" Padding="16,0"
+                                             ToolTip="Enter user email to find all companies linked to it"
+                                             KeyDown="SubEmailBox_KeyDown"/>
+
+                                    <!-- Fetch email from BQECoreHost using AccountID from EntityCustom -->
+                                    <Button Grid.Row="0" Grid.Column="4"
+                                            Content="← Email from Host DB" Height="34" Padding="10,0"
+                                            FontSize="11" FontWeight="SemiBold" Cursor="Hand"
+                                            BorderThickness="0" Background="#0369A1" Foreground="White"
+                                            Click="SubFetchEmailFromHostBtn_Click"
+                                            ToolTip="Fetch Account.Email from BQECoreHost using the AccountID in Entity Custom field">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border Background="{TemplateBinding Background}" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#0284C7"/></Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                    </Button>
+
+                                    <Button Grid.Row="0" Grid.Column="6"
+                                            Content="🔍  Fetch by Email" Height="34" Padding="14,0"
+                                            FontSize="12" FontWeight="SemiBold" Cursor="Hand"
+                                            BorderThickness="0" Background="#6D28D9" Foreground="White"
+                                            Click="SubFetchByEmailBtn_Click"
+                                            ToolTip="Fetch all companies linked to this email from Host DB">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border Background="{TemplateBinding Background}" CornerRadius="4"
+                                                        Padding="{TemplateBinding Padding}">
+                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter Property="Background" Value="#5B21B6"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                    </Button>
+
+                                    <!-- Row 2: Company ID -->
+                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Company ID:" FontSize="13" FontWeight="SemiBold"
+                                               VerticalAlignment="Center" Foreground="{DynamicResource LabelFg}"/>
+                                    <ComboBox x:Name="SubCompanyIdBox" Grid.Row="2" Grid.Column="2"
+                                              IsEditable="True" Height="34" Padding="6,0"
+                                              FontFamily="Consolas" FontSize="11"
+                                              VerticalContentAlignment="Center"
+                                              BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
+                                              SelectionChanged="SubCompanyIdBox_SelectionChanged"
+                                              ToolTip="BQE Core Company GUID&#x0a;Use ← Auto-fill to populate from Entity Custom / Host DB&#x0a;When multiple companies exist, use the dropdown to switch"/>
+                                    <!-- Auto-fill button -->
+                                    <Button Grid.Row="2" Grid.Column="4"
+                                            Content="← Auto-fill" Height="34" Padding="12,0" FontSize="12"
+                                            Cursor="Hand" BorderThickness="1"
+                                            BorderBrush="{DynamicResource InputBorder}"
+                                            Background="{DynamicResource DarkBtnBg}"
+                                            Foreground="{DynamicResource PrimaryText}"
+                                            Click="SubAutoFillCompanyBtn_Click"
+                                            ToolTip="Fill Company ID from Entity Custom field, Host DB result, or selected transaction"/>
+                                    <Button x:Name="SubFetchDbBtn" Grid.Row="2" Grid.Column="6"
+                                            Content="🗄  Fetch from DB" Height="34" Padding="14,0"
+                                            FontSize="13" FontWeight="SemiBold" Cursor="Hand" BorderThickness="0"
+                                            Background="#059669" Foreground="White"
+                                            Click="SubFetchDbBtn_Click"
+                                            ToolTip="Query CompanySubscription directly from Host DB (no API required)">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border Background="{TemplateBinding Background}" CornerRadius="4"
+                                                        Padding="{TemplateBinding Padding}">
+                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter Property="Background" Value="#047857"/>
+                                                    </Trigger>
+                                                    <Trigger Property="IsEnabled" Value="False">
+                                                        <Setter Property="Background" Value="#6EE7B7"/>
+                                                        <Setter Property="Foreground" Value="#065F46"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                    </Button>
+                                    <Button x:Name="SubFetchBtn" Grid.Row="2" Grid.Column="8"
+                                            Content="🌐  Fetch via API" Height="34" Padding="14,0"
                                             FontSize="13" FontWeight="SemiBold" Cursor="Hand" BorderThickness="0"
                                             Background="#0078D4" Foreground="White"
                                             Click="SubFetchBtn_Click">
@@ -9099,13 +9423,26 @@
                                             </ControlTemplate>
                                         </Button.Template>
                                     </Button>
-                                    <CheckBox x:Name="SubShowInactiveChk" Grid.Column="6"
+                                    <CheckBox x:Name="SubShowInactiveChk" Grid.Row="2" Grid.Column="10" Margin="8,0,0,0"
                                               Content="Include inactive" FontSize="12"
                                               VerticalAlignment="Center"
                                               Foreground="{DynamicResource SubLabelFg}"/>
-                                    <TextBlock x:Name="SubStatusText" Grid.Column="8"
+                                    <TextBlock x:Name="SubStatusText" Grid.Row="2" Grid.Column="12" Grid.ColumnSpan="5"
                                                FontSize="12" VerticalAlignment="Center"
-                                               Foreground="{DynamicResource SubText}" TextWrapping="Wrap"/>
+                                               Foreground="{DynamicResource SubText}"
+                                               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                               ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+
+                                    <!-- Row 2: multi-company picker (shown when account has >1 company) -->
+                                    <StackPanel Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="15"
+                                                Orientation="Horizontal">
+                                        <TextBlock Text="Resolved from: " FontSize="11"
+                                                   Foreground="{DynamicResource HintFg}" VerticalAlignment="Center"/>
+                                        <TextBlock x:Name="SubResolvedSourceText" FontSize="11" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                    </StackPanel>
+
+                                    <!-- Row 4: spacer (picker row removed — now inline in ComboBox) -->
                                 </Grid>
                             </Border>
 
@@ -9121,13 +9458,36 @@
                                                 <ColumnDefinition Width="Auto"/>
                                                 <ColumnDefinition Width="8"/>
                                                 <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="8"/>
+                                                <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
                                             <TextBlock x:Name="SubCountText"
                                                        Text="No subscriptions loaded"
                                                        FontSize="12" FontWeight="SemiBold"
                                                        Foreground="White" VerticalAlignment="Center"/>
+                                            <!-- Add Subscription button -->
+                                            <Button x:Name="SubAddBtn" Grid.Column="1"
+                                                    Content="➕  Add Subscription" Height="28" Padding="12,0"
+                                                    FontSize="11" FontWeight="SemiBold" Cursor="Hand"
+                                                    BorderThickness="0" Background="#17A34A" Foreground="White"
+                                                    Click="SubAddBtn_Click"
+                                                    ToolTip="Add a new subscription package to this company">
+                                                <Button.Template>
+                                                    <ControlTemplate TargetType="Button">
+                                                        <Border Background="{TemplateBinding Background}" CornerRadius="4"
+                                                                Padding="{TemplateBinding Padding}">
+                                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                        </Border>
+                                                        <ControlTemplate.Triggers>
+                                                            <Trigger Property="IsMouseOver" Value="True">
+                                                                <Setter Property="Background" Value="#15803D"/>
+                                                            </Trigger>
+                                                        </ControlTemplate.Triggers>
+                                                    </ControlTemplate>
+                                                </Button.Template>
+                                            </Button>
                                             <!-- Change Expiry button -->
-                                            <Button x:Name="SubChangeExpiryBtn" Grid.Column="1"
+                                            <Button x:Name="SubChangeExpiryBtn" Grid.Column="3"
                                                     Content="📅  Change Expiry" Height="28" Padding="12,0"
                                                     FontSize="11" FontWeight="SemiBold" Cursor="Hand"
                                                     BorderThickness="0" Background="#F59E0B" Foreground="White"
@@ -9152,7 +9512,7 @@
                                                     </ControlTemplate>
                                                 </Button.Template>
                                             </Button>
-                                            <Button x:Name="SubRefreshBtn" Grid.Column="3"
+                                            <Button x:Name="SubRefreshBtn" Grid.Column="5"
                                                     Content="↻  Refresh" Height="28" Padding="12,0"
                                                     FontSize="11" Cursor="Hand" BorderThickness="0"
                                                     Background="#374151" Foreground="White"
@@ -9220,6 +9580,144 @@
                                 </StackPanel>
                             </Border>
 
+                            <!-- Raw debug log (shown after fetch) -->
+                            <Border x:Name="SubRawLogCard"
+                                    Visibility="Collapsed" Margin="0,10,0,0"
+                                    Background="{DynamicResource CodeBg}" CornerRadius="4">
+                                <TextBox x:Name="SubRawLogBox"
+                                         IsReadOnly="True" TextWrapping="Wrap"
+                                         FontFamily="Consolas" FontSize="10"
+                                         Background="Transparent"
+                                         Foreground="{DynamicResource CodeFg}"
+                                         BorderThickness="0" Padding="10,8"
+                                         MaxHeight="200" VerticalScrollBarVisibility="Auto">
+                                    <TextBox.Template>
+                                        <ControlTemplate TargetType="TextBox">
+                                            <ScrollViewer x:Name="PART_ContentHost" Background="Transparent"
+                                                          Padding="{TemplateBinding Padding}"
+                                                          VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"/>
+                                        </ControlTemplate>
+                                    </TextBox.Template>
+                                </TextBox>
+                            </Border>
+
+                            <!-- ── Add Subscription card ─────────────────────────────── -->
+                            <Border x:Name="SubAddCard"
+                                    Visibility="Collapsed" Margin="0,14,0,0"
+                                    Background="{DynamicResource CardBg}"
+                                    BorderBrush="{DynamicResource CardBorder}"
+                                    BorderThickness="1" CornerRadius="8" Padding="20,16">
+                                <StackPanel>
+                                    <!-- Header row -->
+                                    <Grid Margin="0,0,0,16">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="➕  Add Subscription" FontSize="15" FontWeight="Bold"
+                                                   Foreground="{DynamicResource PrimaryText}"/>
+                                        <Button Grid.Column="1" Content="✕" Height="28" Width="28"
+                                                Cursor="Hand" FontSize="13" BorderThickness="0"
+                                                Background="Transparent" Foreground="{DynamicResource HintFg}"
+                                                Click="SubAddCancelBtn_Click"/>
+                                    </Grid>
+
+                                    <!-- Package picker -->
+                                    <Grid Margin="0,0,0,12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="120"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="Package:" FontSize="13" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource LabelFg}" VerticalAlignment="Center"/>
+                                        <ComboBox x:Name="SubAddPackageBox" Grid.Column="1"
+                                                  Height="34" FontSize="13" VerticalContentAlignment="Center"
+                                                  SelectionChanged="SubAddPackageBox_SelectionChanged"
+                                                  BorderBrush="{DynamicResource InputBorder}"/>
+                                    </Grid>
+
+                                    <!-- Plan picker -->
+                                    <Grid Margin="0,0,0,12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="120"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="Plan:" FontSize="13" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource LabelFg}" VerticalAlignment="Center"/>
+                                        <ComboBox x:Name="SubAddPlanBox" Grid.Column="1"
+                                                  Height="34" FontSize="13" VerticalContentAlignment="Center"
+                                                  BorderBrush="{DynamicResource InputBorder}"/>
+                                    </Grid>
+
+                                    <!-- Licenses + Start date + Auto-renew -->
+                                    <Grid Margin="0,0,0,16">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="120"/>
+                                            <ColumnDefinition Width="80"/>
+                                            <ColumnDefinition Width="30"/>
+                                            <ColumnDefinition Width="120"/>
+                                            <ColumnDefinition Width="160"/>
+                                            <ColumnDefinition Width="30"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="Licenses:" FontSize="13" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource LabelFg}" VerticalAlignment="Center"/>
+                                        <TextBox x:Name="SubAddLicensesBox" Grid.Column="1"
+                                                 Height="34" Padding="8,0" FontSize="13" Text="1"
+                                                 VerticalContentAlignment="Center"
+                                                 BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"/>
+                                        <TextBlock Grid.Column="2"/>
+                                        <TextBlock Grid.Column="3" Text="Starts On:" FontSize="13" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource LabelFg}" VerticalAlignment="Center"/>
+                                        <DatePicker x:Name="SubAddStartDatePicker" Grid.Column="4"
+                                                    Height="34" FontSize="13"
+                                                    BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"/>
+                                        <TextBlock Grid.Column="5"/>
+                                        <TextBlock Grid.Column="6" Text="Auto-Renew:" FontSize="13" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource LabelFg}" VerticalAlignment="Center"
+                                                   Margin="0,0,8,0"/>
+                                        <CheckBox x:Name="SubAddAutoRenewChk" Grid.Column="7"
+                                                  VerticalAlignment="Center" IsChecked="True"/>
+                                    </Grid>
+
+                                    <!-- Place Order button + status -->
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="12"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Button x:Name="SubPlaceOrderBtn" Grid.Column="0"
+                                                Content="✓  Place Order" Height="36" Padding="20,0"
+                                                FontSize="13" FontWeight="SemiBold" Cursor="Hand" BorderThickness="0"
+                                                Background="#17A34A" Foreground="White"
+                                                Click="SubPlaceOrderBtn_Click">
+                                            <Button.Template>
+                                                <ControlTemplate TargetType="Button">
+                                                    <Border Background="{TemplateBinding Background}" CornerRadius="4"
+                                                            Padding="{TemplateBinding Padding}">
+                                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter Property="Background" Value="#15803D"/>
+                                                        </Trigger>
+                                                        <Trigger Property="IsEnabled" Value="False">
+                                                            <Setter Property="Background" Value="#86EFAC"/>
+                                                            <Setter Property="Foreground" Value="#166534"/>
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </Button.Template>
+                                        </Button>
+                                        <TextBlock x:Name="SubAddStatus" Grid.Column="2"
+                                                   FontSize="12" VerticalAlignment="Center"
+                                                   Foreground="{DynamicResource SubText}" TextWrapping="Wrap"/>
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+
                             <!-- Change Expiry form (shown when row selected) -->
                             <Border x:Name="SubChangeExpiryCard"
                                     Visibility="Collapsed" Margin="0,14,0,0"
@@ -9281,7 +9779,434 @@
                     </ScrollViewer>
                 </TabItem>
 
-                <!-- Tab 18: Core DB Utility (was 17) -->
+                <!-- Tab 18: Fiddler / Traffic Inspector -->
+                <TabItem Visibility="Collapsed">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>  <!-- Proxy card -->
+                            <RowDefinition Height="Auto"/>  <!-- Toolbar -->
+                            <RowDefinition Height="*"/>     <!-- Sessions + Detail split -->
+                        </Grid.RowDefinitions>
+
+                        <!-- ── Proxy / Fiddler setup card ── -->
+                        <Border Grid.Row="0"
+                                Background="{DynamicResource InfoBannerBg}"
+                                BorderBrush="{DynamicResource InfoBannerBorder}"
+                                BorderThickness="0,0,0,1" Padding="16,10">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="16"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <StackPanel Grid.Column="0">
+                                    <!-- Setup hint -->
+                                    <TextBlock FontSize="11" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource InfoBannerTitleFg}"
+                                               Margin="0,0,0,3">
+                                        Fiddler Classic setup (one-time):
+                                    </TextBlock>
+                                    <TextBlock FontSize="11" Foreground="{DynamicResource InfoBannerTextFg}"
+                                               TextWrapping="Wrap" Margin="0,0,0,8">
+                                        1. Open Fiddler → Tools → Options → HTTPS tab&#x0a;2. Check ✅ "Decrypt HTTPS traffic" → trust the certificate&#x0a;3. Start Fiddler, enable proxy below, then make any API call
+                                    </TextBlock>
+
+                                    <!-- Enable checkbox -->
+                                    <CheckBox x:Name="FiddlerTabProxyEnabledChk"
+                                              Content="Enable proxy / Fiddler capture"
+                                              FontSize="12" FontWeight="SemiBold"
+                                              Foreground="{DynamicResource PrimaryText}"
+                                              Margin="0,0,0,8"
+                                              Checked="FiddlerTabProxy_Changed"
+                                              Unchecked="FiddlerTabProxy_Changed"/>
+
+                                    <!-- Proxy URL row -->
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="Proxy URL:" FontSize="12" FontWeight="SemiBold"
+                                                   VerticalAlignment="Center" Foreground="{DynamicResource LabelFg}"
+                                                   Margin="0,0,10,0"/>
+                                        <TextBox x:Name="FiddlerTabProxyUrlBox"
+                                                 Width="260" Height="30" Padding="8,0" FontFamily="Consolas"
+                                                 FontSize="12" VerticalContentAlignment="Center"
+                                                 Text="http://localhost:8888"
+                                                 BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
+                                                 LostFocus="FiddlerTabProxy_Changed"/>
+                                        <Button Content="Fiddler" Height="30" Padding="12,0" FontSize="12"
+                                                Cursor="Hand" Margin="6,0,0,0"
+                                                BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
+                                                Background="{DynamicResource DarkBtnBg}"
+                                                Foreground="{DynamicResource PrimaryText}"
+                                                Click="FiddlerTabPreset_Click"
+                                                ToolTip="Set to Fiddler default: http://localhost:8888"/>
+                                    </StackPanel>
+
+                                    <!-- Bypass local -->
+                                    <CheckBox x:Name="FiddlerTabBypassLocalChk"
+                                              Content="Bypass proxy for local addresses (localhost, 127.*)"
+                                              FontSize="11" Foreground="{DynamicResource SubLabelFg}"
+                                              Margin="0,6,0,0"
+                                              Checked="FiddlerTabProxy_Changed"
+                                              Unchecked="FiddlerTabProxy_Changed"/>
+                                </StackPanel>
+
+                                <!-- Status badge -->
+                                <Border Grid.Column="2" CornerRadius="6" Padding="14,10" MinWidth="280"
+                                        Background="{DynamicResource CardBg}"
+                                        BorderBrush="{DynamicResource CardBorder}" BorderThickness="1"
+                                        VerticalAlignment="Center">
+                                    <StackPanel>
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                            <TextBlock x:Name="FiddlerTabStatusDot" Text="⬤ " FontSize="13"
+                                                       Foreground="#64748B" VerticalAlignment="Center"/>
+                                            <TextBlock x:Name="FiddlerTabStatusText"
+                                                       Text="Proxy disabled"
+                                                       FontSize="12" FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource PrimaryText}"
+                                                       VerticalAlignment="Center"/>
+                                        </StackPanel>
+                                        <TextBlock x:Name="FiddlerTabStatusDetail"
+                                                   Text="Traffic goes directly to APIs"
+                                                   FontSize="11" Foreground="{DynamicResource SubText}"
+                                                   TextWrapping="Wrap"/>
+                                    </StackPanel>
+                                </Border>
+                            </Grid>
+                        </Border>
+
+                        <!-- ── Toolbar ── -->
+                        <Border Grid.Row="1" Background="{DynamicResource KpiHeaderBg}"
+                                BorderBrush="{DynamicResource CardBorder}" BorderThickness="0,0,0,1"
+                                Padding="10,6">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="6"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="6"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="6"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="16"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="6"/>
+                                    <ColumnDefinition Width="160"/>
+                                    <ColumnDefinition Width="6"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <!-- Clear -->
+                                <Button Grid.Column="0" x:Name="FiddlerClearBtn"
+                                        Content="🗑  Clear" Height="28" Padding="12,0" FontSize="11"
+                                        Cursor="Hand" Click="FiddlerClearBtn_Click"
+                                        ToolTip="Clear all captured sessions (Ctrl+X)"/>
+
+                                <!-- Pause/Resume -->
+                                <Button Grid.Column="2" x:Name="FiddlerPauseBtn"
+                                        Content="⏸  Pause" Height="28" Padding="12,0" FontSize="11"
+                                        Cursor="Hand" Click="FiddlerPauseBtn_Click"
+                                        ToolTip="Pause / resume traffic capture"/>
+
+                                <!-- Save -->
+                                <Button Grid.Column="4" x:Name="FiddlerSaveBtn"
+                                        Content="💾  Save" Height="28" Padding="12,0" FontSize="11"
+                                        Cursor="Hand" Click="FiddlerSaveBtn_Click"
+                                        ToolTip="Export all sessions to a .txt file"/>
+
+                                <!-- Statistics -->
+                                <TextBlock Grid.Column="6" x:Name="FiddlerStatsText"
+                                           FontSize="11" Foreground="{DynamicResource SubLabelFg}"
+                                           VerticalAlignment="Center"/>
+
+                                <!-- Separator -->
+                                <Border Grid.Column="7" Width="1" Background="{DynamicResource SeparatorFg}"
+                                        Margin="4,4"/>
+
+                                <!-- Filter label -->
+                                <TextBlock Grid.Column="8" Text="Filter:" FontSize="11"
+                                           Foreground="{DynamicResource LabelFg}" VerticalAlignment="Center"/>
+
+                                <!-- Filter box -->
+                                <TextBox x:Name="FiddlerFilterBox" Grid.Column="10"
+                                         Height="26" Padding="6,0" FontSize="11"
+                                         VerticalContentAlignment="Center"
+                                         BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
+                                         ToolTip="Filter by host, URL, method, status or source — e.g. 'payrix' or '200'"
+                                         TextChanged="FiddlerFilterBox_TextChanged"/>
+
+                                <!-- Clear filter -->
+                                <Button Grid.Column="12" Content="✕" Height="26" Width="26"
+                                        FontSize="11" Cursor="Hand" Padding="0"
+                                        Click="FiddlerClearFilter_Click"
+                                        ToolTip="Clear filter"/>
+
+                                <!-- Session count -->
+                                <TextBlock Grid.Column="14" x:Name="FiddlerSessionCountText"
+                                           FontSize="11" Foreground="{DynamicResource HintFg}"
+                                           VerticalAlignment="Center" HorizontalAlignment="Right"/>
+                            </Grid>
+                        </Border>
+
+                        <!-- ── Sessions + Detail ── -->
+                        <Grid Grid.Row="2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="420" MinWidth="200"/>
+                                <ColumnDefinition Width="4"/>
+                                <ColumnDefinition Width="*" MinWidth="300"/>
+                            </Grid.ColumnDefinitions>
+
+                            <!-- ── Session list (left) ── -->
+                            <DataGrid x:Name="FiddlerSessionGrid" Grid.Column="0"
+                                      AutoGenerateColumns="False" IsReadOnly="True"
+                                      CanUserResizeColumns="True"
+                                      GridLinesVisibility="Horizontal"
+                                      HeadersVisibility="Column"
+                                      BorderThickness="0"
+                                      SelectionUnit="FullRow" SelectionMode="Single"
+                                      HorizontalScrollBarVisibility="Auto"
+                                      VerticalScrollBarVisibility="Auto"
+                                      FontSize="11.5"
+                                      SelectionChanged="FiddlerSessionGrid_SelectionChanged">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="#"       Binding="{Binding SessionId}" Width="36"  CanUserSort="True"/>
+                                    <DataGridTemplateColumn Header="Res" Width="42" CanUserSort="True" SortMemberPath="Result">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding ResultLabel}" FontWeight="Bold" Padding="4,0"
+                                                           Foreground="{Binding ResultColor,
+                                                               Converter={StaticResource StringToBrushConverter}}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <DataGridTextColumn Header="Method"  Binding="{Binding Method}"  Width="54"/>
+                                    <DataGridTextColumn Header="Host"    Binding="{Binding Host}"    Width="130"/>
+                                    <DataGridTextColumn Header="URL"     Binding="{Binding Url}"     Width="200"/>
+                                    <DataGridTextColumn Header="Body"    Binding="{Binding BodySizeLabel}" Width="60"/>
+                                    <DataGridTextColumn Header="ms"      Binding="{Binding DurationLabel}" Width="65"/>
+                                    <DataGridTextColumn Header="Source"  Binding="{Binding Source}"  Width="120"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+
+                            <!-- Splitter -->
+                            <GridSplitter Grid.Column="1" Width="4"
+                                          HorizontalAlignment="Stretch"
+                                          Background="{DynamicResource SeparatorFg}"/>
+
+                            <!-- ── Detail panes (right) ── -->
+                            <Grid Grid.Column="2">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="*" MinHeight="120"/>
+                                    <RowDefinition Height="4"/>
+                                    <RowDefinition Height="*" MinHeight="120"/>
+                                </Grid.RowDefinitions>
+
+                                <!-- REQUEST detail -->
+                                <Border Grid.Row="0" BorderBrush="{DynamicResource CardBorder}"
+                                        BorderThickness="1,0,0,0">
+                                    <TabControl BorderThickness="0" Background="Transparent">
+                                        <TabItem>
+                                            <TabItem.Header>
+                                                <TextBlock Text="▲ Headers" FontWeight="SemiBold" FontSize="11"
+                                                           Foreground="{DynamicResource TabSelectedFg}"/>
+                                            </TabItem.Header>
+                                            <Border Background="{DynamicResource CodeBg}">
+                                                <TextBox x:Name="FiddlerReqHeadersBox"
+                                                         IsReadOnly="True" TextWrapping="NoWrap"
+                                                         FontFamily="Consolas" FontSize="11"
+                                                         Background="Transparent"
+                                                         Foreground="{DynamicResource CodeFg}"
+                                                         BorderThickness="0" Padding="8,6"
+                                                         VerticalScrollBarVisibility="Auto"
+                                                         HorizontalScrollBarVisibility="Auto">
+                                                    <TextBox.Template>
+                                                        <ControlTemplate TargetType="TextBox">
+                                                            <ScrollViewer x:Name="PART_ContentHost" Background="Transparent"
+                                                                          Padding="{TemplateBinding Padding}"
+                                                                          VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"
+                                                                          HorizontalScrollBarVisibility="{TemplateBinding HorizontalScrollBarVisibility}"/>
+                                                        </ControlTemplate>
+                                                    </TextBox.Template>
+                                                </TextBox>
+                                            </Border>
+                                        </TabItem>
+                                        <TabItem Header="Raw">
+                                            <Border Background="{DynamicResource CodeBg}">
+                                                <TextBox x:Name="FiddlerReqRawBox"
+                                                         IsReadOnly="True" TextWrapping="NoWrap"
+                                                         FontFamily="Consolas" FontSize="11"
+                                                         Background="Transparent"
+                                                         Foreground="{DynamicResource CodeFg}"
+                                                         BorderThickness="0" Padding="8,6"
+                                                         VerticalScrollBarVisibility="Auto"
+                                                         HorizontalScrollBarVisibility="Auto">
+                                                    <TextBox.Template>
+                                                        <ControlTemplate TargetType="TextBox">
+                                                            <ScrollViewer x:Name="PART_ContentHost" Background="Transparent"
+                                                                          Padding="{TemplateBinding Padding}"
+                                                                          VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"
+                                                                          HorizontalScrollBarVisibility="{TemplateBinding HorizontalScrollBarVisibility}"/>
+                                                        </ControlTemplate>
+                                                    </TextBox.Template>
+                                                </TextBox>
+                                            </Border>
+                                        </TabItem>
+                                        <TabItem Header="JSON">
+                                            <Border Background="{DynamicResource CodeBg}">
+                                                <TextBox x:Name="FiddlerReqJsonBox"
+                                                         IsReadOnly="True" TextWrapping="NoWrap"
+                                                         FontFamily="Consolas" FontSize="11"
+                                                         Background="Transparent"
+                                                         Foreground="{DynamicResource CodeFg}"
+                                                         BorderThickness="0" Padding="8,6"
+                                                         VerticalScrollBarVisibility="Auto"
+                                                         HorizontalScrollBarVisibility="Auto">
+                                                    <TextBox.Template>
+                                                        <ControlTemplate TargetType="TextBox">
+                                                            <ScrollViewer x:Name="PART_ContentHost" Background="Transparent"
+                                                                          Padding="{TemplateBinding Padding}"
+                                                                          VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"
+                                                                          HorizontalScrollBarVisibility="{TemplateBinding HorizontalScrollBarVisibility}"/>
+                                                        </ControlTemplate>
+                                                    </TextBox.Template>
+                                                </TextBox>
+                                            </Border>
+                                        </TabItem>
+                                    </TabControl>
+                                </Border>
+
+                                <!-- Splitter -->
+                                <GridSplitter Grid.Row="1" Height="4" HorizontalAlignment="Stretch"
+                                              Background="{DynamicResource SeparatorFg}"/>
+
+                                <!-- RESPONSE detail -->
+                                <Border Grid.Row="2" BorderBrush="{DynamicResource CardBorder}"
+                                        BorderThickness="1,0,0,0">
+                                    <TabControl BorderThickness="0" Background="Transparent">
+                                        <TabItem>
+                                            <TabItem.Header>
+                                                <TextBlock Text="▼ Headers" FontWeight="SemiBold" FontSize="11"
+                                                           Foreground="{DynamicResource TabSelectedFg}"/>
+                                            </TabItem.Header>
+                                            <Border Background="{DynamicResource CodeBg}">
+                                                <TextBox x:Name="FiddlerRespHeadersBox"
+                                                         IsReadOnly="True" TextWrapping="NoWrap"
+                                                         FontFamily="Consolas" FontSize="11"
+                                                         Background="Transparent"
+                                                         Foreground="{DynamicResource CodeFg}"
+                                                         BorderThickness="0" Padding="8,6"
+                                                         VerticalScrollBarVisibility="Auto"
+                                                         HorizontalScrollBarVisibility="Auto">
+                                                    <TextBox.Template>
+                                                        <ControlTemplate TargetType="TextBox">
+                                                            <ScrollViewer x:Name="PART_ContentHost" Background="Transparent"
+                                                                          Padding="{TemplateBinding Padding}"
+                                                                          VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"
+                                                                          HorizontalScrollBarVisibility="{TemplateBinding HorizontalScrollBarVisibility}"/>
+                                                        </ControlTemplate>
+                                                    </TextBox.Template>
+                                                </TextBox>
+                                            </Border>
+                                        </TabItem>
+                                        <TabItem Header="Raw">
+                                            <Border Background="{DynamicResource CodeBg}">
+                                                <TextBox x:Name="FiddlerRespRawBox"
+                                                         IsReadOnly="True" TextWrapping="NoWrap"
+                                                         FontFamily="Consolas" FontSize="11"
+                                                         Background="Transparent"
+                                                         Foreground="{DynamicResource CodeFg}"
+                                                         BorderThickness="0" Padding="8,6"
+                                                         VerticalScrollBarVisibility="Auto"
+                                                         HorizontalScrollBarVisibility="Auto">
+                                                    <TextBox.Template>
+                                                        <ControlTemplate TargetType="TextBox">
+                                                            <ScrollViewer x:Name="PART_ContentHost" Background="Transparent"
+                                                                          Padding="{TemplateBinding Padding}"
+                                                                          VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"
+                                                                          HorizontalScrollBarVisibility="{TemplateBinding HorizontalScrollBarVisibility}"/>
+                                                        </ControlTemplate>
+                                                    </TextBox.Template>
+                                                </TextBox>
+                                            </Border>
+                                        </TabItem>
+                                        <TabItem Header="JSON / XML">
+                                            <Border Background="{DynamicResource CodeBg}">
+                                                <TextBox x:Name="FiddlerRespJsonBox"
+                                                         IsReadOnly="True" TextWrapping="NoWrap"
+                                                         FontFamily="Consolas" FontSize="11"
+                                                         Background="Transparent"
+                                                         Foreground="{DynamicResource CodeFg}"
+                                                         BorderThickness="0" Padding="8,6"
+                                                         VerticalScrollBarVisibility="Auto"
+                                                         HorizontalScrollBarVisibility="Auto">
+                                                    <TextBox.Template>
+                                                        <ControlTemplate TargetType="TextBox">
+                                                            <ScrollViewer x:Name="PART_ContentHost" Background="Transparent"
+                                                                          Padding="{TemplateBinding Padding}"
+                                                                          VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"
+                                                                          HorizontalScrollBarVisibility="{TemplateBinding HorizontalScrollBarVisibility}"/>
+                                                        </ControlTemplate>
+                                                    </TextBox.Template>
+                                                </TextBox>
+                                            </Border>
+                                        </TabItem>
+                                        <TabItem Header="Cookies">
+                                            <Border Background="{DynamicResource CodeBg}">
+                                                <TextBox x:Name="FiddlerRespCookiesBox"
+                                                         IsReadOnly="True" TextWrapping="Wrap"
+                                                         FontFamily="Consolas" FontSize="11"
+                                                         Background="Transparent"
+                                                         Foreground="{DynamicResource CodeFg}"
+                                                         BorderThickness="0" Padding="8,6"
+                                                         VerticalScrollBarVisibility="Auto">
+                                                    <TextBox.Template>
+                                                        <ControlTemplate TargetType="TextBox">
+                                                            <ScrollViewer x:Name="PART_ContentHost" Background="Transparent"
+                                                                          Padding="{TemplateBinding Padding}"
+                                                                          VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"/>
+                                                        </ControlTemplate>
+                                                    </TextBox.Template>
+                                                </TextBox>
+                                            </Border>
+                                        </TabItem>
+                                        <TabItem Header="Auth">
+                                            <Border Background="{DynamicResource CodeBg}">
+                                                <TextBox x:Name="FiddlerRespAuthBox"
+                                                         IsReadOnly="True" TextWrapping="Wrap"
+                                                         FontFamily="Consolas" FontSize="11"
+                                                         Background="Transparent"
+                                                         Foreground="{DynamicResource CodeFg}"
+                                                         BorderThickness="0" Padding="8,6"
+                                                         VerticalScrollBarVisibility="Auto">
+                                                    <TextBox.Template>
+                                                        <ControlTemplate TargetType="TextBox">
+                                                            <ScrollViewer x:Name="PART_ContentHost" Background="Transparent"
+                                                                          Padding="{TemplateBinding Padding}"
+                                                                          VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"/>
+                                                        </ControlTemplate>
+                                                    </TextBox.Template>
+                                                </TextBox>
+                                            </Border>
+                                        </TabItem>
+                                        <TabItem Header="Timeline">
+                                            <Border Background="{DynamicResource CardBg}" Padding="12">
+                                                <StackPanel>
+                                                    <TextBlock x:Name="FiddlerTimelineBox"
+                                                               FontFamily="Consolas" FontSize="11"
+                                                               Foreground="{DynamicResource CodeFg}"
+                                                               TextWrapping="Wrap"/>
+                                                </StackPanel>
+                                            </Border>
+                                        </TabItem>
+                                    </TabControl>
+                                </Border>
+                            </Grid>
+                        </Grid>
+                    </Grid>
+                </TabItem>
+
+                <!-- Tab 19: Core DB Utility -->
                 <TabItem Visibility="Collapsed">
                     <Grid>
                         <Grid.RowDefinitions>
@@ -9729,290 +10654,6 @@
                                         </Border>
                                     </StackPanel>
                                 </Border>
-
-                                <!-- ══ Section 4: Add Subscription ══ -->
-                                <Border x:Name="SubscriptionCard"
-                                        Background="{DynamicResource CardBg}" CornerRadius="12"
-                                        BorderBrush="{DynamicResource CardBorder}" BorderThickness="1"
-                                        Padding="20,16" Margin="0,0,0,16"
-                                        ToolTip="Insert or update subscription and license records directly in a Core database">
-                                    <StackPanel>
-                                        <Grid Margin="0,0,0,14">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="Auto"/>
-                                            </Grid.ColumnDefinitions>
-                                            <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                                                <TextBlock Text="ADD SUBSCRIPTION" FontSize="10.5" FontWeight="Bold"
-                                                           Foreground="{DynamicResource SubText}"/>
-                                                <TextBlock Text="Insert or update subscription/license for a Core DB"
-                                                           FontSize="11" Foreground="{DynamicResource SubText}" Margin="0,2,0,0"/>
-                                            </StackPanel>
-                                            <Button Grid.Column="1" Content="↺  Reset" VerticalAlignment="Center"
-                                                    Height="24" Padding="8,0" FontSize="11"
-                                                    Style="{StaticResource SecondaryButton}"
-                                                    ToolTip="Reset subscription form fields and clear result"
-                                                    Click="ResetSubscription_Click"/>
-                                        </Grid>
-
-                                        <!-- Mode: New / Update -->
-                                        <Grid Margin="0,0,0,12">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="160"/>
-                                                <ColumnDefinition Width="*"/>
-                                            </Grid.ColumnDefinitions>
-                                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                                <Border Width="20" Height="20" CornerRadius="10"
-                                                        Background="#2563EB" Margin="0,0,7,0">
-                                                    <TextBlock Text="1" FontSize="11" FontWeight="Bold"
-                                                               Foreground="White" HorizontalAlignment="Center"
-                                                               VerticalAlignment="Center"/>
-                                                </Border>
-                                                <TextBlock Text="Mode:" FontSize="13" VerticalAlignment="Center"
-                                                           Foreground="{DynamicResource SubText}"
-                                                           ToolTip="New: inserts fresh subscription rows. Update: modifies existing rows only."/>
-                                            </StackPanel>
-                                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                                                <RadioButton x:Name="SubModeNew" Content="New Subscription"
-                                                             IsChecked="True" FontSize="12.5"
-                                                             Foreground="{DynamicResource PrimaryText}"
-                                                             VerticalContentAlignment="Center"
-                                                             ToolTip="Insert new CompanySubscription + SubscriptionDetail rows"/>
-                                                <RadioButton x:Name="SubModeUpdate" Content="Update Existing"
-                                                             FontSize="12.5" Margin="18,0,0,0"
-                                                             Foreground="{DynamicResource PrimaryText}"
-                                                             VerticalContentAlignment="Center"
-                                                             ToolTip="Update seats, expiry and status on the existing subscription rows only"/>
-                                            </StackPanel>
-                                        </Grid>
-
-                                        <!-- Target Core DB -->
-                                        <Grid Margin="0,0,0,10">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="160"/>
-                                                <ColumnDefinition Width="*"/>
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="Core Database:" FontSize="13" VerticalAlignment="Center"
-                                                       Foreground="{DynamicResource SubText}"
-                                                       ToolTip="The Core company database to update the subscription in"/>
-                                            <ComboBox x:Name="SubCoreDatabaseBox" Grid.Column="1" Height="34"
-                                                      IsEditable="True" FontSize="12.5"
-                                                      ToolTip="Select the target Core database. Populated automatically when you connect to Section 1 or 2."/>
-                                        </Grid>
-
-                                        <!-- Product / Module — subscription type -->
-                                        <Grid Margin="0,0,0,10">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="160"/>
-                                                <ColumnDefinition Width="*"/>
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="Product / Module:" FontSize="13" VerticalAlignment="Center"
-                                                       Foreground="{DynamicResource SubText}"
-                                                       ToolTip="Default / Foundation Based = standard per-company packages. Role Based = per-role packages."/>
-                                            <ComboBox x:Name="SubProductBox" Grid.Column="1" Height="34"
-                                                      FontSize="12.5" SelectedIndex="0"
-                                                      ToolTip="Select subscription type — determines which packages are subscribed">
-                                                <ComboBoxItem Content="Default"/>
-                                                <ComboBoxItem Content="Role Based"/>
-                                                <ComboBoxItem Content="Foundation Based"/>
-                                            </ComboBox>
-                                        </Grid>
-
-                                        <!-- License Type -->
-                                        <Grid Margin="0,0,0,10">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="160"/>
-                                                <ColumnDefinition Width="*"/>
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="License Type:" FontSize="13" VerticalAlignment="Center"
-                                                       Foreground="{DynamicResource SubText}"
-                                                       ToolTip="Trial = limited time; Full = paid production; Enterprise = unlimited; Developer = internal use"/>
-                                            <ComboBox x:Name="SubLicenseTypeBox" Grid.Column="1" Height="34"
-                                                      FontSize="12.5" SelectedIndex="0"
-                                                      ToolTip="Trial, Full, Enterprise, or Developer license">
-                                                <ComboBoxItem Content="Trial"/>
-                                                <ComboBoxItem Content="Full"/>
-                                                <ComboBoxItem Content="Enterprise"/>
-                                                <ComboBoxItem Content="Developer"/>
-                                            </ComboBox>
-                                        </Grid>
-
-                                        <!-- Billing Option -->
-                                        <Grid Margin="0,0,0,10">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="160"/>
-                                                <ColumnDefinition Width="*"/>
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="Billing:" FontSize="13" VerticalAlignment="Center"
-                                                       Foreground="{DynamicResource SubText}"
-                                                       ToolTip="How the subscription was paid. No Card / Already Paid use a system placeholder card. Use New Card stores real card details in CCInfo."/>
-                                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                                                <RadioButton x:Name="SubBillingNoCard" Content="No Card"
-                                                             IsChecked="True" FontSize="12.5"
-                                                             Foreground="{DynamicResource PrimaryText}"
-                                                             VerticalContentAlignment="Center"
-                                                             Checked="SubBillingOption_Checked"
-                                                             ToolTip="No payment collected — uses system placeholder CCInfo card"/>
-                                                <RadioButton x:Name="SubBillingAlreadyPaid" Content="Already Paid"
-                                                             FontSize="12.5" Margin="18,0,0,0"
-                                                             Foreground="{DynamicResource PrimaryText}"
-                                                             VerticalContentAlignment="Center"
-                                                             Checked="SubBillingOption_Checked"
-                                                             ToolTip="Payment collected outside the portal — system placeholder card, Action marked '(AP)'"/>
-                                                <RadioButton x:Name="SubBillingNewCard" Content="Use New Card"
-                                                             FontSize="12.5" Margin="18,0,0,0"
-                                                             Foreground="{DynamicResource PrimaryText}"
-                                                             VerticalContentAlignment="Center"
-                                                             Checked="SubBillingOption_Checked"
-                                                             ToolTip="Enter card details — a new CCInfo row is created and linked to the TransactionInfo"/>
-                                            </StackPanel>
-                                        </Grid>
-
-                                        <!-- Card Info Panel (visible only when Use New Card is selected) -->
-                                        <Border x:Name="CardInfoPanel"
-                                                Visibility="Collapsed"
-                                                Background="{DynamicResource CardBg}"
-                                                BorderBrush="{DynamicResource CardBorder}"
-                                                BorderThickness="1" CornerRadius="6"
-                                                Padding="14,12" Margin="0,0,0,10">
-                                            <StackPanel>
-                                                <TextBlock Text="Card Details" FontSize="12" FontWeight="SemiBold"
-                                                           Foreground="{DynamicResource SubText}" Margin="0,0,0,10"/>
-
-                                                <!-- Card Number -->
-                                                <Grid Margin="0,0,0,8">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="130"/>
-                                                        <ColumnDefinition Width="*"/>
-                                                    </Grid.ColumnDefinitions>
-                                                    <TextBlock Text="Card Number:" FontSize="12.5" VerticalAlignment="Center"
-                                                               Foreground="{DynamicResource SubText}"/>
-                                                    <TextBox x:Name="CardNumberBox" Grid.Column="1" Height="32"
-                                                             Padding="8,0" VerticalContentAlignment="Center"
-                                                             FontSize="12.5" MaxLength="19"
-                                                             ToolTip="16-digit card number (stored masked as last 4 digits in CCInfo.Number)"/>
-                                                </Grid>
-
-                                                <!-- Cardholder Name -->
-                                                <Grid Margin="0,0,0,8">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="130"/>
-                                                        <ColumnDefinition Width="*"/>
-                                                    </Grid.ColumnDefinitions>
-                                                    <TextBlock Text="Cardholder Name:" FontSize="12.5" VerticalAlignment="Center"
-                                                               Foreground="{DynamicResource SubText}"/>
-                                                    <TextBox x:Name="CardNameBox" Grid.Column="1" Height="32"
-                                                             Padding="8,0" VerticalContentAlignment="Center"
-                                                             FontSize="12.5"
-                                                             ToolTip="Name on the card — stored in CCInfo.FirstName"/>
-                                                </Grid>
-
-                                                <!-- Expiry + CVV row -->
-                                                <Grid>
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="130"/>
-                                                        <ColumnDefinition Width="90"/>
-                                                        <ColumnDefinition Width="20"/>
-                                                        <ColumnDefinition Width="60"/>
-                                                        <ColumnDefinition Width="*"/>
-                                                    </Grid.ColumnDefinitions>
-                                                    <TextBlock Text="Expiry (MM/YY):" FontSize="12.5" VerticalAlignment="Center"
-                                                               Foreground="{DynamicResource SubText}"/>
-                                                    <TextBox x:Name="CardExpiryBox" Grid.Column="1" Height="32"
-                                                             Padding="8,0" VerticalContentAlignment="Center"
-                                                             FontSize="12.5" MaxLength="5"
-                                                             ToolTip="Card expiry date in MM/YY format"/>
-                                                    <TextBlock Grid.Column="2"/>
-                                                    <TextBlock Text="CVV:" Grid.Column="3" FontSize="12.5" VerticalAlignment="Center"
-                                                               Foreground="{DynamicResource SubText}"/>
-                                                    <TextBox x:Name="CardCvvBox" Grid.Column="4" Height="32"
-                                                             Padding="8,0" VerticalContentAlignment="Center"
-                                                             FontSize="12.5" MaxLength="4"
-                                                             ToolTip="3 or 4 digit security code — stored in CCInfo.CSVCode"/>
-                                                </Grid>
-                                            </StackPanel>
-                                        </Border>
-
-                                        <!-- Users / Seats -->
-                                        <Grid Margin="0,0,0,10">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="160"/>
-                                                <ColumnDefinition Width="*"/>
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="Users / Seats:" FontSize="13" VerticalAlignment="Center"
-                                                       Foreground="{DynamicResource SubText}"
-                                                       ToolTip="Maximum number of licensed users. Use 999 for unlimited."/>
-                                            <TextBox x:Name="SubUsersBox" Grid.Column="1" Height="34"
-                                                     Padding="10,0" VerticalContentAlignment="Center"
-                                                     FontSize="12.5" Text="999"
-                                                     ToolTip="Number of licensed seats written to MaxUsers in SubscriptionInfo / LicenseInfo"/>
-                                        </Grid>
-
-                                        <!-- Expiry Date -->
-                                        <Grid Margin="0,0,0,18">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="160"/>
-                                                <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="Auto"/>
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="Expiry Date:" FontSize="13" VerticalAlignment="Center"
-                                                       Foreground="{DynamicResource SubText}"
-                                                       ToolTip="Subscription expiry date (yyyy-MM-dd). Also synced to CompanyInfo.ExpiryDate."/>
-                                            <TextBox x:Name="SubExpiryBox" Grid.Column="1" Height="34"
-                                                     Padding="10,0" VerticalContentAlignment="Center"
-                                                     FontSize="12.5"
-                                                     ToolTip="Enter date as yyyy-MM-dd, or use +1 yr to set one year from today"/>
-                                            <Button Grid.Column="2" Content="+1 yr" Height="34" Padding="10,0"
-                                                    FontSize="12" Margin="6,0,0,0"
-                                                    Background="{DynamicResource DarkBtnBg}"
-                                                    Foreground="{DynamicResource PrimaryText}"
-                                                    BorderBrush="{DynamicResource CardBorder}" BorderThickness="1"
-                                                    ToolTip="Set expiry to one year from today (or extend current value by one year)"
-                                                    Click="SubAddOneYear_Click"/>
-                                        </Grid>
-
-                                        <!-- Action button row -->
-                                        <Grid Margin="0,0,0,0">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="8"/>
-                                                <ColumnDefinition Width="Auto"/>
-                                            </Grid.ColumnDefinitions>
-                                            <Button Content="ADD / UPDATE SUBSCRIPTION"
-                                                    Height="36" FontSize="13" FontWeight="SemiBold"
-                                                    Style="{StaticResource PrimaryButton}"
-                                                    ToolTip="Insert or update subscription rows in the Host DB (V1=Subscription table, V2=CompanySubscription+SubscriptionDetail)"
-                                                    Click="AddSubscription_Click"/>
-                                            <Button Grid.Column="2" Content="🔍  Check State"
-                                                    Height="36" Padding="12,0" FontSize="12" FontWeight="SemiBold"
-                                                    Background="{DynamicResource DarkBtnBg}"
-                                                    Foreground="{DynamicResource PrimaryText}"
-                                                    BorderBrush="{DynamicResource CardBorder}" BorderThickness="1"
-                                                    Cursor="Hand"
-                                                    ToolTip="Query Host DB and show current subscription state for the selected Core database"
-                                                    Click="CheckSubState_Click"/>
-                                        </Grid>
-
-                                        <!-- Dedup button -->
-                                        <Button x:Name="FixDuplicatesBtn"
-                                                Content="🧹  FIX DUPLICATE SUBSCRIPTIONS"
-                                                Height="34" FontSize="12" FontWeight="SemiBold"
-                                                Margin="0,6,0,0"
-                                                Background="#DC2626" Foreground="White"
-                                                BorderBrush="#B91C1C" BorderThickness="1"
-                                                Cursor="Hand"
-                                                ToolTip="Removes duplicate CompanySubscription rows (and their SubscriptionDetail / StorageSubscription / CompanyAgreement children) keeping the latest per package"
-                                                Click="FixDuplicates_Click"/>
-
-                                        <!-- Result badge -->
-                                        <Border x:Name="SubResultBadge" Visibility="Collapsed"
-                                                CornerRadius="6" Padding="10,5" Margin="0,12,0,0" BorderThickness="1">
-                                            <TextBlock x:Name="SubResultText" FontSize="12"
-                                                       FontWeight="SemiBold" TextWrapping="Wrap"/>
-                                        </Border>
-                                    </StackPanel>
-                                </Border>
-
                                 <!-- ══ Section 5: Unlink Database ══ -->
                                 <Border Background="{DynamicResource CardBg}" CornerRadius="12"
                                         BorderBrush="#F59E0B" BorderThickness="1"
@@ -10432,7 +11073,9 @@
                                                         <ColumnDefinition Width="60"/>
                                                         <ColumnDefinition Width="120"/>
                                                         <ColumnDefinition Width="12"/>
-                                                        <ColumnDefinition Width="Auto"/>
+                                                        <ColumnDefinition Width="Auto"/>  <!-- 9: Fetch button -->
+                                                        <ColumnDefinition Width="8"/>
+                                                        <ColumnDefinition Width="Auto"/>  <!-- 11: Test button -->
                                                     </Grid.ColumnDefinitions>
 
                                                     <TextBlock Text="Server:" Grid.Column="0"
@@ -10466,7 +11109,25 @@
                                                                  BorderBrush="{DynamicResource CardBorder}" BorderThickness="1"
                                                                  ToolTip="SQL login password"/>
 
-                                                    <Button x:Name="TestMaintConnBtn" Grid.Column="9"
+                                                    <Button Grid.Column="9"
+                                                            Content="↙ Fetch from Host DB" Height="32" Padding="10,0"
+                                                            FontSize="11" FontWeight="SemiBold"
+                                                            Background="#7C3AED" Foreground="White"
+                                                            BorderThickness="0" Cursor="Hand"
+                                                            ToolTip="Auto-fill Server/User/Password from the Main Host DB (BQECoreHost) connection string"
+                                                            Click="FetchSqlConnFromHostDb_Click">
+                                                        <Button.Template>
+                                                            <ControlTemplate TargetType="Button">
+                                                                <Border Background="{TemplateBinding Background}" CornerRadius="6" Padding="{TemplateBinding Padding}">
+                                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                                </Border>
+                                                                <ControlTemplate.Triggers>
+                                                                    <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#6D28D9"/></Trigger>
+                                                                </ControlTemplate.Triggers>
+                                                            </ControlTemplate>
+                                                        </Button.Template>
+                                                    </Button>
+                                                    <Button x:Name="TestMaintConnBtn" Grid.Column="11"
                                                             Content="✔  Test" Height="32" Padding="12,0"
                                                             FontSize="12" FontWeight="SemiBold"
                                                             Background="{DynamicResource AccentBlue}" Foreground="White"

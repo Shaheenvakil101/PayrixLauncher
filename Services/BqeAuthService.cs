@@ -60,23 +60,23 @@ public static class BqeAuthService
             : new { Email = email, Password = password };
 
         var log = new System.Text.StringBuilder();
-        log.AppendLine($"POST to: {baseUrl}");
+        log.AppendLine($"Base URL (normalised): {baseUrl}");
         log.AppendLine($"Body: {{ Email={email}, Password=*** }}");
         log.AppendLine();
 
         foreach (var path in Endpoints)
         {
-            log.AppendLine($"→ Trying: {path}");
+            var fullUrl = baseUrl.TrimEnd('/') + path;
+            log.AppendLine($"→ POST {fullUrl}");
             var (statusCode, json, connErr) = await PostRawAsync(client, path, body);
 
             if (connErr != null)
             {
-                log.AppendLine($"  Connection error: {connErr}");
-                // Network failure on first try is fatal — don't try more paths
-                if (path == Endpoints[0] &&
-                    connErr.Contains("Connection", StringComparison.OrdinalIgnoreCase))
+                log.AppendLine($"  ✗ {connErr}");
+                // Any network failure on first attempt = server unreachable, abort
+                if (path == Endpoints[0])
                 {
-                    log.AppendLine("  (aborting — server unreachable)");
+                    log.AppendLine("  (aborting — server unreachable on first attempt)");
                     return BqeLoginResult.Fail(connErr, log.ToString());
                 }
                 continue;
@@ -84,11 +84,21 @@ public static class BqeAuthService
 
             log.AppendLine($"  HTTP {statusCode}");
             if (json != null)
-                log.AppendLine($"  Response: {json[..Math.Min(json.Length, 300)]}");
+                log.AppendLine($"  {json[..Math.Min(json.Length, 400)]}");
 
-            if (statusCode == 404 || statusCode == 405) { log.AppendLine("  (skip)"); continue; }
+            // 404/405 = wrong path, try next
+            if (statusCode == 404 || statusCode == 405) { log.AppendLine("  (not found, trying next)"); continue; }
 
-            // Got a response — try to parse it
+            // 409 = endpoint found but BQE threw an exception (e.g. wrong password, account issue)
+            // Stop trying — this IS the right endpoint, don't mask the real error
+            if (statusCode == 409 || statusCode == 401 || statusCode == 403)
+            {
+                var msg = TryExtractMessage(json) ?? $"HTTP {statusCode}";
+                log.AppendLine($"  ✗ Auth failure: {msg}");
+                return BqeLoginResult.Fail(msg, log.ToString());
+            }
+
+            // Got a 2xx/3xx response — try to parse it
             var result = ParseLoginResponse(json, email);
             result.RawLog = log.ToString();
 
@@ -98,7 +108,6 @@ public static class BqeAuthService
                 result.Error?.Contains("expired",   StringComparison.OrdinalIgnoreCase) == true ||
                 result.Error?.Contains("2FA",       StringComparison.OrdinalIgnoreCase) == true)
             {
-                // Meaningful response from this endpoint — stop trying
                 return result;
             }
 
@@ -199,11 +208,8 @@ public static class BqeAuthService
 
     private static HttpClient MakeClient(string baseUrl)
     {
-        var handler = new HttpClientHandler
-        {
-            ServerCertificateCustomValidationCallback =
-                HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
-        };
+        var inner = ProxyConfig.MakeHandler();
+        var handler = new LoggingHandler("BQE Auth", inner);
         return new HttpClient(handler)
         {
             BaseAddress = new Uri(baseUrl),
@@ -250,16 +256,36 @@ public static class BqeAuthService
         return list;
     }
 
+    private static string? TryExtractMessage(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            var doc = System.Text.Json.JsonDocument.Parse(json!);
+            return GetStr(doc.RootElement,
+                "Message", "message", "error", "Error",
+                "title",   "Title",   "detail", "Detail",
+                "DetailMessage");
+        }
+        catch { return null; }
+    }
+
     private static string NormalizeBaseUrl(string url)
     {
         url = url.Trim().TrimEnd('/');
+
+        // Strip any known app/api sub-paths so we always work from the host root
         foreach (var suffix in new[]
         {
             "/BQECoreAdminPortalAPI/API/Account/ValidateUser",
             "/BQECoreAdminPortalAPI/API/Account",
             "/BQECoreAdminPortalAPI/API",
             "/BQECoreAdminPortalAPI",
+            "/BQECoreAdminPortalWebApp",
+            "/BQECoreWebApp",           // ← user entered web-app URL, strip it
             "/coreapi/api/Account/ValidateUser",
+            "/coreapi/api/Account",
+            "/coreapi/api",
             "/coreapi",
         })
         {
