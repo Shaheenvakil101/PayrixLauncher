@@ -463,6 +463,7 @@
                         <!-- 4: Raw JSON -->
                         <Button x:Name="NavRawJson" Tag="4"
                                 Style="{StaticResource NavBtn}"
+                                Visibility="Collapsed"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="{}{  }" FontSize="12" FontFamily="Consolas" VerticalAlignment="Center" Margin="0,0,10,0"
@@ -475,6 +476,7 @@
                         <!-- 5: JSON Tools -->
                         <Button x:Name="NavJsonTools" Tag="5"
                                 Style="{StaticResource NavBtn}"
+                                Visibility="Collapsed"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="🔧" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
@@ -487,6 +489,7 @@
                         <!-- 6: Crypto -->
                         <Button x:Name="NavCrypto" Tag="6"
                                 Style="{StaticResource NavBtn}"
+                                Visibility="Collapsed"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="🔐" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
@@ -499,6 +502,7 @@
                         <!-- 7: Payrix Portal -->
                         <Button x:Name="NavPortal" Tag="7"
                                 Style="{StaticResource NavBtn}"
+                                Visibility="Collapsed"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="⬡" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
@@ -514,6 +518,7 @@
                         <!-- 15: HTTP Client -->
                         <Button x:Name="NavHttpClient" Tag="15"
                                 Style="{StaticResource NavBtn}"
+                                Visibility="Collapsed"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="📡" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
@@ -526,6 +531,7 @@
                         <!-- 16: Performance -->
                         <Button x:Name="NavPerf" Tag="16"
                                 Style="{StaticResource NavBtn}"
+                                Visibility="Collapsed"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="⚡" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
@@ -606,6 +612,7 @@
                         <!-- 8: Settings -->
                         <Button x:Name="NavSettings" Tag="8"
                                 Style="{StaticResource NavBtn}"
+                                Visibility="Collapsed"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="⚙" FontSize="14" VerticalAlignment="Center" Margin="0,0,10,0"
@@ -618,6 +625,7 @@
                         <!-- 9: Help & Docs -->
                         <Button x:Name="NavHelp" Tag="9"
                                 Style="{StaticResource NavBtn}"
+                                Visibility="Collapsed"
                                 Click="SidebarNav_Click">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="❓" FontSize="13" VerticalAlignment="Center" Margin="0,0,10,0"
@@ -4786,6 +4794,24 @@
                                                        FontSize="11" FontWeight="SemiBold" Foreground="#A5B4FC"/>
                                         </Border>
                                     </StackPanel>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- ── Access Mode ────────────────────────────────── -->
+                            <TextBlock Text="Access Mode" FontSize="15" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource PrimaryText}" Margin="0,0,0,12"/>
+                            <Border Background="{DynamicResource CardBg}" CornerRadius="14"
+                                    Padding="22,18" Margin="0,0,0,24"
+                                    BorderBrush="{DynamicResource CardBorder}" BorderThickness="1">
+                                <StackPanel>
+                                    <TextBlock Text="Restricted Mode hides Transaction Viewer, Line Items, Disbursements, Dashboard, Merchants, Accounts, Reports and Subscriptions — showing only Webhook Tests and developer tools. Enable this when sharing the EXE with others."
+                                               FontSize="12" Foreground="{DynamicResource SubText}" TextWrapping="Wrap" Margin="0,0,0,14"/>
+                                    <CheckBox x:Name="RestrictedModeChk"
+                                              Content="  Restricted Mode  (Webhook-only — hides transaction sections)"
+                                              FontSize="12.5" Foreground="{DynamicResource PrimaryText}"
+                                              IsChecked="True"
+                                              Checked="RestrictedModeChk_Changed"
+                                              Unchecked="RestrictedModeChk_Changed"/>
                                 </StackPanel>
                             </Border>
 

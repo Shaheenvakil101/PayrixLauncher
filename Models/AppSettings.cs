@@ -83,7 +83,8 @@ public class AppSettings
     public bool   EmailSectionPinned      { get; set; } = false;
     public bool   TxnSectionPinned        { get; set; } = false;
     public bool   DisbSectionPinned       { get; set; } = false;
-    public bool   IsDarkMode           { get; set; } = true;
+    public bool   IsDarkMode           { get; set; } = false;
+    public bool   IsRestrictedMode     { get; set; } = true;   // true = webhook-only (for shared users)
     public double WindowWidth          { get; set; } = 1250;
     public double WindowHeight         { get; set; } = 960;
     public double WindowLeft           { get; set; } = double.NaN;

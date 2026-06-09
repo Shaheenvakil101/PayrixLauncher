@@ -27,6 +27,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // ── Sidebar navigation state ──────────────────────────────────────────────
     private System.Windows.Controls.Button? _activeNavBtn;
 
+    // ── Init guard — prevents event handlers from running before all controls are ready ──
+    private bool _isInitialized;
+
     // ── Bulk-add guard — suppresses per-item KPI refresh; call RefreshOverviewKpis() after ──
     private bool _suppressKpiRefresh;
 
@@ -81,11 +84,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         InitWebhookTests();   // must run AFTER LoadSettings so EntityCustomBox is populated
         UpdateEnvironmentUI();
         AutoDetectLocalSettingsOnStartup();   // fill Local DB boxes from INI if not already saved
-        // Sidebar: set initial active button to Overview
+        // Apply restricted mode nav (must run after LoadSettings which sets the checkbox state)
+        ApplyRestrictedMode(RestrictedModeChk.IsChecked == true);
+        // Sidebar: always start on Transaction Viewer (visible in both modes)
         _activeNavBtn = (System.Windows.Controls.Button)NavTxnViewer;
+        MainTabControl.SelectedIndex = 0;
         // Refresh Overview KPIs whenever the transaction collection changes
         // (_suppressKpiRefresh batches bulk adds so we only recompute once at the end)
         _transactions.CollectionChanged += (_, _) => { if (!_suppressKpiRefresh) RefreshOverviewKpis(); };
+        _isInitialized = true;   // all controls ready — event handlers may now call SaveSettings()
     }
 
     // ── Logout ───────────────────────────────────────────────────────────────
@@ -158,6 +165,63 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _activeNavBtn.Style = (System.Windows.Style)Resources["NavBtn"];
         btn.Style = (System.Windows.Style)Resources["NavBtnActive"];
         _activeNavBtn = btn;
+    }
+
+    // ── Restricted Mode ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Hide/show nav buttons that are only relevant to internal devs (transaction viewer,
+    /// line items, disbursements, dashboard, merchants, accounts, reports, subscriptions).
+    /// In restricted mode only Webhook Tests + dev tools remain visible.
+    /// </summary>
+    private void ApplyRestrictedMode(bool restricted)
+    {
+        // Restricted mode: show only Transaction Viewer, Transactions, Line Items,
+        // Webhook Tests, Settings (connection config), and Help.
+        // Everything else is hidden for shared users.
+        var hiddenInRestricted = new[]
+        {
+            NavRawJson,      // Tag 4  — Raw JSON
+            NavJsonTools,    // Tag 5  — JSON Tools
+            NavCrypto,       // Tag 6  — Crypto
+            NavPortal,       // Tag 7  — Portal (Payrix signup wizard)
+            NavHttpClient,   // Tag 15 — HTTP Client
+            NavPerf,         // Tag 16 — Performance Tester
+            NavDashboard,    // Tag 10 — Dashboard
+            NavDisbursements,// Tag 11 — Disbursements
+            NavAccounts,     // Tag 12 — Accounts
+            NavMerchants,    // Tag 13 — Merchants
+            NavReports,      // Tag 14 — Reports
+            NavSubscriptions,// Tag 17 — Subscriptions
+            NavFiddler,      // Tag 18 — Fiddler / Proxy
+            NavCoreDb,       // Tag 19 — Core DB Utility
+            NavSettings,     // Tag 8  — Settings
+            NavHelp,         // Tag 9  — Help & Docs
+        };
+
+        var vis = restricted ? Visibility.Collapsed : Visibility.Visible;
+        foreach (var btn in hiddenInRestricted)
+            btn.Visibility = vis;
+    }
+
+    private void RestrictedModeChk_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!_isInitialized) return;   // fired during XAML init — controls not ready yet
+
+        bool restricted = RestrictedModeChk.IsChecked == true;
+        ApplyRestrictedMode(restricted);
+
+        // Hidden tab indices — if current page just got hidden, jump to Transaction Viewer
+        var hiddenTabs = new[] { 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19 };
+        if (restricted && hiddenTabs.Contains(MainTabControl.SelectedIndex))
+        {
+            MainTabControl.SelectedIndex = 0;   // Transaction Viewer
+            NavTxnViewer.Style = (System.Windows.Style)Resources["NavBtnActive"];
+            if (_activeNavBtn != null) _activeNavBtn.Style = (System.Windows.Style)Resources["NavBtn"];
+            _activeNavBtn = NavTxnViewer;
+        }
+
+        SaveSettings();
     }
 
     // ── Overview KPI properties ───────────────────────────────────────────────
@@ -338,6 +402,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _isDarkMode = s.IsDarkMode;
         ApplyTheme(_isDarkMode);
 
+        // Access mode — developer machines (Shaheen.Vakil / Shaheen) default to full mode
+        // on first run; all other users default to restricted (webhook-only).
+        var firstRun = !System.IO.File.Exists(Services.SettingsService.SettingsFilePath);
+        var isDev    = Environment.UserName.Equals("Shaheen.Vakil", StringComparison.OrdinalIgnoreCase)
+                    || Environment.UserName.Equals("Shaheen",       StringComparison.OrdinalIgnoreCase);
+        RestrictedModeChk.IsChecked = firstRun ? !isDev : s.IsRestrictedMode;
+
         // Host DB connection strings per environment
         // Migrate legacy single value into Local slot if present
         if (!string.IsNullOrEmpty(s.LocalHostDbConnectionString))
@@ -399,6 +470,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void SaveSettings()
     {
+        if (!_isInitialized) return;   // called before controls exist — skip
+
         // Load existing settings first so we preserve fields not managed by the UI
         // (e.g. OAuth client IDs stored directly in settings.json)
         var existing = SettingsService.Load();
@@ -441,7 +514,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             DisbSectionPinned  = DisbPinBtn.Tag?.ToString()  == "pinned",
             SearchPanelCollapsed  = SearchSectionsPanel.Visibility  == Visibility.Collapsed,
             WebhookConfigExpanded = WebhookDateFilterPanel.Visibility == Visibility.Visible,
-            IsDarkMode       = _isDarkMode,
+            IsDarkMode         = _isDarkMode,
+            IsRestrictedMode   = RestrictedModeChk.IsChecked == true,
             WindowWidth      = Width,
             WindowHeight     = Height,
             WindowLeft       = Left,
@@ -7361,12 +7435,35 @@ WHERE {filter}
                     });
                 }
 
+                /* ── Random helpers (mirrors RandomDataGenerator in Selenium suite) ── */
+                function randInt(n) { return Math.floor(Math.random() * n); }
+                function randDigits(n) {
+                    var s = ''; for (var i=0;i<n;i++) s += randInt(10); return s;
+                }
+                function randAlpha(n) {
+                    var c='abcdefghijklmnopqrstuvwxyz', s='';
+                    for (var i=0;i<n;i++) s += c[randInt(c.length)];
+                    return s;
+                }
+                function randAlphaNum(n) {
+                    var c='abcdefghijklmnopqrstuvwxyz0123456789', s='';
+                    for (var i=0;i<n;i++) s += c[randInt(c.length)];
+                    return s;
+                }
+                // Random DOB: age 25-55, formatted MM/DD/YYYY
+                function randDOB() {
+                    var y = new Date().getFullYear() - 25 - randInt(30);
+                    var m = 1 + randInt(12);
+                    var d = 1 + randInt(28);
+                    return (m<10?'0'+m:m) + '/' + (d<10?'0'+d:d) + '/' + y;
+                }
+
                 /* ── Field definitions ───────────────────────────────────── */
                 var DATA = {
                     // Business
                     name        : '{{J(d.CompanyName)}}',
                     email       : '{{J(d.CompanyEmail)}}',
-                    phone       : '{{J(d.CompanyPhone)}}',
+                    phone       : '{{J(d.CompanyPhone)}}' || '2222222222',
                     address1    : '{{J(d.Address1)}}',
                     address2    : '{{J(d.Address2)}}',
                     city        : '{{J(d.City)}}',
@@ -7376,14 +7473,18 @@ WHERE {filter}
                     first       : '{{J(d.OwnerFirst)}}',
                     last        : '{{J(d.OwnerLast)}}',
                     ownerEmail  : '{{J(d.OwnerEmail)}}',
-                    ownerPhone  : '{{J(d.OwnerPhone)}}',
+                    ownerPhone  : '{{J(d.OwnerPhone)}}' || '2222222222',
                     username    : '{{J(username)}}',
-                    // Tax / EIN
-                    ein         : '{{J(d.Ein)}}',
+                    // Tax / EIN (business tax id) — 9 digits, no dashes
+                    ein         : '{{J(d.Ein)}}' || randDigits(9),
+                    // Owner SSN — always random 9 digits (separate from EIN)
+                    ssn         : randDigits(9),
                     // Banking
-                    routing     : '{{J(d.RoutingNo)}}',
-                    account     : '{{J(d.AccountNo)}}',
-                    accountType : '{{J(d.AccountType)}}',
+                    routing     : '{{J(d.RoutingNo)}}' || '021000021',
+                    account     : '{{J(d.AccountNo)}}' || randDigits(12),
+                    accountType : '{{J(d.AccountType)}}' || 'checking',
+                    // Owner password (Selenium uses "Test12345")
+                    password    : 'Test12345',
                 };
 
                 /* ── MUI/React select helper ─────────────────────────────── */
@@ -7460,6 +7561,35 @@ WHERE {filter}
                     return 'business';
                 }
 
+                /* ── Expand a collapsible section (mat-icon expand_more) ─── */
+                function expandSection(nthExpandMore) {
+                    var icons = Array.from(document.querySelectorAll('mat-icon'));
+                    var expandIcons = icons.filter(function(i) {
+                        return (i.textContent||'').trim() === 'expand_more';
+                    });
+                    var icon = expandIcons[nthExpandMore - 1];
+                    if (icon) {
+                        // Click the parent button/header that contains this icon
+                        var btn = icon.closest('button') || icon.closest('[role="button"]') || icon.parentElement;
+                        if (btn) { btn.click(); return true; }
+                    }
+                    return false;
+                }
+
+                /* ── Click a button by partial text ─────────────────────── */
+                function clickBtn(text) {
+                    var btns = Array.from(document.querySelectorAll('button:not([disabled]),span.mdc-button__label'));
+                    var btn = btns.find(function(b) {
+                        return (b.textContent||'').toLowerCase().trim().includes(text.toLowerCase());
+                    });
+                    if (btn) {
+                        var actualBtn = btn.tagName === 'BUTTON' ? btn : btn.closest('button');
+                        if (actualBtn && !actualBtn.disabled) { actualBtn.click(); return true; }
+                        btn.click(); return true;
+                    }
+                    return false;
+                }
+
                 /* ── Fill all fields on the current wizard page ──────────── */
                 async function fillPage() {
                     var touched = 0;
@@ -7467,107 +7597,219 @@ WHERE {filter}
                     console.log('[PayrixLauncher] Filling step: ' + step);
 
                     if (step === 'business') {
-                        // ── Business Overview page ──────────────────────────
-                        setField(find(['legal business name','legal name','business name','name']), DATA.name) && touched++;
-                        setField(find(['dba','statement descriptor','doing business']), DATA.name) && touched++;
-                        setField(find(['business email','email']), DATA.email) && touched++;
-                        setField(find(['business phone','phone']), DATA.phone) && touched++;
-                        setField(find(['customer service phone','service phone','support phone']), DATA.phone) && touched++;
-                        setField(find(['website','web site','url']), DATA.website || 'http://bqe.com') && touched++;
-                        setField(find(['tin','ein','tax id','federal tax','employer id']), DATA.ein) && touched++;
+                        // ── Business Overview (mirrors SetEpayment_BusinessStep) ──
+                        // formcontrolname selectors first (most reliable for Angular forms)
+                        setField(document.querySelector('input[formcontrolname="phone"]'), DATA.phone || '2222222222') && touched++;
+                        setField(document.querySelector('input[formcontrolname="customerPhone"]'), DATA.phone || '2222222222') && touched++;
+                        setField(document.querySelector('input[formcontrolname="website"]'), DATA.website || 'https://bqe.com') && touched++;
+                        setField(document.querySelector('input[formcontrolname="globalBusinessId"]'), DATA.ein || randDigits(9)) && touched++;
 
-                        // MUI dropdowns
-                        await muiSelect('Industry', 'Professional') && touched++;
-                        await muiSelect('TIN Type','EIN') && touched++;
-                        await muiSelect('Business Type','CORP') || await muiSelect('Business Type','Corp');
-                        await muiSelect('Country','United States') || await muiSelect('Country','US');
+                        // Industry dropdown: "7276 - Tax Preparation Service" (mat-select-value-9)
+                        await muiSelect('Industry', 'Tax Preparation') && touched++;
 
-                        // Payment method — click "Customer Enters Payment Online"
-                        var payOnline = Array.from(document.querySelectorAll('*')).find(function(el) {
+                        // TIN Type dropdown: "SSN" (mat-select-value-11)
+                        await muiSelect('TIN Type', 'SSN') && touched++;
+
+                        // Business Type — "CORP" / "Corporation"
+                        await muiSelect('Business Type', 'Corporation') || await muiSelect('Business Type', 'CORP') || await muiSelect('Business Type', 'Corp');
+
+                        // Payment method — "Customer Enters Payment Online"
+                        var payOnline = Array.from(document.querySelectorAll('div,span,button')).find(function(el) {
                             return (el.textContent||'').trim().toLowerCase().includes('customer enters payment online');
                         });
-                        if (payOnline) { payOnline.closest('button,div[role="button"],div[tabindex]')?.click() || payOnline.click(); touched++; }
+                        if (payOnline) { (payOnline.closest('button,[role="button"],[tabindex]') || payOnline).click(); touched++; }
+
+                        // Business Details section (2nd expand_more icon)
+                        expandSection(2);
+                        await new Promise(function(r){setTimeout(r,300)});
+                        setField(document.querySelector('input[formcontrolname="annualCCSales"]'), '500000') && touched++;
+                        setField(document.querySelector('input[formcontrolname="avgTicket"]'), '1000') && touched++;
+
+                        // Business Address section (3rd expand_more icon)
+                        expandSection(3);
+                        await new Promise(function(r){setTimeout(r,300)});
+                        setField(document.querySelector('input[formcontrolname="address1"]'), DATA.address1 || randAlpha(10) + ' Main St') && touched++;
+                        setField(document.querySelector('input[formcontrolname="city"]'), DATA.city || randAlpha(8)) && touched++;
+                        // State — mat-select (id="mat-select-12"); click then pick California (#mat-option-18)
+                        var stateSelect = document.querySelector('#mat-select-12') ||
+                            document.querySelector('mat-select[formcontrolname="state"]');
+                        if (stateSelect) {
+                            stateSelect.click();
+                            await new Promise(function(r){setTimeout(r,400)});
+                            var caOpt = document.querySelector('#mat-option-18') ||
+                                Array.from(document.querySelectorAll('mat-option,li[role="option"]'))
+                                    .find(function(o){ return (o.textContent||'').includes('California'); });
+                            if (caOpt) { caOpt.click(); touched++; }
+                        }
+                        setField(document.querySelector('#mat-input-3') ||
+                            document.querySelector('input[formcontrolname="zip"]'), DATA.zip || randDigits(5)) && touched++;
 
                     } else if (step === 'owner') {
-                        // ── Owners page ─────────────────────────────────────
-                        setField(find(['first name','first']), DATA.first) && touched++;
-                        setField(find(['last name','last']), DATA.last) && touched++;
-                        setField(find(['email']), DATA.ownerEmail) && touched++;
-                        setField(find(['phone','mobile']), DATA.ownerPhone) && touched++;
-                        setField(find(['date of birth','dob','birth']), '10-31-1984') && touched++;
-                        setField(find(['ssn','social security','owner tin','personal tin']), DATA.ein) && touched++;
-                        setField(find(['ownership','percent','% own']), '100') && touched++;
-                        setField(find(['title','position','role']), 'Owner') && touched++;
-                        setField(find(['address','street']), DATA.address1 || '123 Main St') && touched++;
-                        setField(find(['city']), DATA.city || 'Los Angeles') && touched++;
-                        setField(find(['zip','postal']), DATA.zip || '90001') && touched++;
-                        await muiSelect('Country','United States');
-                        await muiSelect('State','California') || await muiSelect('State','CA');
+                        // ── Owner Details (mirrors SetEpayment_OwnerDetailsStep) ──
+                        // Expand Owner Information (4th expand_more icon) if DOB not visible
+                        var dobEl = document.querySelector('input[formcontrolname="dob"]');
+                        if (!dobEl || !dobEl.offsetParent) { expandSection(4); await new Promise(function(r){setTimeout(r,300)}); }
+
+                        // NOTE: first name is pre-filled from URL params; fill last name + others
+                        setField(document.querySelector('input[formcontrolname="first"]'), DATA.first) && touched++;
+                        setField(document.querySelector('input[formcontrolname="last"]'), DATA.last) && touched++;
+                        // Owner phone: second phone input (index 1)
+                        var phoneInputs = document.querySelectorAll('input[formcontrolname="phone"]');
+                        setField(phoneInputs[phoneInputs.length - 1] || phoneInputs[0], DATA.ownerPhone || '2222222222') && touched++;
+                        setField(document.querySelector('input[formcontrolname="dob"]'), randDOB()) && touched++;
+                        // SSN — random 9 digits (separate from EIN / business TIN)
+                        setField(document.querySelector('input[formcontrolname="ssn"]'), DATA.ssn) && touched++;
+                        setField(document.querySelector('input[formcontrolname="title"]'), 'Owner') && touched++;
+                        // Ownership: Selenium uses 50; we use 100 if single owner
+                        setField(document.querySelector('input[formcontrolname="ownership"]'), '100') && touched++;
+
+                        // Account Login section (3rd expand_more icon on owner page)
+                        expandSection(3);
+                        await new Promise(function(r){setTimeout(r,300)});
+                        setField(document.querySelector('input[formcontrolname="username"]'), DATA.username || randAlphaNum(10)) && touched++;
+                        setField(document.querySelector('input[formcontrolname="password"]'), DATA.password) && touched++;
+                        setField(document.querySelector('input[formcontrolname="confirmPassword"]'), DATA.password) && touched++;
+
+                        // Owner Address section (5th expand_more icon on owner page)
+                        expandSection(5);
+                        await new Promise(function(r){setTimeout(r,300)});
+                        // address1: second occurrence of address1 (first is business)
+                        var addr1Els = document.querySelectorAll('input[formcontrolname="address1"]');
+                        setField(addr1Els[addr1Els.length - 1] || addr1Els[0], DATA.address1 || randAlpha(10) + ' Oak Ave') && touched++;
+                        var cityEls = document.querySelectorAll('input[formcontrolname="city"]');
+                        setField(cityEls[cityEls.length - 1] || cityEls[0], DATA.city || randAlpha(8)) && touched++;
+                        // Owner State — mat-select-14; pick #mat-option-81 (California on owner page)
+                        var ownerStateSelect = document.querySelector('#mat-select-14') ||
+                            document.querySelectorAll('mat-select[formcontrolname="state"]')[1];
+                        if (ownerStateSelect) {
+                            ownerStateSelect.click();
+                            await new Promise(function(r){setTimeout(r,400)});
+                            var caOpt2 = document.querySelector('#mat-option-81') ||
+                                Array.from(document.querySelectorAll('mat-option,li[role="option"]'))
+                                    .find(function(o){ return (o.textContent||'').includes('California'); });
+                            if (caOpt2) { caOpt2.click(); touched++; }
+                        }
+                        var zipEls = document.querySelectorAll('input[formcontrolname="zip"]');
+                        setField(zipEls[zipEls.length - 1] || zipEls[0], DATA.zip || randDigits(5)) && touched++;
 
                     } else if (step === 'bank') {
-                        // ── Bank page ────────────────────────────────────────
-                        setField(find(['routing','routing number','aba']), DATA.routing) && touched++;
-                        setField(find(['account number','bank account','account no']), DATA.account) && touched++;
-                        setField(find(['confirm account','re-enter','verify account']), DATA.account) && touched++;
-                        await muiSelect('Account Type','Checking') || await muiSelect('Account Type','checking');
+                        // ── Bank Details (mirrors SetEpayment_BankStep) ──────────
+                        // Click "Enter bank info manually" span/button first
+                        var manualBtn = Array.from(document.querySelectorAll('button,span,[role="button"]')).find(function(el) {
+                            return (el.textContent||'').toLowerCase().includes('enter bank info manually') ||
+                                   (el.textContent||'').toLowerCase().includes('manually');
+                        });
+                        if (manualBtn) { (manualBtn.tagName==='BUTTON'?manualBtn:manualBtn.closest('button')||manualBtn).click(); touched++; await new Promise(function(r){setTimeout(r,500)}); }
+
+                        setField(document.querySelector('input[formcontrolname="routing"]'), DATA.routing || '021000021') && touched++;
+                        // Account number — generate once, reuse for confirm
+                        var acctNum = DATA.account || randDigits(12);
+                        setField(document.querySelector('input[formcontrolname="number"]'), acctNum) && touched++;
+                        setField(document.querySelector('input[formcontrolname="confirmNumber"]'), acctNum) && touched++;
+
+                        // Account Type — mat-select-value-17; pick Checking (#mat-option-143)
+                        var acctTypeSelect = document.querySelector('#mat-select-value-17') ||
+                            document.querySelector('mat-select[formcontrolname="accountType"]');
+                        if (acctTypeSelect) {
+                            acctTypeSelect.click();
+                            await new Promise(function(r){setTimeout(r,400)});
+                            var checkingOpt = document.querySelector('#mat-option-143') ||
+                                Array.from(document.querySelectorAll('mat-option,li[role="option"]'))
+                                    .find(function(o){ return (o.textContent||'').toLowerCase().includes('checking'); });
+                            if (checkingOpt) { checkingOpt.click(); touched++; }
+                        }
+
+                        // Click "Add" button (Bank_AddButton: span.mdc-button__label "Add")
+                        await new Promise(function(r){setTimeout(r,600)});
+                        var addBtn = Array.from(document.querySelectorAll('button:not([disabled]),.mdc-button__label')).find(function(b) {
+                            return (b.textContent||'').trim().toLowerCase() === 'add';
+                        });
+                        if (addBtn) { (addBtn.tagName==='BUTTON'?addBtn:addBtn.closest('button')||addBtn).click(); touched++; }
 
                     } else if (step === 'terms') {
-                        // ── Terms & Conditions page ──────────────────────────
-                        document.querySelectorAll('input[type="checkbox"]').forEach(function(cb) {
-                            if (!cb.checked) { cb.click(); cb.checked = true;
-                                cb.dispatchEvent(new Event('change',{bubbles:true})); touched++; }
+                        // ── Terms & Conditions (mirrors SetEpayment_TermsAndCondition) ──
+                        // Check both checkboxes
+                        var cb1 = document.querySelector('#mat-mdc-checkbox-1-input');
+                        var cb2 = document.querySelector('#mat-mdc-checkbox-2-input');
+                        // Fallback to any unchecked checkbox
+                        if (!cb1) cb1 = document.querySelector('input[type="checkbox"]:not(:checked)');
+                        if (cb1 && !cb1.checked) { cb1.click(); touched++; await new Promise(function(r){setTimeout(r,200)}); }
+                        if (cb2 && !cb2.checked) { cb2.click(); touched++; await new Promise(function(r){setTimeout(r,200)}); }
+                        // Also check any remaining unchecked checkboxes
+                        document.querySelectorAll('input[type="checkbox"]:not(:checked)').forEach(function(cb) {
+                            cb.click(); touched++;
                         });
-                        // Scroll to bottom so T&C are "read"
+                        // Scroll to bottom (T&C must be "read")
                         window.scrollTo(0, document.body.scrollHeight);
-                        // Click any "I Agree" / "Accept" button
-                        var agree = Array.from(document.querySelectorAll('button')).find(function(b) {
-                            var t = (b.textContent||'').toLowerCase();
-                            return t.includes('agree') || t.includes('accept') || t.includes('i accept');
-                        });
-                        if (agree && !agree.disabled) { setTimeout(function(){ agree.click(); }, 600); touched++; }
+                        // Click "Sign Up" button: button.signup-primary-button.signup-btn
+                        var signUpBtn = document.querySelector('button.signup-primary-button.signup-btn') ||
+                            Array.from(document.querySelectorAll('button:not([disabled])')).find(function(b) {
+                                var t = (b.textContent||'').toLowerCase().trim();
+                                return t.includes('sign up') || t.includes('submit') || t.includes('agree');
+                            });
+                        if (signUpBtn) { setTimeout(function(){ signUpBtn.click(); }, 800); touched++; }
                     }
-
-                    // ── Checkboxes on any page ────────────────────────────────
-                    document.querySelectorAll('input[type="checkbox"]').forEach(function(cb) {
-                        try {
-                            var lel = cb.id ? document.querySelector('label[for="'+cb.id+'"]') : cb.closest('label');
-                            var lb = lel ? lel.textContent.toLowerCase() : (cb.name||cb.id||'').toLowerCase();
-                            if (lb.includes('agree') || lb.includes('term') || lb.includes('accept') ||
-                                lb.includes('same as') || lb.includes('certif') || lb.includes('authoriz')) {
-                                if (!cb.checked) { cb.click(); touched++; }
-                            }
-                        } catch(e) {}
-                    });
 
                     return touched;
                 }
 
                 /* ── Click Next / Continue / Submit button ───────────────── */
+                // Mirrors Selenium: NextButton = "//span[text()=' Next ']"
                 function clickAdvance() {
+                    var step = currentStep();
+
+                    // On terms page: Sign Up button is handled inside fillPage; don't re-click Next
+                    if (step === 'terms') return null;
+
+                    // On bank page: "Next" comes AFTER "Add" — both handled in fillPage timing
+                    // Still need to click Next after Add completes
                     var btns = Array.from(document.querySelectorAll('button:not([disabled])'));
-                    var priority = ['submit application','submit','finish','agree & submit',
-                                    'agree','accept','continue','next','proceed','save & continue'];
+
+                    // Priority list matches Selenium wizard buttons
+                    var priority = [' next ', 'next', 'continue', 'proceed', 'save & continue',
+                                    'submit application', 'submit', 'finish'];
                     for (var p of priority) {
                         var btn = btns.find(function(b) {
-                            return (b.textContent||'').toLowerCase().trim().includes(p);
+                            return (b.textContent||'').toLowerCase().trim() === p.trim() ||
+                                   (b.textContent||'').toLowerCase().trim().includes(p.trim());
                         });
                         if (btn) { btn.click(); return (btn.textContent||'').trim(); }
                     }
                     return null;
                 }
 
+                /* ── Handle post-signup confirm dialog ───────────────────── */
+                // Mirrors: DialogOkayButton = "//button[contains(@class, 'confirm-dialog-form-control')][1]"
+                function handleConfirmDialog() {
+                    var dlg = document.querySelector('.confirm-dialog,.confirm-dialog-form-control,[class*="confirm-dialog"]');
+                    if (dlg) {
+                        var okBtn = document.querySelector('.confirm-dialog-form-control') ||
+                            document.querySelector('[class*="confirm-dialog"] button') ||
+                            Array.from(document.querySelectorAll('button')).find(function(b) {
+                                var t = (b.textContent||'').toLowerCase();
+                                return t.includes('ok') || t.includes('confirm') || t.includes('okay');
+                            });
+                        if (okBtn) { okBtn.click(); return true; }
+                    }
+                    return false;
+                }
+
                 /* ── Main polling loop ───────────────────────────────────── */
                 var timer = setInterval(function() {
                     window.__payrixFillAttempts++;
 
+                    // Always check for post-signup confirm dialog first
+                    handleConfirmDialog();
+
                     fillPage().then(function(touched) {
                         if (touched > 0 || window.__payrixFillAttempts > 5) {
+                            // Delay before advancing to let Angular validate fields
                             setTimeout(function() {
                                 var clicked = {{(d.AutoSubmit ? "clickAdvance()" : "null")}};
                                 console.log('[PayrixLauncher] Step filled (' + touched +
                                     ' fields). Advance: ' + clicked +
                                     ' attempt=' + window.__payrixFillAttempts);
-                            }, 1000);
+                            }, 1200);
                         }
                     });
 
@@ -7673,7 +7915,7 @@ WHERE {filter}
     }
 
     // ── Dark / Light mode toggle ─────────────────────────────────────────────
-    private bool _isDarkMode = true;   // matches App.xaml loading DarkTheme by default
+    private bool _isDarkMode = false;   // matches App.xaml loading LightTheme by default
 
     private void HelpBtn_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {

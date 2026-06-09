@@ -8,8 +8,10 @@ public static class SettingsService
 {
     // Store settings next to the EXE so they survive republish and are easy to find/edit.
     // For a single-file publish, AppContext.BaseDirectory is the folder containing PayrixTools.exe.
-    private static readonly string SettingsFile =
+    public static readonly string SettingsFilePath =
         Path.Combine(AppContext.BaseDirectory, "settings.json");
+
+    private static readonly string SettingsFile = SettingsFilePath;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
