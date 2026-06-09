@@ -74,8 +74,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         DisbGrid.ItemsSource          = _disbRecords;
         DisbEntryDetailGrid.ItemsSource = _disbDetailEntries;
         LoadSettings();
-        // Apply proxy early so all subsequent HTTP calls respect the setting
-        Services.ProxyConfig.Apply(Services.SettingsService.Load());
+        // Apply proxy — non-dev machines always get proxy disabled (Fiddler tab is hidden,
+        // and a stale localhost:8888 in settings.json would break all API calls)
+        var proxyCfg = Services.SettingsService.Load();
+        if (!_isDevMachine) proxyCfg.ProxyEnabled = false;
+        Services.ProxyConfig.Apply(proxyCfg);
         InitHttpClient();
         InitSubscriptions();
         InitFiddler();
@@ -433,9 +436,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             SprintMainDbBox.Text   = s.SprintMainDbConnectionString;
 
         // Fiddler / proxy — Fiddler tab is the single source of truth
-        FiddlerTabProxyEnabledChk.IsChecked = s.ProxyEnabled;
+        // Non-dev machines always run with proxy off (Fiddler tab is hidden and
+        // a stale localhost:8888 in settings.json would break all API calls)
+        var proxyEnabled = _isDevMachine && s.ProxyEnabled;
+        FiddlerTabProxyEnabledChk.IsChecked = proxyEnabled;
         if (!string.IsNullOrEmpty(s.ProxyUrl)) FiddlerTabProxyUrlBox.Text = s.ProxyUrl;
         FiddlerTabBypassLocalChk.IsChecked  = s.ProxyBypassLocal;
+        s.ProxyEnabled = proxyEnabled;
         Services.ProxyConfig.Apply(s);
         Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded,
             () => UpdateFiddlerTabProxyStatus());
@@ -2716,7 +2723,8 @@ ORDER BY MAX(s.ExpiresOn) DESC";
         if (!Guid.TryParse(companyIdStr, out var companyId)) return;
 
         if (SubAddPackageBox.SelectedItem is not System.Windows.Controls.ComboBoxItem pkgItem ||
-            !Guid.TryParse(pkgItem.Tag?.ToString(), out var packageId))
+            !Guid.TryParse(pkgItem.Tag?.ToString(), out var packageId) ||
+            packageId == Guid.Empty)
         {
             SubAddStatus.Text       = "❌  Select a package.";
             SubAddStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
@@ -2724,7 +2732,8 @@ ORDER BY MAX(s.ExpiresOn) DESC";
         }
 
         if (SubAddPlanBox.SelectedItem is not System.Windows.Controls.ComboBoxItem planItem ||
-            !Guid.TryParse(planItem.Tag?.ToString(), out var planId))
+            !Guid.TryParse(planItem.Tag?.ToString(), out var planId) ||
+            planId == Guid.Empty)
         {
             SubAddStatus.Text       = "❌  Select a plan.";
             SubAddStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
@@ -8216,6 +8225,236 @@ WHERE {filter}
 
     private void DisbSectionHeader_Click(object sender, MouseButtonEventArgs e)
         => ToggleSection(DisbSectionContent, DisbSectionArrow, DisbPinBtn);
+
+    private void VerifyMerchantHeader_Click(object sender, MouseButtonEventArgs e)
+    {
+        bool open = VerifyMerchantContent.Visibility == Visibility.Visible;
+        VerifyMerchantContent.Visibility = open ? Visibility.Collapsed : Visibility.Visible;
+        VerifyMerchantArrow.Text = open ? "▶" : "▼";
+    }
+
+    // ── Verify Merchant ───────────────────────────────────────────────────────
+
+    private async void VerifyMerchantBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var companyId = VerifyMerchantCompanyBox.Text.Trim();
+        if (!Guid.TryParse(companyId, out _))
+        {
+            ShowVerifyResult(false, "❌  Enter a valid Company GUID.", null);
+            return;
+        }
+
+        VerifyMerchantBtn.IsEnabled    = false;
+        VerifyMerchantResultCard.Visibility = Visibility.Visible;
+        VerifyMerchantDetailGrid.Visibility = Visibility.Collapsed;
+        SetVerifyBanner("#6B7280", "⏳  Querying Host DB…");
+
+        try
+        {
+            // ── Step 1: get connection string for selected environment ────────
+            var s   = Services.SettingsService.Load();
+            var env = (VerifyMerchantEnvBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Local";
+            var hostConn = env switch
+            {
+                "Staging"    => s.StagingHostDbConnectionString,
+                "Sprint"     => s.SprintHostDbConnectionString,
+                "Production" => s.ProductionHostDbConnectionString,
+                _            => s.LocalHostDbConnectionString,
+            };
+
+            if (string.IsNullOrWhiteSpace(hostConn))
+            {
+                ShowVerifyResult(false, $"❌  No {env} Host DB connection string configured.\nGo to Settings → Host DB Connection Strings.", null);
+                return;
+            }
+
+            // ── Step 2: query PaymentServiceEntity for this company ───────────
+            SetVerifyBanner("#6B7280", "⏳  Querying PaymentServiceEntity…");
+            var (merchantId, apiKey, isTest, entityId, dbErr) =
+                await GetPaymentServiceEntityAsync(hostConn, companyId);
+
+            if (dbErr != null)
+            {
+                ShowVerifyResult(false, $"❌  DB error: {dbErr}", null);
+                return;
+            }
+            if (string.IsNullOrEmpty(merchantId))
+            {
+                ShowVerifyResult(false,
+                    "⚠️  No Payrix payment service found for this company.\n\n" +
+                    "The company has not completed the ePayments setup, or the record was deleted.",
+                    null);
+                return;
+            }
+
+            VmMerchantId.Text  = merchantId;
+            VmApiKey.Text      = MaskKey(apiKey);
+            VmEnvironment.Text = isTest ? "Sandbox (IsTestMode = 1)" : "Production (IsTestMode = 0)";
+            VmEntityId.Text    = entityId ?? "(not stored)";
+            VerifyMerchantDetailGrid.Visibility = Visibility.Visible;
+
+            // ── Step 3: verify merchant exists in Payrix ─────────────────────
+            SetVerifyBanner("#6B7280", $"⏳  Calling Payrix GET /merchants/{merchantId}…");
+            var payrixApiKey = !string.IsNullOrEmpty(apiKey) ? apiKey
+                : (isTest ? SandboxApiKeyBox.Password : ProductionApiKeyBox.Password);
+
+            var svc = new Services.PayrixService(payrixApiKey, isTest);
+            var (merchant, rawJson, apiErr) = await svc.GetMerchantAsync(merchantId);
+
+            if (apiErr != null || merchant == null)
+            {
+                // Merchant not found in Payrix
+                var envLabel = isTest ? "Sandbox" : "Production";
+                VmMerchantName.Text   = "(not found)";
+                VmMerchantStatus.Text = "NOT FOUND";
+                VmMerchantStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+                VmDiagnosis.Text =
+                    $"Merchant {merchantId} does not exist in Payrix {envLabel}.\n\n" +
+                    $"Possible causes:\n" +
+                    $"• The ePayments signup was started but not completed\n" +
+                    $"• The merchant was deleted from Payrix\n" +
+                    $"• IsTestMode={isTest} but the merchant is in the other environment\n\n" +
+                    $"Fix: Re-run ePayments setup in BQE Core → Settings → ePayments → Get Started\n\n" +
+                    $"API error: {apiErr}";
+                ShowVerifyResult(false,
+                    $"❌  Merchant not found in Payrix {envLabel}.\nThe stored ID ({merchantId}) does not exist.",
+                    "#DC2626");
+                return;
+            }
+
+            // ── Step 4: merchant found — show details ────────────────────────
+            var statusCode = merchant.Status;
+            var statusText = statusCode switch { 1 => "Active", 2 => "Inactive", 3 => "Suspended", _ => $"Unknown ({statusCode})" };
+            var statusOk   = statusCode == 1;
+            var statusColor = statusOk
+                ? WpfColor.FromRgb(22, 101, 52)
+                : WpfColor.FromRgb(217, 119, 6);
+
+            VmMerchantName.Text                  = merchant.Name ?? "(no name)";
+            VmMerchantStatus.Text                = statusOk ? $"✅  Active" : $"⚠️  {statusText}";
+            VmMerchantStatus.Foreground          = new WpfBrush(statusColor);
+
+            var diagLines = new System.Text.StringBuilder();
+            if (statusOk)
+            {
+                diagLines.AppendLine("✅  Merchant exists and is active in Payrix.");
+                diagLines.AppendLine();
+                diagLines.AppendLine("If payments are still failing with 'no_such_record', check:");
+                diagLines.AppendLine("• The BQE Core payment page is hitting the same environment (sandbox/production)");
+                diagLines.AppendLine("• The API key on the payment page matches this merchant's environment");
+            }
+            else
+            {
+                diagLines.AppendLine($"⚠️  Merchant exists but status is '{statusText}'.");
+                diagLines.AppendLine("Payments will fail until the merchant is activated in Payrix portal.");
+            }
+            VmDiagnosis.Text = diagLines.ToString().TrimEnd();
+
+            ShowVerifyResult(statusOk,
+                statusOk
+                    ? $"✅  Merchant found and active in Payrix {(isTest ? "Sandbox" : "Production")}."
+                    : $"⚠️  Merchant found but status = {statusText}. Payments may fail.",
+                statusOk ? "#166534" : "#92400E");
+        }
+        catch (Exception ex)
+        {
+            ShowVerifyResult(false, $"❌  Unexpected error: {ex.Message}", null);
+        }
+        finally
+        {
+            VerifyMerchantBtn.IsEnabled = true;
+        }
+    }
+
+    private void ShowVerifyResult(bool ok, string message, string? hexColor)
+    {
+        VerifyMerchantResultCard.Visibility = Visibility.Visible;
+        var color = hexColor ?? (ok ? "#166534" : "#7F1D1D");
+        SetVerifyBanner(color, message);
+    }
+
+    private void SetVerifyBanner(string hex, string message)
+    {
+        try
+        {
+            var col = (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(hex);
+            VerifyMerchantStatusBanner.Background   = new WpfBrush(WpfColor.FromArgb(30, col.R, col.G, col.B));
+            VerifyMerchantStatusBanner.BorderBrush  = new WpfBrush(col);
+            VerifyMerchantStatusText.Foreground     = new WpfBrush(col);
+        }
+        catch { }
+        VerifyMerchantStatusText.Text = message;
+    }
+
+    private static string MaskKey(string? key)
+    {
+        if (string.IsNullOrEmpty(key) || key.Length < 8) return key ?? "";
+        return key[..6] + "••••••••" + key[^4..];
+    }
+
+    /// <summary>
+    /// Queries PaymentServiceEntity in the Host DB for the given company's Payrix entry.
+    /// Returns (merchantId, apiKey, isTestMode, entityId, error).
+    /// </summary>
+    private static async Task<(string? merchantId, string? apiKey, bool isTest, string? entityId, string? error)>
+        GetPaymentServiceEntityAsync(string hostConnStr, string companyId)
+    {
+        hostConnStr = Services.HostDbService.SanitizeConnectionStringPublic(hostConnStr);
+        if (!hostConnStr.Contains("TrustServerCertificate", StringComparison.OrdinalIgnoreCase))
+            hostConnStr = hostConnStr.TrimEnd(';') + ";TrustServerCertificate=True";
+
+        try
+        {
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(hostConnStr);
+            await conn.OpenAsync();
+
+            // ServiceType 3 = Payrix; ClientID stores the merchant ID (sometimes as JSON)
+            const string sql = @"
+                SELECT TOP 1
+                    pe.ClientID,
+                    pe.SecretKey,
+                    ISNULL(pe.IsTestMode, 1) AS IsTestMode,
+                    pe.EntityID
+                FROM PaymentServiceEntity pe
+                WHERE pe.Company_ID = @cid
+                  AND pe.ServiceType = 3
+                ORDER BY pe.CreatedOn DESC";
+
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            cmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@cid",
+                System.Data.SqlDbType.UniqueIdentifier) { Value = Guid.Parse(companyId) });
+
+            await using var rdr = await cmd.ExecuteReaderAsync();
+            if (!await rdr.ReadAsync())
+                return (null, null, true, null, null);   // no record — not an error, just not set up
+
+            var clientId  = rdr.IsDBNull(0) ? null : rdr.GetString(0);
+            var secretKey = rdr.IsDBNull(1) ? null : rdr.GetString(1);
+            var isTest    = !rdr.IsDBNull(2) && rdr.GetInt32(2) != 0;
+            var entityId  = rdr.IsDBNull(3) ? null : rdr.GetString(3);
+
+            // ClientID may be stored as JSON {"Id":"txn1_xxx","entity":"ent1_xxx"}
+            string? merchantId = null;
+            if (!string.IsNullOrEmpty(clientId))
+            {
+                try
+                {
+                    var j = System.Text.Json.JsonDocument.Parse(clientId);
+                    merchantId = j.RootElement.TryGetProperty("Id",     out var idProp)  ? idProp.GetString()
+                               : j.RootElement.TryGetProperty("id",     out var idProp2) ? idProp2.GetString()
+                               : clientId;
+                    if (string.IsNullOrEmpty(entityId))
+                    {
+                        entityId = j.RootElement.TryGetProperty("entity", out var entProp) ? entProp.GetString() : null;
+                    }
+                }
+                catch { merchantId = clientId; }
+            }
+
+            return (merchantId, secretKey, isTest, entityId, null);
+        }
+        catch (Exception ex) { return (null, null, true, null, ex.Message); }
+    }
 
     private void EmailPinBtn_Click(object sender, MouseButtonEventArgs e)
     {

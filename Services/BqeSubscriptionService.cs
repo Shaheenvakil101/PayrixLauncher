@@ -184,26 +184,34 @@ public static class BqeSubscriptionService
         //   in CompanySubscriptionManager.PlaceFoundationBasedOrder.
         // IsRenewal=true bypasses the "packages already added" duplicate check in
         //   ValidateCompanySubscriptions so the admin can add any module regardless of state.
+        // Order shape must match BQECoreHostModel.Order / LineItem exactly.
+        // - Source / PaymentOption are overridden server-side by CoreHostManager.PlaceOrder
+        //   (Source=1/AdminPortal, PaymentOption=2/NoCreditCard) so we don't need to send them,
+        //   but sending the correct values avoids any model-binding ambiguity.
+        // - StartsOn is NOT a field on LineItem — the server sets it from DateTime.UtcNow.
+        //   ExpiresOn is the only nullable date on LineItem; leave it null so the plan's
+        //   default term is used.
+        // - Region is NOT a field on Order — omit to avoid deserialisation noise.
+        // - CreditCard must be null for the NoCreditCard payment path.
         var order = new
         {
-            Company_ID      = companyId,
-            OrderDate       = DateTime.UtcNow,
-            AutoRenew       = autoRenew,
-            PaymentOption   = 2,    // PaymentOptions.NoCreditCard
-            Source          = 1,    // RequestSource.AdminPortal (not Core=0)
-            SendInvoice     = false,
-            Action          = 0,    // OrderAction.New
-            IsRenewal       = true, // skip duplicate-package validation; handled as renewal/extension
-            Region          = regionId.HasValue ? new { ID = regionId.Value } : null,
-            Subscriptions   = new[]
+            Company_ID    = companyId,
+            OrderDate     = DateTime.UtcNow,
+            AutoRenew     = autoRenew,
+            PaymentOption = 2,      // PaymentOptions.NoCreditCard
+            Source        = 1,      // RequestSource.AdminPortal
+            SendInvoice   = false,
+            Action        = 0,      // OrderAction.New
+            IsRenewal     = true,
+            CreditCard    = (object?)null,
+            Subscriptions = new[]
             {
                 new
                 {
-                    Package_ID       = packageId,
-                    Plan_ID          = planId,
-                    NumberOfLicense  = licenses,
-                    StartsOn         = startsOn.ToString("yyyy-MM-ddT00:00:00"),
-                    AutoRenew        = autoRenew
+                    Package_ID      = packageId,
+                    Plan_ID         = planId,
+                    NumberOfLicense = licenses,
+                    ExpiresOn       = (string?)null,   // let server apply plan default term
                 }
             }
         };
@@ -236,7 +244,7 @@ public static class BqeSubscriptionService
                     if (!string.IsNullOrWhiteSpace(body) && body != "null" && body.Length > 4 &&
                         (body.Contains("\"ExceptionMessage\"") || body.Contains("not allowed") ||
                          body.Contains("BQEException") || body.Contains("\"error\"")))
-                        return (false, $"HTTP 200 but error [{ep}]:\n{body[..Math.Min(body.Length, 500)]}");
+                        return (false, $"HTTP 200 but error [{ep}]:\n{StripHtml(body, 500)}");
                     // Return body for verification — caller can check if subscription was actually saved
                     return (true, string.IsNullOrWhiteSpace(body) || body == "null"
                         ? null
@@ -246,8 +254,9 @@ public static class BqeSubscriptionService
                 // 404 = endpoint doesn't exist → try next
                 if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) continue;
 
-                // Show full body for diagnosis
-                return (false, $"HTTP {(int)resp.StatusCode} [{ep}]:\n{body[..Math.Min(body.Length, 600)]}");
+                // Show full body for diagnosis — strip HTML tags so the message is readable
+                var bodyPreview = StripHtml(body, 600);
+                return (false, $"HTTP {(int)resp.StatusCode} [{ep}]:\n{bodyPreview}");
             }
 
             return (false, "All PlaceOrder endpoints returned 404 — check BQECoreHostApi is running");
@@ -291,6 +300,32 @@ public static class BqeSubscriptionService
             "/BQECoreAdminPortalAPI/API/CoreHost/ChangePackageDates", body);
         if (err != null) return (false, err);
         return (true, null);
+    }
+
+    // ── HTML stripping ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Strips HTML tags from a server error response so it's human-readable.
+    /// Extracts the innerText equivalent up to <paramref name="maxLen"/> chars.
+    /// </summary>
+    private static string StripHtml(string html, int maxLen)
+    {
+        if (string.IsNullOrWhiteSpace(html)) return html ?? "";
+
+        // If it doesn't look like HTML just return as-is
+        if (!html.TrimStart().StartsWith("<")) return html[..Math.Min(html.Length, maxLen)];
+
+        // Try to extract <title> for a quick summary
+        var titleMatch = System.Text.RegularExpressions.Regex.Match(
+            html, @"<title[^>]*>(.*?)</title>", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
+        var title = titleMatch.Success ? titleMatch.Groups[1].Value.Trim() : "";
+
+        // Strip all HTML tags, collapse whitespace
+        var text = System.Text.RegularExpressions.Regex.Replace(html, "<[^>]+>", " ");
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\s{2,}", " ").Trim();
+
+        var summary = string.IsNullOrEmpty(title) ? text : $"[{title}] {text}";
+        return summary[..Math.Min(summary.Length, maxLen)];
     }
 
     // ── HTTP helpers ──────────────────────────────────────────────────────

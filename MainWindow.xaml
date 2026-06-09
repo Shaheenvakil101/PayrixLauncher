@@ -1370,6 +1370,133 @@
                         </Button.Template>
                     </Button>
                 </Grid>
+                <!-- ── Section: Verify Merchant ───────────────────────────────── -->
+                <Border x:Name="VerifyMerchantSectionHeader" Cursor="Hand"
+                        MouseLeftButtonUp="VerifyMerchantHeader_Click"
+                        Margin="0,6,0,0" Padding="12,8" CornerRadius="8"
+                        Background="{DynamicResource TxnSectionBg}"
+                        BorderBrush="{DynamicResource TxnSectionBorder}" BorderThickness="1">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="🔎  Verify Merchant" FontWeight="SemiBold" FontSize="12"
+                                   Foreground="{DynamicResource TxnSectionFg}"/>
+                        <TextBlock x:Name="VerifyMerchantArrow" Grid.Column="1"
+                                   Text="▶" FontSize="11" Foreground="{DynamicResource SubLabelFg}"/>
+                    </Grid>
+                </Border>
+
+                <StackPanel x:Name="VerifyMerchantContent" Margin="0,4,0,0" Visibility="Collapsed">
+                    <Border Background="{DynamicResource CardBg}" CornerRadius="8"
+                            BorderBrush="{DynamicResource CardBorder}" BorderThickness="1"
+                            Padding="16,14">
+                        <StackPanel>
+                            <TextBlock Text="Enter a BQE Core Company ID to check whether the Payrix merchant stored in the payment-service DB actually exists in Payrix."
+                                       FontSize="12" Foreground="{DynamicResource SubText}"
+                                       TextWrapping="Wrap" Margin="0,0,0,12"/>
+
+                            <!-- Company ID row -->
+                            <Grid Margin="0,0,0,10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Company ID:" FontWeight="SemiBold" FontSize="12"
+                                           Foreground="{DynamicResource SubLabelFg}"
+                                           VerticalAlignment="Center" Margin="0,0,10,0"/>
+                                <Border Grid.Column="1" CornerRadius="6" Height="34"
+                                        Background="{DynamicResource InputBg}"
+                                        BorderBrush="{DynamicResource CardBorder}" BorderThickness="1"
+                                        Padding="10,0" Margin="0,0,8,0">
+                                    <TextBox x:Name="VerifyMerchantCompanyBox"
+                                             Background="Transparent" BorderThickness="0"
+                                             VerticalAlignment="Center" FontSize="12"
+                                             Foreground="{DynamicResource PrimaryText}"
+                                             FontFamily="Consolas"
+                                             ToolTip="BQE Core Company GUID"/>
+                                </Border>
+                                <!-- Environment selector -->
+                                <ComboBox x:Name="VerifyMerchantEnvBox" Grid.Column="2"
+                                          Height="34" Width="120" FontSize="12"
+                                          Margin="0,0,8,0"
+                                          Background="{DynamicResource InputBg}"
+                                          Foreground="{DynamicResource PrimaryText}"
+                                          BorderBrush="{DynamicResource CardBorder}">
+                                    <ComboBoxItem Content="Local"    IsSelected="True"/>
+                                    <ComboBoxItem Content="Staging"/>
+                                    <ComboBoxItem Content="Sprint"/>
+                                    <ComboBoxItem Content="Production"/>
+                                </ComboBox>
+                                <Button x:Name="VerifyMerchantBtn" Grid.Column="3"
+                                        Content="🔎  Verify Merchant"
+                                        Height="34" Padding="14,0" FontSize="12.5"
+                                        Style="{StaticResource PrimaryButton}"
+                                        Background="#0EA5E9"
+                                        Click="VerifyMerchantBtn_Click"/>
+                            </Grid>
+
+                            <!-- Result card -->
+                            <Border x:Name="VerifyMerchantResultCard" Visibility="Collapsed"
+                                    CornerRadius="8" Padding="14,12" Margin="0,4,0,0"
+                                    Background="{DynamicResource DbConfigBg}"
+                                    BorderBrush="{DynamicResource DbConfigBorder}" BorderThickness="1">
+                                <StackPanel>
+                                    <!-- Status banner -->
+                                    <Border x:Name="VerifyMerchantStatusBanner"
+                                            CornerRadius="6" Padding="12,8" Margin="0,0,0,10"
+                                            Background="#0EA5E920" BorderBrush="#0EA5E9" BorderThickness="1">
+                                        <TextBlock x:Name="VerifyMerchantStatusText"
+                                                   FontSize="13" FontWeight="SemiBold"
+                                                   Foreground="#0EA5E9" TextWrapping="Wrap"/>
+                                    </Border>
+
+                                    <!-- Detail grid -->
+                                    <Grid x:Name="VerifyMerchantDetailGrid" Visibility="Collapsed">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="150"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Merchant ID:" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,6"/>
+                                        <TextBlock x:Name="VmMerchantId" Grid.Row="0" Grid.Column="1" FontSize="12" FontFamily="Consolas" Foreground="{DynamicResource PrimaryText}" TextWrapping="Wrap" Margin="0,0,0,6"/>
+
+                                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Merchant Name:" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,6"/>
+                                        <TextBlock x:Name="VmMerchantName" Grid.Row="1" Grid.Column="1" FontSize="12" Foreground="{DynamicResource PrimaryText}" TextWrapping="Wrap" Margin="0,0,0,6"/>
+
+                                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Status:" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,6"/>
+                                        <TextBlock x:Name="VmMerchantStatus" Grid.Row="2" Grid.Column="1" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,6"/>
+
+                                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Entity ID:" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,6"/>
+                                        <TextBlock x:Name="VmEntityId" Grid.Row="3" Grid.Column="1" FontSize="12" FontFamily="Consolas" Foreground="{DynamicResource PrimaryText}" TextWrapping="Wrap" Margin="0,0,0,6"/>
+
+                                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Environment:" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,6"/>
+                                        <TextBlock x:Name="VmEnvironment" Grid.Row="4" Grid.Column="1" FontSize="12" Foreground="{DynamicResource PrimaryText}" Margin="0,0,0,6"/>
+
+                                        <TextBlock Grid.Row="5" Grid.Column="0" Text="API Key (stored):" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,6"/>
+                                        <TextBlock x:Name="VmApiKey" Grid.Row="5" Grid.Column="1" FontSize="12" FontFamily="Consolas" Foreground="{DynamicResource PrimaryText}" TextWrapping="Wrap" Margin="0,0,0,6"/>
+
+                                        <TextBlock Grid.Row="6" Grid.Column="0" Text="Diagnosis:" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,0"/>
+                                        <TextBlock x:Name="VmDiagnosis" Grid.Row="6" Grid.Column="1" FontSize="12" Foreground="{DynamicResource SubText}" TextWrapping="Wrap"/>
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
                 </StackPanel><!-- end SearchSectionsPanel -->
             </StackPanel>
         </Border>
