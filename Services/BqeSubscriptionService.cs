@@ -349,6 +349,149 @@ VALUES
         }
     }
 
+    // ── Assign users to subscription ─────────────────────────────────────────
+
+    /// <summary>
+    /// Returns all AccountCompany users for the given company, each flagged
+    /// IsAssigned=true if they already have subscriptionId assigned in
+    /// AccountCompanySubscription.
+    /// </summary>
+    public static async Task<(List<Models.AssignableUser> users, string? error)>
+        GetAssignableUsersAsync(string connStr, Guid companyId, Guid subscriptionId)
+    {
+        var csb = new SqlConnectionStringBuilder(connStr)
+        {
+            InitialCatalog         = "BQECoreHost",
+            TrustServerCertificate = true,
+        };
+
+        try
+        {
+            await using var conn = new SqlConnection(csb.ConnectionString);
+            await conn.OpenAsync();
+
+            const string sql = @"
+SELECT
+    ac.ID                                          AS AcId,
+    COALESCE(p.FirstName, '')                      AS FirstName,
+    COALESCE(p.LastName,  '')                      AS LastName,
+    COALESCE(a.Email,     '')                      AS Email,
+    CASE WHEN acs.AccountCompany_ID IS NOT NULL
+         THEN 1 ELSE 0 END                         AS IsAssigned
+FROM        [AccountCompany]             ac
+INNER JOIN  [Account]                    a   ON a.ID         = ac.Account_ID
+LEFT  JOIN  [Profile]                    p   ON p.ID         = a.Profile_ID
+LEFT  JOIN  [AccountCompanySubscription] acs ON acs.AccountCompany_ID = ac.ID
+                                             AND acs.Subscription_ID  = @SubId
+WHERE ac.Company_ID = @CompanyId
+ORDER BY p.LastName, p.FirstName, a.Email";
+
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@CompanyId", companyId);
+            cmd.Parameters.AddWithValue("@SubId",     subscriptionId);
+
+            var users = new List<Models.AssignableUser>();
+            await using var rdr = await cmd.ExecuteReaderAsync();
+            while (await rdr.ReadAsync())
+            {
+                users.Add(new Models.AssignableUser
+                {
+                    Id         = rdr.GetGuid(rdr.GetOrdinal("AcId")),
+                    FirstName  = rdr["FirstName"] as string,
+                    LastName   = rdr["LastName"]  as string,
+                    Email      = rdr["Email"]     as string,
+                    IsAssigned = (int)rdr["IsAssigned"] == 1,
+                });
+            }
+            return (users, null);
+        }
+        catch (Exception ex)
+        {
+            return ([], $"Could not load users: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Inserts/deletes rows in AccountCompanySubscription for the given lists.
+    /// Returns a log string and any error.
+    /// </summary>
+    public static async Task<(bool success, string? error, string rawLog)>
+        SaveUserAssignmentsAsync(string connStr, Guid subscriptionId,
+                                 IEnumerable<Guid> toAssign,
+                                 IEnumerable<Guid> toUnassign)
+    {
+        var log = new System.Text.StringBuilder();
+        log.AppendLine($"[ASSIGN] Subscription = {subscriptionId}");
+
+        var csb = new SqlConnectionStringBuilder(connStr)
+        {
+            InitialCatalog         = "BQECoreHost",
+            TrustServerCertificate = true,
+        };
+
+        var assigns   = toAssign.ToList();
+        var unassigns = toUnassign.ToList();
+        log.AppendLine($"→ Assign: {assigns.Count}   Unassign: {unassigns.Count}");
+
+        try
+        {
+            await using var conn = new SqlConnection(csb.ConnectionString);
+            await conn.OpenAsync();
+
+            // Unassign
+            foreach (var userId in unassigns)
+            {
+                await using var del = new SqlCommand(
+                    @"DELETE FROM [AccountCompanySubscription]
+                      WHERE [AccountCompany_ID] = @UserId
+                        AND [Subscription_ID]   = @SubId", conn);
+                del.Parameters.AddWithValue("@UserId", userId);
+                del.Parameters.AddWithValue("@SubId",  subscriptionId);
+                int rows = await del.ExecuteNonQueryAsync();
+                log.AppendLine($"  ✂ Unassigned {userId}  ({rows} row deleted)");
+            }
+
+            // Assign
+            var now = DateTime.UtcNow;
+            foreach (var userId in assigns)
+            {
+                // Skip if already exists (idempotent)
+                await using var chk = new SqlCommand(
+                    @"SELECT COUNT(*) FROM [AccountCompanySubscription]
+                      WHERE [AccountCompany_ID] = @UserId
+                        AND [Subscription_ID]   = @SubId", conn);
+                chk.Parameters.AddWithValue("@UserId", userId);
+                chk.Parameters.AddWithValue("@SubId",  subscriptionId);
+                if ((int)(await chk.ExecuteScalarAsync() ?? 0) > 0)
+                {
+                    log.AppendLine($"  ⏩ Already assigned {userId} — skipped");
+                    continue;
+                }
+
+                var newId = Guid.NewGuid();
+                await using var ins = new SqlCommand(@"
+INSERT INTO [AccountCompanySubscription]
+    ([ID],[AccountCompany_ID],[Subscription_ID],[CreatedOn],[UpdatedOn])
+VALUES
+    (@ID, @UserId, @SubId, @Now, @Now)", conn);
+                ins.Parameters.AddWithValue("@ID",     newId);
+                ins.Parameters.AddWithValue("@UserId", userId);
+                ins.Parameters.AddWithValue("@SubId",  subscriptionId);
+                ins.Parameters.AddWithValue("@Now",    now);
+                await ins.ExecuteNonQueryAsync();
+                log.AppendLine($"  ✅ Assigned   {userId}  (row {newId})");
+            }
+
+            log.AppendLine("✅ Assignment changes saved.");
+            return (true, null, log.ToString());
+        }
+        catch (Exception ex)
+        {
+            log.AppendLine($"→ DB error: {ex.Message}");
+            return (false, $"Save assignments failed: {ex.Message}", log.ToString());
+        }
+    }
+
     public static async Task<(bool success, string? error, string rawLog)>
         PlaceOrderAsync(string baseUrl, string token,
                         Guid companyId, Guid packageId, Guid planId,

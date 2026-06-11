@@ -168,6 +168,22 @@ public class BqeRegion
     [JsonPropertyName("Name")] public string? Name { get; set; }
 }
 
+/// <summary>A company user shown in the Assign Users panel.</summary>
+public class AssignableUser
+{
+    public Guid    Id         { get; set; }   // AccountCompany.ID
+    public string? Email      { get; set; }
+    public string? FirstName  { get; set; }
+    public string? LastName   { get; set; }
+    public bool    IsAssigned { get; set; }
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string DisplayName =>
+        string.IsNullOrWhiteSpace($"{FirstName}{LastName}")
+            ? (Email ?? Id.ToString())
+            : $"{FirstName} {LastName}".Trim() + (Email != null ? $"  ({Email})" : "");
+}
+
 /// <summary>BQEParameters wrapper used by SubscribePackages endpoint.</summary>
 public class BqeParameters
 {

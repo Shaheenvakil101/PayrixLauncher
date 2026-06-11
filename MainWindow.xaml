@@ -10408,6 +10408,8 @@
                                                 <ColumnDefinition Width="Auto"/>
                                                 <ColumnDefinition Width="8"/>
                                                 <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="8"/>
+                                                <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
                                             <TextBlock x:Name="SubCountText"
                                                        Text="No subscriptions loaded"
@@ -10474,8 +10476,34 @@
                                                     </ControlTemplate>
                                                 </Button.Template>
                                             </Button>
+                                            <!-- Assign Users button -->
+                                            <Button x:Name="SubAssignBtn" Grid.Column="7"
+                                                    Content="👤  Assign Users" Height="28" Padding="12,0"
+                                                    FontSize="11" FontWeight="SemiBold" Cursor="Hand"
+                                                    BorderThickness="0" Background="#7C3AED" Foreground="White"
+                                                    IsEnabled="False"
+                                                    Click="SubAssignBtn_Click"
+                                                    ToolTip="Assign or unassign users (AccountCompany) to the selected subscription">
+                                                <Button.Template>
+                                                    <ControlTemplate TargetType="Button">
+                                                        <Border Background="{TemplateBinding Background}" CornerRadius="4"
+                                                                Padding="{TemplateBinding Padding}">
+                                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                        </Border>
+                                                        <ControlTemplate.Triggers>
+                                                            <Trigger Property="IsMouseOver" Value="True">
+                                                                <Setter Property="Background" Value="#6D28D9"/>
+                                                            </Trigger>
+                                                            <Trigger Property="IsEnabled" Value="False">
+                                                                <Setter Property="Background" Value="#DDD6FE"/>
+                                                                <Setter Property="Foreground" Value="#4C1D95"/>
+                                                            </Trigger>
+                                                        </ControlTemplate.Triggers>
+                                                    </ControlTemplate>
+                                                </Button.Template>
+                                            </Button>
                                             <!-- Delete Subscription button -->
-                                            <Button x:Name="SubDeleteBtn" Grid.Column="7"
+                                            <Button x:Name="SubDeleteBtn" Grid.Column="9"
                                                     Content="🗑  Delete" Height="28" Padding="12,0"
                                                     FontSize="11" FontWeight="SemiBold" Cursor="Hand"
                                                     BorderThickness="0" Background="#DC2626" Foreground="White"
@@ -10746,6 +10774,97 @@
                                     <TextBlock x:Name="SubChangeExpiryStatus"
                                                FontSize="12" Foreground="{DynamicResource SubText}"
                                                Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- ── Assign Users card ─────────────────────────────────── -->
+                            <Border x:Name="SubAssignCard"
+                                    Visibility="Collapsed" Margin="0,14,0,0"
+                                    Background="{DynamicResource CardBg}"
+                                    BorderBrush="{DynamicResource CardBorder}"
+                                    BorderThickness="1" CornerRadius="8" Padding="18,14">
+                                <StackPanel>
+                                    <!-- Header -->
+                                    <Grid Margin="0,0,0,12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="8"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock x:Name="SubAssignTitle"
+                                                   Text="👤  Assign Users"
+                                                   FontSize="14" FontWeight="Bold"
+                                                   Foreground="{DynamicResource PrimaryText}"
+                                                   VerticalAlignment="Center"/>
+                                        <TextBlock x:Name="SubAssignCountText"
+                                                   Grid.Column="1"
+                                                   FontSize="12" VerticalAlignment="Center"
+                                                   Foreground="{DynamicResource HintFg}"/>
+                                        <Button Grid.Column="3" Content="✕" Height="26" Width="26"
+                                                Cursor="Hand" FontSize="13" BorderThickness="0"
+                                                Background="Transparent" Foreground="{DynamicResource HintFg}"
+                                                Click="SubAssignCancelBtn_Click"/>
+                                    </Grid>
+
+                                    <!-- Users list with checkboxes -->
+                                    <Border BorderBrush="#CBD5E1" BorderThickness="1"
+                                            CornerRadius="4" Margin="0,0,0,12"
+                                            Background="White">
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                                      MaxHeight="300" Padding="0">
+                                            <ItemsControl x:Name="SubAssignUsersList"
+                                                          Background="Transparent">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <Border Padding="10,6"
+                                                                BorderBrush="#F1F5F9" BorderThickness="0,0,0,1">
+                                                            <CheckBox IsChecked="{Binding IsAssigned, Mode=TwoWay}"
+                                                                      Content="{Binding DisplayName}"
+                                                                      FontSize="12.5"
+                                                                      Foreground="#1E293B"
+                                                                      VerticalContentAlignment="Center"/>
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                        </ScrollViewer>
+                                    </Border>
+
+                                    <!-- Footer: Save + status -->
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="12"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Button x:Name="SubSaveAssignBtn"
+                                                Content="✓  Save Assignments" Height="34" Padding="18,0"
+                                                FontSize="13" FontWeight="SemiBold" Cursor="Hand"
+                                                BorderThickness="0" Background="#7C3AED" Foreground="White"
+                                                Click="SubSaveAssignBtn_Click">
+                                            <Button.Template>
+                                                <ControlTemplate TargetType="Button">
+                                                    <Border Background="{TemplateBinding Background}" CornerRadius="4"
+                                                            Padding="{TemplateBinding Padding}">
+                                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter Property="Background" Value="#6D28D9"/>
+                                                        </Trigger>
+                                                        <Trigger Property="IsEnabled" Value="False">
+                                                            <Setter Property="Background" Value="#DDD6FE"/>
+                                                            <Setter Property="Foreground" Value="#4C1D95"/>
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </Button.Template>
+                                        </Button>
+                                        <TextBlock x:Name="SubAssignStatus" Grid.Column="2"
+                                                   FontSize="12" VerticalAlignment="Center"
+                                                   Foreground="{DynamicResource SubText}" TextWrapping="Wrap"/>
+                                    </Grid>
                                 </StackPanel>
                             </Border>
 

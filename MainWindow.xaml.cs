@@ -2796,6 +2796,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
         var pkg = SubscriptionsGrid.SelectedItem as Models.UserSubscribePackage;
         SubChangeExpiryBtn.IsEnabled = pkg != null;
         SubDeleteBtn.IsEnabled       = pkg != null;
+        SubAssignBtn.IsEnabled       = pkg != null;
 
         if (pkg != null)
         {
@@ -2869,6 +2870,119 @@ ORDER BY MAX(s.ExpiresOn) DESC";
         {
             SubDeleteBtn.IsEnabled = SubscriptionsGrid.SelectedItem != null;
         }
+    }
+
+    // ── Assign Users ──────────────────────────────────────────────────────────
+
+    // Full list loaded from DB (used for search filtering)
+    private List<Models.AssignableUser> _allAssignableUsers = [];
+    // The subscription ID for which users are currently loaded
+    private Guid _assigningSubscriptionId = Guid.Empty;
+
+    private async void SubAssignBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var pkg = SubscriptionsGrid.SelectedItem as Models.UserSubscribePackage;
+        if (pkg == null) return;
+
+        if (!Guid.TryParse(SubCompanyIdBox.Text.Trim(), out var companyId)) return;
+
+        var settings = Services.SettingsService.Load();
+        var connStr  = !string.IsNullOrWhiteSpace(settings.LocalMainDbConnectionString)
+                       ? settings.LocalMainDbConnectionString
+                       : settings.HostDbConnectionString;
+
+        if (string.IsNullOrWhiteSpace(connStr))
+        {
+            SubAssignStatus.Text       = "❌  No Host DB connection string configured.";
+            SubAssignStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            SubAssignCard.Visibility   = Visibility.Visible;
+            return;
+        }
+
+        var label = $"{pkg.PackageName ?? "subscription"}" +
+                    (string.IsNullOrWhiteSpace(pkg.PlanName) ? "" : $" / {pkg.PlanName}");
+
+        SubAssignTitle.Text  = $"👤  Assign Users — {label}";
+        SubAssignStatus.Text = "⏳  Loading users…";
+        SubAssignStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+        SubAssignCard.Visibility   = Visibility.Visible;
+        SubAssignBtn.IsEnabled     = false;
+        SubAssignUsersList.ItemsSource = null;
+
+        _assigningSubscriptionId = pkg.Id;
+
+        var (users, err) = await Services.BqeSubscriptionService
+            .GetAssignableUsersAsync(connStr, companyId, pkg.Id);
+
+        SubAssignBtn.IsEnabled = true;
+
+        if (err != null)
+        {
+            SubAssignStatus.Text       = $"❌  {err}";
+            SubAssignStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        _allAssignableUsers = users;
+        SubAssignUsersList.ItemsSource = users;
+
+        int assigned = users.Count(u => u.IsAssigned);
+        SubAssignCountText.Text = $"{users.Count} user(s) — {assigned} assigned";
+        SubAssignStatus.Text    = users.Count == 0 ? "No users found for this company." : "";
+    }
+
+    private async void SubSaveAssignBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (_assigningSubscriptionId == Guid.Empty) return;
+
+        var settings = Services.SettingsService.Load();
+        var connStr  = !string.IsNullOrWhiteSpace(settings.LocalMainDbConnectionString)
+                       ? settings.LocalMainDbConnectionString
+                       : settings.HostDbConnectionString;
+
+        if (string.IsNullOrWhiteSpace(connStr)) return;
+
+        // Compare current IsAssigned state against the original snapshot
+        // The displayed list may be filtered, so diff against _allAssignableUsers
+        // (checkboxes are bound two-way so _allAssignableUsers reflects UI state)
+        var toAssign   = _allAssignableUsers.Where(u =>  u.IsAssigned).Select(u => u.Id).ToList();
+        var toUnassign = _allAssignableUsers.Where(u => !u.IsAssigned).Select(u => u.Id).ToList();
+
+        SubSaveAssignBtn.IsEnabled = false;
+        SubAssignStatus.Text       = "⏳  Saving…";
+        SubAssignStatus.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+
+        try
+        {
+            var (ok, err, log) = await Services.BqeSubscriptionService
+                .SaveUserAssignmentsAsync(connStr, _assigningSubscriptionId, toAssign, toUnassign);
+
+            SubRawLogBox.Text        = log;
+            SubRawLogCard.Visibility = Visibility.Visible;
+
+            if (!ok)
+            {
+                SubAssignStatus.Text       = $"❌  {err}";
+                SubAssignStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+                return;
+            }
+
+            int assigned = _allAssignableUsers.Count(u => u.IsAssigned);
+            SubAssignCountText.Text    = $"{_allAssignableUsers.Count} user(s) — {assigned} assigned";
+            SubAssignStatus.Text       = $"✅  Saved — {assigned} user(s) assigned.";
+            SubAssignStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+        }
+        finally
+        {
+            SubSaveAssignBtn.IsEnabled = true;
+        }
+    }
+
+    private void SubAssignCancelBtn_Click(object sender, RoutedEventArgs e)
+    {
+        SubAssignCard.Visibility = Visibility.Collapsed;
+        _allAssignableUsers      = [];
+        _assigningSubscriptionId = Guid.Empty;
     }
 
     private async void SubSaveExpiryBtn_Click(object sender, RoutedEventArgs e)
