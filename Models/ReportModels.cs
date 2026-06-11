@@ -71,12 +71,15 @@ public class AccountMerchantRow : INotifyPropertyChanged
             OnPC(nameof(ToggleBusy));
         }
     }
-    public string StatusLabel     => StatusCode switch { 1 => "Active", 2 => "Inactive", 3 => "Suspended", 0 => "—", _ => $"Status {StatusCode}" };
-    public string StatusColor     => StatusCode switch { 1 => "#22C55E", 2 => "#9CA3AF", 3 => "#F59E0B", _ => "#9CA3AF" };
-    public string StatusBg        => StatusCode switch { 1 => "#2622C55E", 2 => "#269CA3AF", 3 => "#26F59E0B", _ => "#269CA3AF" };
+    // Payrix status codes (sandbox + production):
+    //   0 = Created/Processing   1 = Submitted/Pending
+    //   2 = Active (Boarded)     3 = Inactive   4 = Suspended
+    public string StatusLabel     => StatusCode switch { 2 => "Active", 3 => "Inactive", 4 => "Suspended", 1 => "Submitted", 0 => "—", _ => $"Status {StatusCode}" };
+    public string StatusColor     => StatusCode switch { 2 => "#22C55E", 3 => "#9CA3AF", 4 => "#F59E0B", 1 => "#F59E0B", _ => "#9CA3AF" };
+    public string StatusBg        => StatusCode switch { 2 => "#2622C55E", 3 => "#269CA3AF", 4 => "#26F59E0B", 1 => "#26F59E0B", _ => "#269CA3AF" };
 
-    /// <summary>Label shown on the toggle button ("Deactivate" when Active, "Activate" otherwise).</summary>
-    public string ToggleStatusLabel => StatusCode == 1 ? "Deactivate" : "Activate";
+    /// <summary>Label shown on the toggle button ("Deactivate" when Active/Boarded, "Activate" otherwise).</summary>
+    public string ToggleStatusLabel => StatusCode == 2 ? "Deactivate" : "Activate";
 
     private bool _toggleBusy;
     public bool ToggleBusy

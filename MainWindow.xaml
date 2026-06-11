@@ -7228,7 +7228,7 @@
                                                                     </Border>
                                                                 </StackPanel>
                                                                 <StackPanel Orientation="Horizontal">
-                                                                    <TextBlock Text="{Binding ShortId}"
+                                                                    <TextBlock Text="{Binding MerchantId}"
                                                                                FontSize="10" Foreground="{DynamicResource SubText}"
                                                                                FontFamily="Cascadia Code, Consolas"/>
                                                                     <Button Content="📋" FontSize="11"

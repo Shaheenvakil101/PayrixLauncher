@@ -9735,8 +9735,8 @@ WHERE {filter}
                 var (merch, _, merErr) = await svc.GetMerchantAsync(merchantId);
                 if (merErr == null && merch != null)
                 {
-                    var st = merch.Status switch { 1 => "Active", 2 => "Inactive", 3 => "Suspended", _ => $"Status={merch.Status}" };
-                    merchantActive = merch.Status == 1;
+                    var st = merch.Status switch { 2 => "Active (Boarded)", 1 => "Active", 3 => "Inactive", 4 => "Suspended", 0 => "Pending", _ => $"Status={merch.Status}" };
+                    merchantActive = merch.IsLive; // Status == 1 || Status == 2
                     Update(5, merchantActive ? "✅" : "⚠️", $"{merch.Name ?? merchantId}  —  {st}", merchantActive);
                     if (merchantActive) pass++; else fail++;
                 }
@@ -9849,7 +9849,14 @@ WHERE {filter}
             {
                 PtStep1Icon.Text = "❌";
                 PtStep1Text.Text = tokErr ?? "No token ID returned";
-                PtSetBanner(false, "❌  Tokenize failed — merchant may not be accepting payments.");
+
+                // code 15 = Payrix "resource does not exist" — almost always means the
+                // merchant is not Active yet.  Give the user an actionable message.
+                bool isCode15 = tokErr?.Contains("code 15", StringComparison.OrdinalIgnoreCase) == true
+                             || tokErr?.Contains("does not exist", StringComparison.OrdinalIgnoreCase) == true;
+                PtSetBanner(false, isCode15
+                    ? "❌  Tokenize failed — merchant is not Active. Go to Accounts tab and click Activate first."
+                    : "❌  Tokenize failed — check merchant ID and card details.");
                 return;
             }
             PtStep1Icon.Text    = "✅";
@@ -9860,8 +9867,19 @@ WHERE {filter}
             PtStep2Text.Text    = "charging…";
 
             // ── Step 2: Charge $amount ──────────────────────────────────────
+            // Try token-based charge first; if Payrix returns code 15 (token still in
+            // "pending" state), fall back to inline charge with card details embedded.
             var (txnId, txnStatus, txnJson, txnErr) = await svc.ChargeSaleAsync(
                 merchantId, tokenId, amountCents);
+
+            if ((txnErr?.Contains("code 15", StringComparison.OrdinalIgnoreCase) == true ||
+                 txnErr?.Contains("does not exist", StringComparison.OrdinalIgnoreCase) == true) &&
+                !string.IsNullOrEmpty(card))
+            {
+                PtStep2Text.Text = "token pending — retrying inline…";
+                (txnId, txnStatus, txnJson, txnErr) = await svc.ChargeInlineAsync(
+                    merchantId, card, exp, cvv, amountCents: amountCents);
+            }
 
             if (txnErr != null || string.IsNullOrEmpty(txnId))
             {
@@ -13453,17 +13471,17 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
 
     private async System.Threading.Tasks.Task DoToggleMerchantStatus(Models.Merchant m)
     {
-        // Payrix: status=1=Active, status=2=Boarded (both are live).
-        // Deactivating sets status=3 (Inactive); Activating sets status=1 (Active).
-        var newStatus = m.IsLive ? 3 : 1;
-        var verb = m.IsLive ? "Deactivate" : "Activate";
+        // Payrix status: 0=Created, 1=Submitted, 2=Active/Boarded, 3=Inactive, 4=Suspended
+        // Deactivate: Active(2) → Inactive(3).  Activate: anything else → Boarded(2).
+        var newStatus = m.IsLive ? 3 : 2;
+        var verb      = newStatus == 2 ? "Activate" : "Deactivate";
 
         IosAlertDialog.IsDark = _isDarkMode;
         bool confirm = IosAlertDialog.Show(
             title:       $"{verb} Merchant",
             message:     m.ShortId,
             actionLabel: verb,
-            destructive: newStatus == 2,   // Deactivate is destructive (red button)
+            destructive: newStatus == 3,   // Deactivate is destructive (red button)
             owner:       this);
         if (!confirm) return;
 
@@ -15623,49 +15641,79 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
         if (string.IsNullOrEmpty(merchantId)) return;
 
         var row = _allAccountRows.FirstOrDefault(r => r.MerchantId == merchantId);
-        if (row == null) return;
+        if (row == null)
+        {
+            WpfMessageBox.Show($"Merchant '{merchantId}' not found in loaded list.\nTry refreshing the account data.", "Not Found", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
 
-        // Toggle: Active (1) → Inactive (2), anything else → Active (1)
-        var newStatus = row.StatusCode == 1 ? 2 : 1;
-        var label = newStatus == 1 ? "Activate" : "Deactivate";
+        // Toggle: Active/Boarded (2) → Inactive (3), anything else → Activate (send 2 to Payrix)
+        var newStatus   = row.StatusCode == 2 ? 3 : 2;
+        var actionLabel = newStatus == 2 ? "Activate" : "Deactivate";
 
-        IosAlertDialog.IsDark = _isDarkMode;
-        bool confirm = IosAlertDialog.Show(
-            title:       $"{label} Merchant",
-            message:     row.ShortId,
-            actionLabel: label,
-            destructive: newStatus == 2,
-            owner:       this);
-        if (!confirm) return;
+        // Only confirm for destructive Deactivate — Activate goes immediately
+        if (newStatus == 3)
+        {
+            IosAlertDialog.IsDark = _isDarkMode;
+            bool confirm = IosAlertDialog.Show(
+                title:       "Deactivate Merchant",
+                message:     row.ShortId,
+                actionLabel: "Deactivate",
+                destructive: true,
+                owner:       this);
+            if (!confirm) return;
+        }
 
         row.ToggleBusy = true;
+        btn.IsEnabled  = false;
         try
         {
-            var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+            var apiKey      = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
             var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
-            var service = new PayrixService(apiKey, environment);
+            var service     = new PayrixService(apiKey, environment);
 
-            SetStatus($"Updating merchant status…");
-            var (updated, _, err) = await service.UpdateMerchantStatusAsync(merchantId, newStatus);
+            SetStatus($"⏳  {actionLabel}ing merchant {row.ShortId}…");
+            var (updated, rawJson, err) = await service.UpdateMerchantStatusAsync(merchantId, newStatus);
 
             if (err != null)
             {
-                SetStatus($"⚠ Update failed: {err}");
-                WpfMessageBox.Show($"Update failed:\n{err}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                SetStatus($"⚠  {actionLabel} failed: {err}");
+                WpfMessageBox.Show(
+                    $"{actionLabel} failed for {row.ShortId}:\n\n{err}\n\nRaw response:\n{rawJson[..Math.Min(rawJson.Length, 300)]}",
+                    $"{actionLabel} Error", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
 
-            // Update the row live — badge + button label refresh via INotifyPropertyChanged
-            row.StatusCode = updated?.Status ?? newStatus;
-            SetStatus($"Merchant {row.DisplayName} → {row.StatusLabel}");
+            // Update the row's status code
+            var finalStatus = updated?.Status ?? newStatus;
+            row.StatusCode = finalStatus;
+
+            // Rebuild the displayed list so the badge colour refreshes
+            // (plain List<T> doesn't guarantee ItemsControl re-renders on PropertyChanged)
+            ApplyAccSort();
+
+            SetStatus($"✅  Merchant {row.DisplayName} → {row.StatusLabel}");
+            WpfMessageBox.Show(
+                $"Merchant {row.DisplayName}\nNew status: {row.StatusLabel} (code {finalStatus})",
+                $"{actionLabel} OK", MessageBoxButton.OK, MessageBoxImage.Information);
+
+            // Also sync the detail panel if this merchant is currently selected
+            if (_selectedMerchant?.Id == merchantId && updated != null)
+            {
+                _selectedMerchant.Status = finalStatus;
+                MDetailStatus.Text       = _selectedMerchant.StatusLabel;
+                MDetailToggleBtn.Content = _selectedMerchant.ToggleStatusLabel;
+            }
         }
         catch (Exception ex)
         {
-            SetStatus($"⚠ {ex.Message}");
+            SetStatus($"⚠  {ex.Message}");
+            WpfMessageBox.Show($"Unexpected error:\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
             row.ToggleBusy = false;
+            btn.IsEnabled  = true;
         }
     }
 

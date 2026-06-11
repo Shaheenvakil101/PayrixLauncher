@@ -2264,10 +2264,10 @@ public class PayrixService
         {
             var url = $"/merchants/{Uri.EscapeDataString(merchantId)}";
 
-            // Payrix sandbox: status 2 = Boarded (active for testing), 1 = Active, 3 = Inactive
-            // When activating in sandbox, also set autoBoarded=1 to bypass underwriting check
-            object body = newStatus == 1
-                ? new { status = newStatus, autoBoarded = "1" }
+            // Payrix status codes: 0=Created, 1=Submitted, 2=Active/Boarded, 3=Inactive, 4=Suspended
+            // Activating (status→2): include autoBoarded=1 to bypass sandbox underwriting check.
+            object body = newStatus == 2
+                ? new { status = 2, autoBoarded = 1 }
                 : new { status = newStatus };
             var payload = JsonSerializer.Serialize(body);
 
@@ -2445,17 +2445,44 @@ public class PayrixService
         var json = "{}";
         try
         {
-            var body = new
+            // Step 0: create a temporary customer (Payrix requires a customer record for /tokens)
+            string? customerId = null;
+            try
             {
-                merchant  = merchantId,
-                number    = "4111111111111111",   // Visa test card
-                cvv       = "999",
-                expiration = "1230",               // MM/YY → December 2030
-                type      = 1,                     // 1 = credit card
-                mode      = "token"
+                var custBody = new Dictionary<string, object>
+                {
+                    ["merchant"]   = merchantId,
+                    ["firstName"]  = "Test",
+                    ["lastName"]   = "User",
+                    ["email"]      = "healthcheck@test.invalid"
+                };
+                var custContent = new System.Net.Http.StringContent(
+                    JsonSerializer.Serialize(custBody, JsonOptions),
+                    System.Text.Encoding.UTF8, "application/json");
+                var custResp = await _client.PostAsync("/customers", custContent).ConfigureAwait(false);
+                var custJson = await custResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                using var custDoc = JsonDocument.Parse(custJson);
+                if (custDoc.RootElement.TryGetProperty("response", out var cr) &&
+                    cr.TryGetProperty("data", out var cd) &&
+                    cd.ValueKind == JsonValueKind.Array && cd.GetArrayLength() > 0)
+                    customerId = cd[0].TryGetProperty("id", out var cid) ? cid.GetString() : null;
+            }
+            catch { /* non-fatal — proceed without customer */ }
+
+            var tokenBody = new Dictionary<string, object>
+            {
+                ["merchant"]   = merchantId,
+                ["number"]     = "4111111111111111",   // Visa test card
+                ["cvv"]        = "999",
+                ["expiration"] = "1230",               // December 2030
+                ["type"]       = 1,                    // 1 = credit card
+                ["mode"]       = "token"
             };
+            if (!string.IsNullOrEmpty(customerId))
+                tokenBody["customer"] = customerId;
+
             var content = new System.Net.Http.StringContent(
-                JsonSerializer.Serialize(body, JsonOptions),
+                JsonSerializer.Serialize(tokenBody, JsonOptions),
                 System.Text.Encoding.UTF8, "application/json");
             var resp = await _client.PostAsync("/tokens", content).ConfigureAwait(false);
             json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -2506,20 +2533,50 @@ public class PayrixService
         var json = "{}";
         try
         {
-            // Only send the card fields — including customer-detail fields (first/last/email/address)
-            // causes Payrix to attempt a customer record lookup that fails with code 15 if the
-            // customer doesn't already exist in the system.
-            var body = new
+            // ── Step 0: ensure a customer exists for this merchant ───────────────
+            // Payrix /tokens requires a customer record — without one it returns
+            // [customer] code 15 ("referenced resource does not exist").
+            // Create a lightweight test customer and use its ID in the token request.
+            string? customerId = null;
+            try
             {
-                merchant   = merchantId,
-                number     = cardNumber.Replace(" ", "").Replace("-", ""),
-                cvv        = cvv,
-                expiration = expiration,   // MMYY
-                type       = 1,            // 1 = credit card
-                mode       = "token",
+                var custBody = JsonSerializer.Serialize(new
+                {
+                    merchant  = merchantId,
+                    firstName = first,
+                    lastName  = last,
+                    email     = email,
+                }, JsonOptions);
+                var custResp = await _client.PostAsync("/customers",
+                    new System.Net.Http.StringContent(custBody, System.Text.Encoding.UTF8, "application/json"))
+                    .ConfigureAwait(false);
+                var custJson = await custResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                if (custResp.IsSuccessStatusCode)
+                {
+                    using var cd = JsonDocument.Parse(custJson);
+                    if (cd.RootElement.TryGetProperty("response", out var cr) &&
+                        cr.TryGetProperty("data", out var cdata) &&
+                        cdata.ValueKind == JsonValueKind.Array && cdata.GetArrayLength() > 0)
+                        customerId = cdata[0].TryGetProperty("id", out var cid) ? cid.GetString() : null;
+                }
+            }
+            catch { /* non-fatal — attempt token without customer */ }
+
+            // ── Step 1: tokenize ─────────────────────────────────────────────────
+            var tokenBody = new System.Collections.Generic.Dictionary<string, object>
+            {
+                ["merchant"]   = merchantId,
+                ["number"]     = cardNumber.Replace(" ", "").Replace("-", ""),
+                ["cvv"]        = cvv,
+                ["expiration"] = expiration,   // MMYY
+                ["type"]       = 1,            // 1 = credit card
+                ["mode"]       = "token",
             };
+            if (!string.IsNullOrEmpty(customerId))
+                tokenBody["customer"] = customerId;
+
             var content = new System.Net.Http.StringContent(
-                JsonSerializer.Serialize(body, JsonOptions),
+                JsonSerializer.Serialize(tokenBody, JsonOptions),
                 System.Text.Encoding.UTF8, "application/json");
             var resp = await _client.PostAsync("/tokens", content).ConfigureAwait(false);
             json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -2534,8 +2591,8 @@ public class PayrixService
                 d.ValueKind == JsonValueKind.Array && d.GetArrayLength() > 0)
             {
                 var t = d[0];
-                tokenId = t.TryGetProperty("id",      out var idP) ? idP.GetString() : null;
-                masked  = t.TryGetProperty("number",  out var nP)  ? nP.GetString()  : null;
+                tokenId = t.TryGetProperty("id",     out var idP) ? idP.GetString() : null;
+                masked  = t.TryGetProperty("number", out var nP)  ? nP.GetString()  : null;
             }
             if (string.IsNullOrEmpty(tokenId))
                 return (null, null, json, ExtractPayrixError(json) ?? "Token ID not found in response");
