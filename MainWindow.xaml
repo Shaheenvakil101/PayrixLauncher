@@ -1,4 +1,4 @@
-<Window x:Class="PayrixLauncher.MainWindow"
+﻿<Window x:Class="PayrixLauncher.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
@@ -22,10 +22,10 @@
              Used by the Status badge column to drive background from StatusColor property. -->
         <local:StringToBrushConverter x:Key="StringToBrushConverter"/>
 
-        <!-- Implicit TextBlock — Apple SF Pro fallback, theme-aware foreground -->
+        <!-- Implicit TextBlock — QB Inter/Segoe UI, theme-aware foreground -->
         <Style TargetType="TextBlock">
             <Setter Property="Foreground" Value="{DynamicResource PrimaryText}"/>
-            <Setter Property="FontFamily" Value="Segoe UI Variable Text, Segoe UI, Inter"/>
+            <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI Variable Text, Inter, Segoe UI"/>
         </Style>
 
         <!-- Shared right-click context menu for DataGrids -->
@@ -92,21 +92,21 @@
             </Setter>
         </Style>
 
-        <!-- Implicit Button — Apple filled, DynamicResource, 10px radius -->
+        <!-- Implicit Button — QB style, 8px radius, slate bg -->
         <Style TargetType="Button">
             <Setter Property="Background"      Value="{DynamicResource DarkBtnBg}"/>
             <Setter Property="Foreground"      Value="{DynamicResource DarkText}"/>
             <Setter Property="BorderBrush"     Value="{DynamicResource DarkBorder}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Cursor"          Value="Hand"/>
-            <Setter Property="FontFamily"      Value="Segoe UI Variable Text, Segoe UI, Inter"/>
+            <Setter Property="FontFamily"      Value="Segoe UI Variable Display, Segoe UI Variable Text, Inter, Segoe UI"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
                         <Border Background="{TemplateBinding Background}"
                                 BorderBrush="{TemplateBinding BorderBrush}"
                                 BorderThickness="{TemplateBinding BorderThickness}"
-                                CornerRadius="10" Padding="{TemplateBinding Padding}">
+                                CornerRadius="8" Padding="{TemplateBinding Padding}">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
@@ -122,30 +122,33 @@
             </Setter>
         </Style>
 
-        <!-- PrimaryButton — Apple Blue #007AFF with glow, 10px radius, SemiBold, Height=36 -->
+        <!-- PrimaryButton — QB Green #2CA01C -->
         <Style x:Key="PrimaryButton" TargetType="Button">
-            <Setter Property="Background"      Value="#007AFF"/>
+            <Setter Property="Background"      Value="#2CA01C"/>
             <Setter Property="Foreground"      Value="White"/>
             <Setter Property="FontWeight"      Value="SemiBold"/>
             <Setter Property="FontSize"        Value="13"/>
             <Setter Property="FontFamily"      Value="Segoe UI Variable Text, Segoe UI, Inter"/>
-            <Setter Property="Padding"         Value="16,8"/>
+            <Setter Property="Padding"         Value="18,8"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Cursor"          Value="Hand"/>
             <Setter Property="Height"          Value="36"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="10"
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="8"
                                 Padding="{TemplateBinding Padding}">
                             <Border.Effect>
-                                <DropShadowEffect BlurRadius="14" ShadowDepth="0" Opacity="0.25" Color="#007AFF"/>
+                                <DropShadowEffect BlurRadius="12" ShadowDepth="0" Opacity="0.20" Color="#2CA01C"/>
                             </Border.Effect>
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#0066DD"/>
+                                <Setter TargetName="Bd" Property="Background" Value="#22881A"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#1A6B14"/>
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Opacity" Value="0.45"/>
@@ -186,22 +189,31 @@
             </Setter>
         </Style>
 
-        <!-- SecondaryButton — Apple Green #34C759 -->
-        <Style x:Key="SecondaryButton" TargetType="Button" BasedOn="{StaticResource PrimaryButton}">
-            <Setter Property="Background" Value="#34C759"/>
+        <!-- SecondaryButton — QB outlined green -->
+        <Style x:Key="SecondaryButton" TargetType="Button">
+            <Setter Property="Background"      Value="#F0FDF4"/>
+            <Setter Property="Foreground"      Value="#166534"/>
+            <Setter Property="BorderBrush"     Value="#86EFAC"/>
+            <Setter Property="BorderThickness" Value="1.5"/>
+            <Setter Property="FontWeight"      Value="SemiBold"/>
+            <Setter Property="FontSize"        Value="13"/>
+            <Setter Property="FontFamily"      Value="Segoe UI Variable Text, Segoe UI, Inter"/>
+            <Setter Property="Padding"         Value="18,8"/>
+            <Setter Property="Cursor"          Value="Hand"/>
+            <Setter Property="Height"          Value="36"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="10"
-                                Padding="{TemplateBinding Padding}">
-                            <Border.Effect>
-                                <DropShadowEffect BlurRadius="14" ShadowDepth="0" Opacity="0.25" Color="#34C759"/>
-                            </Border.Effect>
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="8" Padding="{TemplateBinding Padding}">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#28A745"/>
+                                <Setter TargetName="Bd" Property="Background" Value="#DCFCE7"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="#4ADE80"/>
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Opacity" Value="0.45"/>
@@ -212,22 +224,22 @@
             </Setter>
         </Style>
 
-        <!-- DangerButton — Apple Red #FF3B30 -->
+        <!-- DangerButton — Red #EF4444 -->
         <Style x:Key="DangerButton" TargetType="Button" BasedOn="{StaticResource PrimaryButton}">
-            <Setter Property="Background" Value="#FF3B30"/>
+            <Setter Property="Background" Value="#EF4444"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="10"
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="8"
                                 Padding="{TemplateBinding Padding}">
                             <Border.Effect>
-                                <DropShadowEffect BlurRadius="14" ShadowDepth="0" Opacity="0.25" Color="#FF3B30"/>
+                                <DropShadowEffect BlurRadius="12" ShadowDepth="0" Opacity="0.18" Color="#EF4444"/>
                             </Border.Effect>
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#D62D22"/>
+                                <Setter TargetName="Bd" Property="Background" Value="#DC2626"/>
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Opacity" Value="0.45"/>
@@ -238,45 +250,45 @@
             </Setter>
         </Style>
 
-        <!-- Card — Apple card, 14px radius, subtle shadow -->
+        <!-- Card — QB style, 12px radius, subtle shadow -->
         <Style x:Key="Card" TargetType="Border">
             <Setter Property="Background"      Value="{DynamicResource CardBg}"/>
-            <Setter Property="CornerRadius"    Value="14"/>
+            <Setter Property="CornerRadius"    Value="12"/>
             <Setter Property="Padding"         Value="20"/>
             <Setter Property="BorderBrush"     Value="{DynamicResource CardBorder}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Effect">
                 <Setter.Value>
-                    <DropShadowEffect BlurRadius="20" ShadowDepth="2" Opacity="0.08"
+                    <DropShadowEffect BlurRadius="16" ShadowDepth="1" Opacity="0.06"
                                       Color="{DynamicResource CardShadowColor}"/>
                 </Setter.Value>
             </Setter>
         </Style>
 
-        <!-- NavBtn — sidebar nav, responds to DynamicResource SidebarNavFg, 10px radius -->
+        <!-- NavBtn — QB dark navy sidebar, slate foreground, green hover -->
         <Style x:Key="NavBtn" TargetType="Button">
             <Setter Property="Background"                 Value="Transparent"/>
             <Setter Property="Foreground"                 Value="{DynamicResource SidebarNavFg}"/>
             <Setter Property="BorderThickness"            Value="0"/>
             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
             <Setter Property="Padding"                    Value="14,10"/>
-            <Setter Property="Margin"                     Value="0,1"/>
+            <Setter Property="Margin"                     Value="0,2"/>
             <Setter Property="Cursor"                     Value="Hand"/>
             <Setter Property="FocusVisualStyle"           Value="{x:Null}"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
                         <Border x:Name="Bd" Background="{TemplateBinding Background}"
-                                CornerRadius="10" Padding="{TemplateBinding Padding}">
+                                CornerRadius="8" Padding="{TemplateBinding Padding}">
                             <ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#FFFFFF18"/>
-                                <Setter Property="Foreground" Value="#FFFFFF"/>
+                                <Setter TargetName="Bd" Property="Background" Value="#1E293B"/>
+                                <Setter Property="Foreground" Value="#E2E8F0"/>
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#FFFFFF28"/>
+                                <Setter TargetName="Bd" Property="Background" Value="#2CA01C26"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -284,17 +296,126 @@
             </Setter>
         </Style>
 
-        <!-- NavBtnActive — Apple blue gradient, white text -->
+        <!-- NavBtnActive — QB Green solid, white text -->
         <Style x:Key="NavBtnActive" TargetType="Button" BasedOn="{StaticResource NavBtn}">
             <Setter Property="Foreground" Value="White"/>
-            <Setter Property="Background">
+            <Setter Property="Background" Value="#2CA01C"/>
+        </Style>
+
+        <!-- ── Mail Tab Styles ─────────────────────────────────────────────── -->
+        <Style x:Key="MailToolbarBtn" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="8,4"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Foreground" Value="#201F1E"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
                 <Setter.Value>
-                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
-                        <GradientStop Color="#007AFF" Offset="0"/>
-                        <GradientStop Color="#5856D6" Offset="1"/>
-                    </LinearGradientBrush>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}"
+                                CornerRadius="4" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#E8E8E8"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#D0D0D0"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
                 </Setter.Value>
             </Setter>
+        </Style>
+
+        <Style x:Key="MailIconBtn" TargetType="Button" BasedOn="{StaticResource MailToolbarBtn}">
+            <Setter Property="Width" Value="30"/>
+            <Setter Property="Height" Value="30"/>
+            <Setter Property="Padding" Value="0"/>
+        </Style>
+
+        <Style x:Key="MailActionBtn" TargetType="Button" BasedOn="{StaticResource MailToolbarBtn}">
+            <Setter Property="Padding" Value="10,5"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Margin" Value="2,0"/>
+            <Setter Property="Foreground" Value="#0078D4"/>
+        </Style>
+
+        <Style x:Key="MailSummarizeBtn" TargetType="Button">
+            <Setter Property="Background" Value="#E8F0FE"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="10,4"/>
+            <Setter Property="FontSize" Value="11.5"/>
+            <Setter Property="Foreground" Value="#0078D4"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}"
+                                CornerRadius="12" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#D0E4FD"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="MailJunkBtn" TargetType="Button">
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="BorderBrush" Value="#CCCCCC"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="10,4"/>
+            <Setter Property="FontSize" Value="11.5"/>
+            <Setter Property="Foreground" Value="#201F1E"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="3" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#F5F5F5"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Mail folder TreeViewItem style — compact Outlook-like rows -->
+        <Style x:Key="MailFolderItem" TargetType="TreeViewItem">
+            <Setter Property="IsExpanded"              Value="{Binding IsExpanded, Mode=TwoWay}"/>
+            <Setter Property="Padding"                 Value="6,3"/>
+            <Setter Property="Margin"                  Value="0,1"/>
+            <Setter Property="Background"              Value="Transparent"/>
+            <Setter Property="BorderThickness"         Value="0"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="Foreground"              Value="#201F1E"/>
+            <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#0078D4"/>
+                    <Setter Property="Foreground" Value="White"/>
+                </Trigger>
+                <MultiTrigger>
+                    <MultiTrigger.Conditions>
+                        <Condition Property="IsSelected"  Value="False"/>
+                        <Condition Property="IsMouseOver" Value="True"/>
+                    </MultiTrigger.Conditions>
+                    <Setter Property="Background" Value="#E0E0E0"/>
+                </MultiTrigger>
+            </Style.Triggers>
         </Style>
     </Window.Resources>
 
@@ -979,25 +1100,48 @@
                 </Grid>
 
                 <!-- Collapsible search sections wrapper -->
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                              MaxHeight="600" Margin="0,0,-2,0" Padding="0,0,2,0">
                 <StackPanel x:Name="SearchSectionsPanel">
 
                 <!-- ── Section: Search by Email ─────────────────────────────────────── -->
+                <Border Margin="0,6,0,0" CornerRadius="8"
+                        BorderBrush="{DynamicResource EmailSectionBorder}" BorderThickness="1"
+                        Background="{DynamicResource CardBg}">
+                    <StackPanel>
                 <Border x:Name="EmailSectionHeader" Cursor="Hand" MouseLeftButtonUp="EmailSectionHeader_Click"
-                        CornerRadius="6" Padding="10,7" Margin="0,6,0,0"
-                        Background="{DynamicResource EmailSectionBg}" BorderBrush="{DynamicResource EmailSectionBorder}" BorderThickness="1">
-                    <Grid>
-                        <TextBlock Text="🔍  Search by Email" FontWeight="SemiBold" FontSize="12" Foreground="{DynamicResource EmailSectionFg}"/>
+                        CornerRadius="8,8,0,0" Padding="14,0" MinHeight="44"
+                        Background="{DynamicResource EmailSectionBg}">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Style.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter Property="Opacity" Value="0.9"/>
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <Grid VerticalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <Border Width="3" Height="18" CornerRadius="2"
+                                    Background="{DynamicResource EmailSectionFg}"
+                                    Margin="0,0,10,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="🔍  Search by Email" FontWeight="SemiBold" FontSize="13"
+                                       Foreground="{DynamicResource EmailSectionFg}" VerticalAlignment="Center"/>
+                        </StackPanel>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
                             <TextBlock x:Name="EmailPinBtn" Text="📍" FontSize="12" Cursor="Hand"
                                        Foreground="{DynamicResource SubLabelFg}"
                                        ToolTip="Pin to keep section expanded"
-                                       Margin="0,0,10,0"
+                                       Margin="0,0,12,0" VerticalAlignment="Center"
                                        MouseLeftButtonDown="EmailPinBtn_Click"/>
-                            <TextBlock x:Name="EmailSectionArrow" Text="▶" FontSize="11" Foreground="{DynamicResource SubLabelFg}"/>
+                            <TextBlock x:Name="EmailSectionArrow" Text="▼" FontSize="11"
+                                       Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
                         </StackPanel>
                     </Grid>
                 </Border>
-                <StackPanel x:Name="EmailSectionContent" Margin="0,4,0,0" Visibility="Collapsed">
+                <Border BorderBrush="{DynamicResource EmailSectionBorder}" BorderThickness="0,1,0,0">
+                <StackPanel x:Name="EmailSectionContent" Visibility="Visible">
                 <!-- Row 3: Single email field with Search + Fetch Latest buttons -->
                 <Border Background="{DynamicResource SearchCardBg}" CornerRadius="6" Padding="12,10" Margin="0,0,0,10"
                         BorderBrush="{DynamicResource SearchCardBorder}" BorderThickness="1">
@@ -1168,25 +1312,50 @@
                 </Border>
 
                 </StackPanel>
+                </Border><!-- EmailSectionContent border -->
+                    </StackPanel>
+                </Border><!-- Email accordion card -->
 
                 <!-- ── Section: By Transaction ID ──────────────────────────────────── -->
+                <Border Margin="0,6,0,0" CornerRadius="8"
+                        BorderBrush="{DynamicResource TxnSectionBorder}" BorderThickness="1"
+                        Background="{DynamicResource CardBg}">
+                    <StackPanel>
                 <Border x:Name="TxnSectionHeader" Cursor="Hand" MouseLeftButtonUp="TxnSectionHeader_Click"
-                        CornerRadius="6" Padding="10,7" Margin="0,6,0,0"
-                        Background="{DynamicResource TxnSectionBg}" BorderBrush="{DynamicResource TxnSectionBorder}" BorderThickness="1">
-                    <Grid>
-                        <TextBlock Text="📋  By Transaction ID" FontWeight="SemiBold" FontSize="12" Foreground="{DynamicResource TxnSectionFg}"/>
+                        CornerRadius="8,8,0,0" Padding="14,0" MinHeight="44"
+                        Background="{DynamicResource TxnSectionBg}">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Style.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter Property="Opacity" Value="0.9"/>
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <Grid VerticalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <Border Width="3" Height="18" CornerRadius="2"
+                                    Background="{DynamicResource TxnSectionFg}"
+                                    Margin="0,0,10,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="📋  By Transaction ID" FontWeight="SemiBold" FontSize="13"
+                                       Foreground="{DynamicResource TxnSectionFg}" VerticalAlignment="Center"/>
+                        </StackPanel>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
                             <TextBlock x:Name="TxnPinBtn" Text="📍" FontSize="12" Cursor="Hand"
                                        Foreground="{DynamicResource SubLabelFg}"
                                        ToolTip="Pin to keep section expanded"
-                                       Margin="0,0,10,0"
+                                       Margin="0,0,12,0" VerticalAlignment="Center"
                                        MouseLeftButtonDown="TxnPinBtn_Click"/>
-                            <TextBlock x:Name="TxnSectionArrow" Text="▼" FontSize="11" Foreground="{DynamicResource SubLabelFg}"/>
+                            <TextBlock x:Name="TxnSectionArrow" Text="▼" FontSize="11"
+                                       Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
                         </StackPanel>
                     </Grid>
                 </Border>
+                <Border BorderBrush="{DynamicResource TxnSectionBorder}" BorderThickness="0,1,0,0"
+                        Padding="12,10,12,12">
                 <!-- Row 4: Transaction IDs + buttons -->
-                <Grid x:Name="TxnSectionContent" Margin="0,4,0,0">
+                <Grid x:Name="TxnSectionContent">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="*"/>
@@ -1255,25 +1424,50 @@
                         </Button.Template>
                     </Button>
                 </Grid>
+                </Border><!-- TxnSectionContent border -->
+                    </StackPanel>
+                </Border><!-- Txn accordion card -->
 
                 <!-- ── Section: By Disbursement ID ─────────────────────────────────── -->
+                <Border Margin="0,6,0,0" CornerRadius="8"
+                        BorderBrush="{DynamicResource DisbSectionBorder}" BorderThickness="1"
+                        Background="{DynamicResource CardBg}">
+                    <StackPanel>
                 <Border x:Name="DisbSectionHeader" Cursor="Hand" MouseLeftButtonUp="DisbSectionHeader_Click"
-                        CornerRadius="6" Padding="10,7" Margin="0,6,0,0"
-                        Background="{DynamicResource DisbSectionBg}" BorderBrush="{DynamicResource DisbSectionBorder}" BorderThickness="1">
-                    <Grid>
-                        <TextBlock Text="💸  By Disbursement ID" FontWeight="SemiBold" FontSize="12" Foreground="{DynamicResource DisbSectionFg}"/>
+                        CornerRadius="8,8,0,0" Padding="14,0" MinHeight="44"
+                        Background="{DynamicResource DisbSectionBg}">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Style.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter Property="Opacity" Value="0.9"/>
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <Grid VerticalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <Border Width="3" Height="18" CornerRadius="2"
+                                    Background="{DynamicResource DisbSectionFg}"
+                                    Margin="0,0,10,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="💸  By Disbursement ID" FontWeight="SemiBold" FontSize="13"
+                                       Foreground="{DynamicResource DisbSectionFg}" VerticalAlignment="Center"/>
+                        </StackPanel>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
                             <TextBlock x:Name="DisbPinBtn" Text="📍" FontSize="12" Cursor="Hand"
                                        Foreground="{DynamicResource SubLabelFg}"
                                        ToolTip="Pin to keep section expanded"
-                                       Margin="0,0,10,0"
+                                       Margin="0,0,12,0" VerticalAlignment="Center"
                                        MouseLeftButtonDown="DisbPinBtn_Click"/>
-                            <TextBlock x:Name="DisbSectionArrow" Text="▶" FontSize="11" Foreground="{DynamicResource SubLabelFg}"/>
+                            <TextBlock x:Name="DisbSectionArrow" Text="▼" FontSize="11"
+                                       Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
                         </StackPanel>
                     </Grid>
                 </Border>
+                <Border BorderBrush="{DynamicResource DisbSectionBorder}" BorderThickness="0,1,0,0"
+                        Padding="12,10,12,12">
                 <!-- Row 5: Disbursement ID search -->
-                <Grid x:Name="DisbSectionContent" Margin="0,4,0,0" Visibility="Collapsed">
+                <Grid x:Name="DisbSectionContent" Visibility="Visible">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="*"/>
@@ -1370,25 +1564,50 @@
                         </Button.Template>
                     </Button>
                 </Grid>
+                </Border><!-- DisbSectionContent border -->
+                    </StackPanel>
+                </Border><!-- Disb accordion card -->
+
                 <!-- ── Section: Verify Merchant ───────────────────────────────── -->
+                <Border Margin="0,6,0,0" CornerRadius="8"
+                        BorderBrush="#0EA5E940" BorderThickness="1"
+                        Background="{DynamicResource CardBg}">
+                    <StackPanel>
                 <Border x:Name="VerifyMerchantSectionHeader" Cursor="Hand"
                         MouseLeftButtonUp="VerifyMerchantHeader_Click"
-                        Margin="0,6,0,0" Padding="12,8" CornerRadius="8"
-                        Background="{DynamicResource TxnSectionBg}"
-                        BorderBrush="{DynamicResource TxnSectionBorder}" BorderThickness="1">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Text="🔎  Verify Merchant" FontWeight="SemiBold" FontSize="12"
-                                   Foreground="{DynamicResource TxnSectionFg}"/>
-                        <TextBlock x:Name="VerifyMerchantArrow" Grid.Column="1"
-                                   Text="▶" FontSize="11" Foreground="{DynamicResource SubLabelFg}"/>
+                        CornerRadius="8,8,0,0" Padding="14,0" MinHeight="44"
+                        Background="#0EA5E912">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Style.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter Property="Opacity" Value="0.9"/>
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <Grid VerticalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <Border Width="3" Height="18" CornerRadius="2"
+                                    Background="#0EA5E9"
+                                    Margin="0,0,10,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="🔎  Verify &amp; Repair Merchant" FontWeight="SemiBold" FontSize="13"
+                                       Foreground="{DynamicResource TxnSectionFg}" VerticalAlignment="Center"/>
+                            <Border Background="#0EA5E920" BorderBrush="#0EA5E940" BorderThickness="1"
+                                    CornerRadius="4" Padding="6,2" Margin="10,0,0,0">
+                                <TextBlock Text="DB + Payrix health check" FontSize="10"
+                                           Foreground="#0EA5E9" VerticalAlignment="Center"/>
+                            </Border>
+                        </StackPanel>
+                        <TextBlock x:Name="VerifyMerchantArrow"
+                                   Text="▼" FontSize="11"
+                                   Foreground="{DynamicResource SubLabelFg}"
+                                   HorizontalAlignment="Right" VerticalAlignment="Center"/>
                     </Grid>
                 </Border>
-
-                <StackPanel x:Name="VerifyMerchantContent" Margin="0,4,0,0" Visibility="Collapsed">
+                <Border BorderBrush="#0EA5E930" BorderThickness="0,1,0,0"
+                        Padding="12,10,12,12">
+                <StackPanel x:Name="VerifyMerchantContent" Visibility="Visible">
                     <Border Background="{DynamicResource CardBg}" CornerRadius="8"
                             BorderBrush="{DynamicResource CardBorder}" BorderThickness="1"
                             Padding="16,14">
@@ -1438,6 +1657,87 @@
                                         Background="#0EA5E9"
                                         Click="VerifyMerchantBtn_Click"/>
                             </Grid>
+
+                            <!-- ── Fix/Re-create Panel (always visible) ── -->
+                            <Border x:Name="VmFixPanel" Margin="0,0,0,10"
+                                    CornerRadius="8" Padding="14,12"
+                                    Background="#FFF7ED"
+                                    BorderBrush="#F59E0B" BorderThickness="1">
+                                <StackPanel>
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                        <TextBlock Text="🔧" FontSize="14" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Re-create Merchant in Payrix" FontSize="13" FontWeight="SemiBold"
+                                                   Foreground="#92400E" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                    <TextBlock FontSize="11.5" Foreground="#78350F" TextWrapping="Wrap" Margin="0,0,0,10"
+                                               Text="Uses the company selected in the Entity Custom dropdown above. Creates a new Payrix login + entity, boards the merchant (status=2), and writes the correct merchant ID back to the DB."/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,0">
+                                        <Button x:Name="VmFixBtn"
+                                                Content="🔧  Re-create Merchant"
+                                                Height="34" Padding="16,0" FontSize="12.5"
+                                                Click="VmFixBtn_Click">
+                                            <Button.Style>
+                                                <Style TargetType="Button" BasedOn="{StaticResource PrimaryButton}">
+                                                    <Setter Property="Background" Value="#D97706"/>
+                                                    <Style.Triggers>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter Property="Background" Value="#B45309"/>
+                                                        </Trigger>
+                                                        <Trigger Property="IsEnabled" Value="False">
+                                                            <Setter Property="Background" Value="#FDE68A"/>
+                                                            <Setter Property="Foreground" Value="#92400E"/>
+                                                        </Trigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Button.Style>
+                                        </Button>
+                                    </StackPanel>
+
+                                    <!-- Log output panel (shown after fix runs) -->
+                                    <Border x:Name="VmFixLogPanel" Visibility="Collapsed"
+                                            Margin="0,10,0,0" CornerRadius="6"
+                                            Background="{DynamicResource SearchCardBg}"
+                                            BorderBrush="{DynamicResource CardBorder}" BorderThickness="1">
+                                        <StackPanel>
+                                            <!-- Log toolbar -->
+                                            <Grid Margin="10,7">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                    <ColumnDefinition Width="6"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock x:Name="VmFixLogTitle"
+                                                           Text="Fix Log" FontSize="11.5" FontWeight="SemiBold"
+                                                           Foreground="{DynamicResource SubLabelFg}"
+                                                           VerticalAlignment="Center"/>
+                                                <Button x:Name="VmFixExportBtn" Grid.Column="1"
+                                                        Content="📥  Export Log"
+                                                        Height="28" Padding="10,0" FontSize="11"
+                                                        Click="VmFixExportBtn_Click"
+                                                        Style="{StaticResource SecondaryButton}"/>
+                                                <Button x:Name="VmFixCloseLogBtn" Grid.Column="3"
+                                                        Content="✕  Close"
+                                                        Height="28" Padding="10,0" FontSize="11"
+                                                        Click="VmFixCloseLogBtn_Click"
+                                                        Style="{StaticResource SecondaryButton}"/>
+                                            </Grid>
+                                            <Border BorderBrush="{DynamicResource CardBorder}" BorderThickness="0,1,0,0">
+                                                <ScrollViewer MaxHeight="260"
+                                                              VerticalScrollBarVisibility="Auto"
+                                                              HorizontalScrollBarVisibility="Auto"
+                                                              Padding="10,8">
+                                                    <TextBlock x:Name="VmFixResult"
+                                                               FontSize="11" FontFamily="Consolas"
+                                                               TextWrapping="NoWrap"
+                                                               Foreground="{DynamicResource PrimaryText}"
+                                                               LineHeight="17"/>
+                                                </ScrollViewer>
+                                            </Border>
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </Border>
 
                             <!-- Result card -->
                             <Border x:Name="VerifyMerchantResultCard" Visibility="Collapsed"
@@ -1493,11 +1793,463 @@
                                     </Grid>
                                 </StackPanel>
                             </Border>
+
+                            <!-- ── Health Check ──────────────────────────────── -->
+                            <Border Margin="0,10,0,0" CornerRadius="8" Padding="14,12"
+                                    Background="{DynamicResource DbConfigBg}"
+                                    BorderBrush="{DynamicResource DbConfigBorder}" BorderThickness="1">
+                                <StackPanel>
+                                    <Grid Margin="0,0,0,4">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Text="🩺  Full Health Check" FontSize="13" FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource PrimaryText}"/>
+                                            <TextBlock Text="Checks Host DB, ThirdPartySetting, BQSTable, payment methods, Payrix entity/merchant/members, and token test."
+                                                       FontSize="11" Foreground="{DynamicResource SubText}" TextWrapping="Wrap" Margin="0,3,0,0"/>
+                                        </StackPanel>
+                                        <Button x:Name="VmHealthCheckBtn" Grid.Column="1"
+                                                Content="🩺  Run Health Check"
+                                                Height="34" Padding="14,0" FontSize="12"
+                                                VerticalAlignment="Top"
+                                                Click="VmHealthCheckBtn_Click"
+                                                Style="{StaticResource PrimaryButton}"
+                                                Background="#0EA5E9"/>
+                                    </Grid>
+                                    <!-- Health rows (scrollable) -->
+                                    <ScrollViewer Margin="0,8,0,0" MaxHeight="300"
+                                                  VerticalScrollBarVisibility="Auto"
+                                                  HorizontalScrollBarVisibility="Disabled">
+                                        <ItemsControl x:Name="VmHealthRows">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Border CornerRadius="5" Padding="10,6" Margin="0,2,0,0"
+                                                            Background="{DynamicResource SearchCardBg}"
+                                                            BorderBrush="{DynamicResource CardBorder}" BorderThickness="1">
+                                                        <Grid>
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="22"/>
+                                                                <ColumnDefinition Width="200"/>
+                                                                <ColumnDefinition Width="*"/>
+                                                            </Grid.ColumnDefinitions>
+                                                            <TextBlock Grid.Column="0" Text="{Binding Icon}" FontSize="13" VerticalAlignment="Center"/>
+                                                            <TextBlock Grid.Column="1" Text="{Binding Label}" FontSize="12" FontWeight="SemiBold"
+                                                                       Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                            <TextBlock Grid.Column="2" Text="{Binding Detail}" FontSize="12"
+                                                                       Foreground="{Binding DetailColor}" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                                                        </Grid>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </ScrollViewer>
+                                    <!-- Summary banner — shown BELOW the rows after check completes -->
+                                    <Border x:Name="VmHealthSummary" Visibility="Collapsed"
+                                            CornerRadius="6" Padding="10,7" Margin="0,8,0,0"
+                                            Background="#16A34A20" BorderBrush="#16A34A" BorderThickness="1">
+                                        <TextBlock x:Name="VmHealthSummaryText"
+                                                   FontSize="12.5" FontWeight="SemiBold"
+                                                   Foreground="#166534" TextWrapping="Wrap"/>
+                                    </Border>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- ── Payrix Details Panel ───────────────────────── -->
+                            <Border x:Name="VmDetailsPanel" Visibility="Collapsed" Margin="0,10,0,0"
+                                    CornerRadius="8" Padding="14,12"
+                                    Background="{DynamicResource DbConfigBg}"
+                                    BorderBrush="{DynamicResource DbConfigBorder}" BorderThickness="1">
+                                <StackPanel>
+                                    <TextBlock Text="📋  Payrix Details" FontSize="13" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource PrimaryText}" Margin="0,0,0,10"/>
+
+                                    <!-- Entity -->
+                                    <TextBlock Text="Entity" FontSize="11.5" FontWeight="Bold"
+                                               Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,6"/>
+                                    <Border CornerRadius="6" Padding="10,8" Margin="0,0,0,10"
+                                            Background="{DynamicResource SearchCardBg}"
+                                            BorderBrush="{DynamicResource CardBorder}" BorderThickness="1">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="130"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="130"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="Auto"/>
+                                            </Grid.RowDefinitions>
+                                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Entity ID:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,5"/>
+                                            <TextBlock x:Name="VdEntityId" Grid.Row="0" Grid.Column="1" FontSize="11.5" FontFamily="Consolas" Foreground="{DynamicResource PrimaryText}" TextWrapping="Wrap" Margin="0,0,0,5"/>
+                                            <TextBlock Grid.Row="0" Grid.Column="2" Text="Status:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="8,0,0,5"/>
+                                            <TextBlock x:Name="VdEntityStatus" Grid.Row="0" Grid.Column="3" FontSize="11.5" FontWeight="SemiBold" Margin="0,0,0,5"/>
+                                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Name:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,0"/>
+                                            <TextBlock x:Name="VdEntityName" Grid.Row="1" Grid.Column="1" FontSize="11.5" Foreground="{DynamicResource PrimaryText}"/>
+                                            <TextBlock Grid.Row="1" Grid.Column="2" Text="Custom:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="8,0,0,0"/>
+                                            <TextBlock x:Name="VdEntityCustom" Grid.Row="1" Grid.Column="3" FontSize="11.5" FontFamily="Consolas" Foreground="{DynamicResource PrimaryText}" TextWrapping="Wrap"/>
+                                        </Grid>
+                                    </Border>
+
+                                    <!-- Merchant -->
+                                    <TextBlock Text="Merchant" FontSize="11.5" FontWeight="Bold"
+                                               Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,6"/>
+                                    <Border CornerRadius="6" Padding="10,8" Margin="0,0,0,10"
+                                            Background="{DynamicResource SearchCardBg}"
+                                            BorderBrush="{DynamicResource CardBorder}" BorderThickness="1">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="130"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="130"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="Auto"/>
+                                            </Grid.RowDefinitions>
+                                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Merchant ID:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,5"/>
+                                            <TextBlock x:Name="VdMerchantId" Grid.Row="0" Grid.Column="1" FontSize="11.5" FontFamily="Consolas" Foreground="{DynamicResource PrimaryText}" TextWrapping="Wrap" Margin="0,0,0,5"/>
+                                            <TextBlock Grid.Row="0" Grid.Column="2" Text="Status:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="8,0,0,5"/>
+                                            <TextBlock x:Name="VdMerchantStatus" Grid.Row="0" Grid.Column="3" FontSize="11.5" FontWeight="SemiBold" Margin="0,0,0,5"/>
+                                            <TextBlock Grid.Row="1" Grid.Column="0" Text="DBA:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,5"/>
+                                            <TextBlock x:Name="VdMerchantDba" Grid.Row="1" Grid.Column="1" FontSize="11.5" Foreground="{DynamicResource PrimaryText}" Margin="0,0,0,5"/>
+                                            <TextBlock Grid.Row="1" Grid.Column="2" Text="MCC:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="8,0,0,5"/>
+                                            <TextBlock x:Name="VdMerchantMcc" Grid.Row="1" Grid.Column="3" FontSize="11.5" Foreground="{DynamicResource PrimaryText}" Margin="0,0,0,5"/>
+                                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Email:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,0"/>
+                                            <TextBlock x:Name="VdMerchantEmail" Grid.Row="2" Grid.Column="1" FontSize="11.5" Foreground="{DynamicResource PrimaryText}"/>
+                                            <TextBlock Grid.Row="2" Grid.Column="2" Text="Phone:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" Margin="8,0,0,0"/>
+                                            <TextBlock x:Name="VdMerchantPhone" Grid.Row="2" Grid.Column="3" FontSize="11.5" Foreground="{DynamicResource PrimaryText}"/>
+                                        </Grid>
+                                    </Border>
+                                    <Border CornerRadius="5" Padding="8,6" Margin="0,0,0,10"
+                                            Background="{DynamicResource SearchCardBg}"
+                                            BorderBrush="{DynamicResource CardBorder}" BorderThickness="1">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="130"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="Address:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}"/>
+                                            <TextBlock x:Name="VdMerchantAddress" Grid.Column="1" FontSize="11.5" Foreground="{DynamicResource PrimaryText}" TextWrapping="Wrap"/>
+                                        </Grid>
+                                    </Border>
+
+                                    <!-- Members -->
+                                    <TextBlock Text="Members" FontSize="11.5" FontWeight="Bold"
+                                               Foreground="{DynamicResource SubLabelFg}" Margin="0,0,0,6"/>
+                                    <TextBlock x:Name="VdMembersEmpty" Visibility="Collapsed"
+                                               Text="No members found." FontSize="12"
+                                               Foreground="{DynamicResource SubText}" Margin="0,0,0,8"/>
+                                    <ItemsControl x:Name="VdMembersList" Margin="0,0,0,10">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Border CornerRadius="5" Padding="10,7" Margin="0,0,0,4"
+                                                        Background="{DynamicResource SearchCardBg}"
+                                                        BorderBrush="{DynamicResource CardBorder}" BorderThickness="1">
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <StackPanel Grid.Column="0">
+                                                            <TextBlock FontSize="12" FontWeight="SemiBold"
+                                                                       Foreground="{DynamicResource PrimaryText}">
+                                                                <Run Text="{Binding FullName}"/>
+                                                                <Run Text=" — " Foreground="{DynamicResource SubText}"/>
+                                                                <Run Text="{Binding Ownership}"/>
+                                                            </TextBlock>
+                                                            <TextBlock Text="{Binding MemberId}" FontSize="10.5"
+                                                                       FontFamily="Consolas" Foreground="{DynamicResource SubText}"
+                                                                       Margin="0,2,0,0"/>
+                                                        </StackPanel>
+                                                        <Border Grid.Column="1" CornerRadius="4" Padding="7,3" Margin="8,0,0,0"
+                                                                Background="{DynamicResource SearchCardBg}"
+                                                                BorderBrush="{DynamicResource CardBorder}" BorderThickness="1"
+                                                                VerticalAlignment="Center">
+                                                            <TextBlock Text="{Binding StatusLabel}" FontSize="11"
+                                                                       Foreground="{Binding StatusColor}"/>
+                                                        </Border>
+                                                    </Grid>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+
+                                    <!-- Member Update Form -->
+                                    <Border CornerRadius="6" Padding="12,10" Margin="0,0,0,0"
+                                            Background="{DynamicResource SearchCardBg}"
+                                            BorderBrush="{DynamicResource CardBorder}" BorderThickness="1">
+                                        <StackPanel>
+                                            <TextBlock Text="✏️  Update Member" FontSize="12" FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource PrimaryText}" Margin="0,0,0,8"/>
+                                            <TextBlock x:Name="VdUpdateWarning" Visibility="Collapsed"
+                                                       FontSize="11.5" Foreground="#92400E"
+                                                       TextWrapping="Wrap" Margin="0,0,0,8"/>
+                                            <Grid Margin="0,0,0,6">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="100"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="12"/>
+                                                    <ColumnDefinition Width="100"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0" Text="Member ID:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="VdUpdateMemberId" Grid.Column="1" Height="30" Padding="8,0"
+                                                         VerticalContentAlignment="Center" FontSize="11.5"
+                                                         FontFamily="Consolas" BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"/>
+                                                <TextBlock Grid.Column="3" Text="First:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="VdUpdateFirst" Grid.Column="4" Height="30" Padding="8,0"
+                                                         VerticalContentAlignment="Center" FontSize="11.5"
+                                                         BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"/>
+                                            </Grid>
+                                            <Grid Margin="0,0,0,6">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="100"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="12"/>
+                                                    <ColumnDefinition Width="100"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0" Text="Last:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="VdUpdateLast" Grid.Column="1" Height="30" Padding="8,0"
+                                                         VerticalContentAlignment="Center" FontSize="11.5"
+                                                         BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"/>
+                                                <TextBlock Grid.Column="3" Text="Email:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="VdUpdateEmail" Grid.Column="4" Height="30" Padding="8,0"
+                                                         VerticalContentAlignment="Center" FontSize="11.5"
+                                                         BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"/>
+                                            </Grid>
+                                            <Grid Margin="0,0,0,6">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="100"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="12"/>
+                                                    <ColumnDefinition Width="100"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0" Text="Phone:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="VdUpdatePhone" Grid.Column="1" Height="30" Padding="8,0"
+                                                         VerticalContentAlignment="Center" FontSize="11.5"
+                                                         BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"/>
+                                                <TextBlock Grid.Column="3" Text="Title:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="VdUpdateTitle" Grid.Column="4" Height="30" Padding="8,0"
+                                                         VerticalContentAlignment="Center" FontSize="11.5"
+                                                         BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"/>
+                                            </Grid>
+                                            <Grid Margin="0,0,0,6">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="100"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="12"/>
+                                                    <ColumnDefinition Width="100"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0" Text="Ownership %:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="VdUpdateOwnership" Grid.Column="1" Height="30" Padding="8,0"
+                                                         VerticalContentAlignment="Center" FontSize="11.5"
+                                                         BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"/>
+                                                <TextBlock Grid.Column="3" Text="DOB:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="VdUpdateDob" Grid.Column="4" Height="30" Padding="8,0"
+                                                         VerticalContentAlignment="Center" FontSize="11.5"
+                                                         BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
+                                                         ToolTip="Format: YYYYMMDD e.g. 19840101"/>
+                                            </Grid>
+                                            <Grid Margin="0,0,0,6">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="100"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="12"/>
+                                                    <ColumnDefinition Width="100"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0" Text="Address:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="VdUpdateAddress" Grid.Column="1" Height="30" Padding="8,0"
+                                                         VerticalContentAlignment="Center" FontSize="11.5"
+                                                         BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"/>
+                                                <TextBlock Grid.Column="3" Text="City:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="VdUpdateCity" Grid.Column="4" Height="30" Padding="8,0"
+                                                         VerticalContentAlignment="Center" FontSize="11.5"
+                                                         BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"/>
+                                            </Grid>
+                                            <Grid Margin="0,0,0,6">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="100"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="12"/>
+                                                    <ColumnDefinition Width="100"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0" Text="State:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="VdUpdateState" Grid.Column="1" Height="30" Padding="8,0"
+                                                         VerticalContentAlignment="Center" FontSize="11.5"
+                                                         BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"/>
+                                                <TextBlock Grid.Column="3" Text="Zip:" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="VdUpdateZip" Grid.Column="4" Height="30" Padding="8,0"
+                                                         VerticalContentAlignment="Center" FontSize="11.5"
+                                                         BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"/>
+                                            </Grid>
+                                            <Grid Margin="0,0,0,8">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="100"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0" Text="SSN (last 4):" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                <PasswordBox x:Name="VdUpdateSsn" Grid.Column="1" Height="30" Padding="8,0"
+                                                             VerticalContentAlignment="Center" FontSize="11.5"
+                                                             BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
+                                                             ToolTip="Last 4 digits of SSN (optional, for KYC)"/>
+                                            </Grid>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Button x:Name="VdUpdateMemberBtn"
+                                                        Content="💾  Update Member"
+                                                        Height="32" Padding="14,0" FontSize="12"
+                                                        Click="VdUpdateMemberBtn_Click"
+                                                        Style="{StaticResource PrimaryButton}"
+                                                        Background="#7C3AED"/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="VdUpdateResult" Visibility="Collapsed"
+                                                       FontSize="12" TextWrapping="Wrap" Margin="0,8,0,0"
+                                                       Foreground="{DynamicResource SubText}"/>
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- ── Real Payment Test ──────────────────────────── -->
+                            <Border Margin="0,10,0,0" CornerRadius="8" Padding="14,12"
+                                    Background="{DynamicResource DbConfigBg}"
+                                    BorderBrush="{DynamicResource DbConfigBorder}" BorderThickness="1">
+                                <StackPanel>
+                                    <TextBlock Text="💳  Real Payment Test" FontSize="13" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource PrimaryText}" Margin="0,0,0,4"/>
+                                    <TextBlock FontSize="11" Foreground="{DynamicResource SubText}" TextWrapping="Wrap" Margin="0,0,0,10"
+                                               Text="Tokenize → charge → auto-void. Safe to run in sandbox. Confirms the merchant can fully process payments end-to-end."/>
+                                    <!-- Merchant ID -->
+                                    <Grid Margin="0,0,0,8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="110"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="Merchant ID:" FontSize="12" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                        <TextBox x:Name="PtMerchantBox" Grid.Column="1" Height="32" Padding="8,0"
+                                                 VerticalContentAlignment="Center" FontSize="12" FontFamily="Consolas"
+                                                 BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
+                                                 ToolTip="Leave blank to use the merchant ID found by Verify Merchant"/>
+                                    </Grid>
+                                    <!-- Card details row -->
+                                    <Grid Margin="0,0,0,8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="110"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="12"/>
+                                            <ColumnDefinition Width="80"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="12"/>
+                                            <ColumnDefinition Width="55"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="12"/>
+                                            <ColumnDefinition Width="60"/>
+                                            <ColumnDefinition Width="100"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="Card:" FontSize="12" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                        <TextBox x:Name="PtCardBox" Grid.Column="1" Height="32" Padding="8,0"
+                                                 VerticalContentAlignment="Center" FontSize="12" FontFamily="Consolas"
+                                                 BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
+                                                 Text="4111111111111111" ToolTip="Test card number"/>
+                                        <TextBlock Grid.Column="3" Text="Exp:" FontSize="12" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                        <TextBox x:Name="PtExpBox" Grid.Column="4" Height="32" Padding="8,0"
+                                                 VerticalContentAlignment="Center" FontSize="12"
+                                                 BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
+                                                 Text="1228" ToolTip="Expiry MMYY"/>
+                                        <TextBlock Grid.Column="6" Text="CVV:" FontSize="12" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                        <TextBox x:Name="PtCvvBox" Grid.Column="7" Height="32" Padding="8,0"
+                                                 VerticalContentAlignment="Center" FontSize="12"
+                                                 BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
+                                                 Text="123"/>
+                                        <TextBlock Grid.Column="9" Text="$" FontSize="13" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                        <TextBox x:Name="PtAmountBox" Grid.Column="10" Height="32" Padding="8,0"
+                                                 VerticalContentAlignment="Center" FontSize="12"
+                                                 BorderBrush="{DynamicResource InputBorder}" BorderThickness="1"
+                                                 Text="1.00" ToolTip="Amount in dollars"/>
+                                    </Grid>
+                                    <Button x:Name="PtRunBtn"
+                                            Content="▶  Run Payment Test"
+                                            Height="34" Padding="16,0" FontSize="12.5"
+                                            HorizontalAlignment="Left"
+                                            Click="PtRunBtn_Click"
+                                            Style="{StaticResource PrimaryButton}"
+                                            Background="#059669"/>
+                                    <!-- Result card -->
+                                    <Border x:Name="PtResultCard" Visibility="Collapsed"
+                                            CornerRadius="7" Padding="12,10" Margin="0,10,0,0"
+                                            Background="{DynamicResource DbConfigBg}"
+                                            BorderBrush="{DynamicResource DbConfigBorder}" BorderThickness="1">
+                                        <StackPanel>
+                                            <Border x:Name="PtSummaryBanner" CornerRadius="6" Padding="10,8" Margin="0,0,0,10"
+                                                    Background="#16A34A20" BorderBrush="#16A34A" BorderThickness="1">
+                                                <TextBlock x:Name="PtSummaryText" FontSize="12.5" FontWeight="SemiBold"
+                                                           Foreground="#166534" TextWrapping="Wrap"/>
+                                            </Border>
+                                            <!-- Steps -->
+                                            <Grid Margin="0,0,0,4">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="22"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="Auto"/>
+                                                </Grid.RowDefinitions>
+                                                <TextBlock x:Name="PtStep1Icon" Grid.Row="0" Grid.Column="0" FontSize="13" VerticalAlignment="Center"/>
+                                                <TextBlock x:Name="PtStep1Text" Grid.Row="0" Grid.Column="1" FontSize="12" Foreground="{DynamicResource PrimaryText}" Margin="0,0,0,4" TextWrapping="Wrap"/>
+                                                <TextBlock x:Name="PtStep2Icon" Grid.Row="1" Grid.Column="0" FontSize="13" VerticalAlignment="Center"/>
+                                                <TextBlock x:Name="PtStep2Text" Grid.Row="1" Grid.Column="1" FontSize="12" Foreground="{DynamicResource PrimaryText}" Margin="0,0,0,4" TextWrapping="Wrap"/>
+                                                <TextBlock x:Name="PtStep3Icon" Grid.Row="2" Grid.Column="0" FontSize="13" VerticalAlignment="Center"/>
+                                                <TextBlock x:Name="PtStep3Text" Grid.Row="2" Grid.Column="1" FontSize="12" Foreground="{DynamicResource PrimaryText}" TextWrapping="Wrap"/>
+                                            </Grid>
+                                            <!-- IDs -->
+                                            <Grid Margin="0,8,0,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="80"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="12"/>
+                                                    <ColumnDefinition Width="80"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="12"/>
+                                                    <ColumnDefinition Width="60"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0" Text="Token:" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                <TextBlock x:Name="PtTokenIdText" Grid.Column="1" FontSize="11" FontFamily="Consolas" Foreground="{DynamicResource PrimaryText}" TextWrapping="Wrap"/>
+                                                <TextBlock Grid.Column="3" Text="TxnId:" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                <TextBlock x:Name="PtTxnIdText" Grid.Column="4" FontSize="11" FontFamily="Consolas" Foreground="{DynamicResource PrimaryText}" TextWrapping="Wrap"/>
+                                                <TextBlock Grid.Column="6" Text="Card:" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource SubLabelFg}" VerticalAlignment="Center"/>
+                                                <TextBlock x:Name="PtCardText" Grid.Column="7" FontSize="11" FontFamily="Consolas" Foreground="{DynamicResource PrimaryText}"/>
+                                            </Grid>
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </Border>
                         </StackPanel>
                     </Border>
-                </StackPanel>
+                </StackPanel><!-- end VerifyMerchantContent -->
+                </Border><!-- Verify separator+padding border -->
+                    </StackPanel>
+                </Border><!-- Verify accordion card -->
 
                 </StackPanel><!-- end SearchSectionsPanel -->
+                </ScrollViewer>
             </StackPanel>
         </Border>
 
@@ -1710,7 +2462,7 @@
                 <!-- ═══════════════════════════════════════════════════════
                      TAB 0 — OVERVIEW DASHBOARD
                      ═══════════════════════════════════════════════════════ -->
-                <TabItem Header="Overview">
+                <TabItem x:Name="TabItem0" Header="Overview">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24,20,24,24">
                         <StackPanel>
                             <!-- Page header -->
@@ -2030,7 +2782,7 @@
                 <!-- ═══════════════════════════════════════════════════════
                      TAB 1 — TRANSACTIONS (original tab 0)
                      ═══════════════════════════════════════════════════════ -->
-                <TabItem Header="Transactions">
+                <TabItem x:Name="TabItem1" Header="Transactions">
                     <DataGrid x:Name="TxnGrid" AutoGenerateColumns="False" IsReadOnly="True"
                               CanUserResizeColumns="True" GridLinesVisibility="Horizontal"
                               AlternatingRowBackground="{DynamicResource GridAltRowBg}"
@@ -2264,7 +3016,7 @@
                 </TabItem>
 
                 <!-- Line Items Tab -->
-                <TabItem Header="Line Items">
+                <TabItem x:Name="TabItem2" Header="Line Items">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="*"/>
@@ -2562,7 +3314,7 @@
 
 
                 <!-- Webhook Tests Tab -->
-                <TabItem Header="Webhook Tests">
+                <TabItem x:Name="TabItem3" Header="Webhook Tests">
                     <Grid Margin="16">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/><!-- Row 0: POST panel -->
@@ -4019,7 +4771,7 @@
                 </TabItem>
 
                 <!-- Raw JSON Tab -->
-                <TabItem Header="Raw JSON">
+                <TabItem x:Name="TabItem4" Header="Raw JSON">
                     <DockPanel Background="{DynamicResource CodeBg}">
 
                         <!-- Toolbar pinned to top -->
@@ -4225,7 +4977,7 @@
                 </TabItem>
 
                 <!-- JSON Tools Tab -->
-                <TabItem Header="🔧 JSON Tools">
+                <TabItem x:Name="TabItem5" Header="🔧 JSON Tools">
                     <Grid Margin="16">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
@@ -4336,7 +5088,7 @@
                 </TabItem>
 
                 <!-- Crypto Tab -->
-                <TabItem Header="🔐 Crypto">
+                <TabItem x:Name="TabItem6" Header="🔐 Crypto">
                     <Grid Margin="16">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -4642,8 +5394,8 @@
                 </TabItem>
 
                 <!-- Payrix Portal Tab -->
-                <TabItem Header="🌐 Payrix Portal" x:Name="PortalTab"
-                         GotFocus="PortalTab_GotFocus">
+                <TabItem x:Name="TabItem7" Header="🌐 Payrix Portal"
+                         GotFocus="TabItem7_GotFocus">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -4692,7 +5444,7 @@
                 <!-- ═══════════════════════════════════════════════════════
                      TAB 8 — SETTINGS
                      ═══════════════════════════════════════════════════════ -->
-                <TabItem Header="⚙ Settings">
+                <TabItem x:Name="TabItem8" Header="⚙ Settings">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24,20,24,24">
                         <StackPanel MaxWidth="680" HorizontalAlignment="Left">
 
@@ -4916,6 +5668,55 @@
                                 </StackPanel>
                             </Border>
 
+                            <!-- ── Tab Visibility ────────────────────────────── -->
+                            <TextBlock Text="Tab Visibility" FontSize="15" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource PrimaryText}" Margin="0,0,0,12"/>
+                            <Border Background="{DynamicResource CardBg}" CornerRadius="14"
+                                    Padding="22,18" Margin="0,0,0,24"
+                                    BorderBrush="{DynamicResource CardBorder}" BorderThickness="1">
+                                <StackPanel>
+                                    <TextBlock Text="Check the tabs you want visible in the sidebar. Overview and Settings are always shown."
+                                               FontSize="12" Foreground="{DynamicResource SubText}" TextWrapping="Wrap" Margin="0,0,0,16"/>
+                                    <UniformGrid Columns="3" HorizontalAlignment="Left">
+                                        <!-- Row 1 -->
+                                        <CheckBox x:Name="TabChk0"  Tag="0"  Content="📊  Overview"       IsEnabled="False" IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource SubText}"  Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <CheckBox x:Name="TabChk1"  Tag="1"  Content="⊞  Transactions"    IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <CheckBox x:Name="TabChk2"  Tag="2"  Content="📋  Line Items"      IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <!-- Row 2 -->
+                                        <CheckBox x:Name="TabChk3"  Tag="3"  Content="⚡  Webhook Tests"   IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <CheckBox x:Name="TabChk4"  Tag="4"  Content="{}  Raw JSON"        IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <CheckBox x:Name="TabChk5"  Tag="5"  Content="🔧  JSON Tools"      IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <!-- Row 3 -->
+                                        <CheckBox x:Name="TabChk6"  Tag="6"  Content="🔐  Crypto"          IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <CheckBox x:Name="TabChk7"  Tag="7"  Content="⬡  Payrix Portal"    IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <CheckBox x:Name="TabChk9"  Tag="9"  Content="❓  Help &amp; Docs"  IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <!-- Row 4 -->
+                                        <CheckBox x:Name="TabChk10" Tag="10" Content="🏠  Dashboard"       IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <CheckBox x:Name="TabChk11" Tag="11" Content="💳  Disbursements"   IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <CheckBox x:Name="TabChk12" Tag="12" Content="🏦  Accounts"        IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <!-- Row 5 -->
+                                        <CheckBox x:Name="TabChk13" Tag="13" Content="🏪  Merchants"       IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <CheckBox x:Name="TabChk14" Tag="14" Content="📈  Reports"         IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <CheckBox x:Name="TabChk15" Tag="15" Content="📡  HTTP Client"     IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <!-- Row 6 -->
+                                        <CheckBox x:Name="TabChk16" Tag="16" Content="⚡  Performance"     IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <CheckBox x:Name="TabChk17" Tag="17" Content="📦  Subscriptions"   IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <CheckBox x:Name="TabChk18" Tag="18" Content="🔎  Fiddler"         IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <!-- Row 7 -->
+                                        <CheckBox x:Name="TabChk19" Tag="19" Content="🗄  Core DB"         IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource PrimaryText}" Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                        <CheckBox x:Name="TabChk8"  Tag="8"  Content="⚙  Settings"         IsEnabled="False" IsChecked="True"  Margin="0,0,20,10" FontSize="12" Foreground="{DynamicResource SubText}"  Checked="TabVisibility_Changed" Unchecked="TabVisibility_Changed"/>
+                                    </UniformGrid>
+                                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                        <Button Content="✅  Show All" Height="30" Padding="12,0" FontSize="11.5"
+                                                Click="TabVisibilityShowAll_Click"
+                                                Style="{StaticResource SecondaryButton}" Margin="0,0,8,0"/>
+                                        <Button Content="☐  Hide All (except pinned)" Height="30" Padding="12,0" FontSize="11.5"
+                                                Click="TabVisibilityHideAll_Click"
+                                                Style="{StaticResource SecondaryButton}"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+
                             <!-- ── Access Mode ────────────────────────────────── -->
                             <TextBlock Text="Access Mode" FontSize="15" FontWeight="SemiBold"
                                        Foreground="{DynamicResource PrimaryText}" Margin="0,0,0,12"/>
@@ -5014,7 +5815,7 @@
                 <!-- ═══════════════════════════════════════════════════════
                      TAB 9 — HELP & DOCS
                      ═══════════════════════════════════════════════════════ -->
-                <TabItem Header="❓ Help &amp; Docs">
+                <TabItem x:Name="TabItem9" Header="❓ Help &amp; Docs">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24,20,24,24">
                         <StackPanel>
                             <!-- Page header -->
@@ -5541,7 +6342,7 @@
                 </TabItem>
 
                 <!-- Tab 10: Dashboard -->
-                <TabItem Visibility="Collapsed">
+                <TabItem x:Name="TabItem10" Header="📊  Dashboard"      Visibility="Collapsed">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>  <!-- toolbar / header -->
@@ -5860,7 +6661,7 @@
                 </TabItem>
 
                 <!-- Tab 11: Disbursements -->
-                <TabItem Visibility="Collapsed">
+                <TabItem x:Name="TabItem11" Header="💸  Disbursements"   Visibility="Collapsed">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -6202,7 +7003,7 @@
                 </TabItem>
 
                 <!-- Tab 12: Accounts -->
-                <TabItem Visibility="Collapsed">
+                <TabItem x:Name="TabItem12" Header="👤  Accounts"        Visibility="Collapsed">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -6515,7 +7316,7 @@
                 </TabItem>
 
                 <!-- Tab 13: Merchants -->
-                <TabItem Visibility="Collapsed">
+                <TabItem x:Name="TabItem13" Header="🏪  Merchants"       Visibility="Collapsed">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>  <!-- toolbar -->
@@ -7015,7 +7816,7 @@
                 </TabItem>
 
                 <!-- Tab 14: Reports -->
-                <TabItem Visibility="Collapsed">
+                <TabItem x:Name="TabItem14" Header="📈  Reports"         Visibility="Collapsed">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -7362,7 +8163,7 @@
                 <!-- ═══════════════════════════════════════════════════════
                      TAB 15 — HTTP CLIENT (Postman-style)
                      ═══════════════════════════════════════════════════════ -->
-                <TabItem Header="📡 HTTP Client">
+                <TabItem x:Name="TabItem15" Header="📡 HTTP Client">
                     <!-- Outer 2-column split: Collections sidebar | Request+Response -->
                     <Grid>
                         <Grid.ColumnDefinitions>
@@ -8867,7 +9668,7 @@
                 <!-- ═══════════════════════════════════════════════════════
                      TAB 16 — PERFORMANCE TESTER
                      ═══════════════════════════════════════════════════════ -->
-                <TabItem Header="⚡ Performance">
+                <TabItem x:Name="TabItem16" Header="⚡ Performance">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>   <!-- config panel -->
@@ -9407,7 +10208,7 @@
                 </TabItem>
 
                 <!-- Tab 17: Subscriptions (was 17, now push CoreDB to 18) -->
-                <TabItem Visibility="Collapsed">
+                <TabItem x:Name="TabItem17" Header="📦  Subscriptions"   Visibility="Collapsed">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="20,16,20,20">
                         <StackPanel MaxWidth="960">
 
@@ -9925,7 +10726,7 @@
                 </TabItem>
 
                 <!-- Tab 18: Fiddler / Traffic Inspector -->
-                <TabItem Visibility="Collapsed">
+                <TabItem x:Name="TabItem18" Header="🔎  Fiddler"         Visibility="Collapsed">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>  <!-- Proxy card -->
@@ -10352,7 +11153,7 @@
                 </TabItem>
 
                 <!-- Tab 19: Core DB Utility -->
-                <TabItem Visibility="Collapsed">
+                <TabItem x:Name="TabItem19" Header="🗄  Core DB"         Visibility="Collapsed">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>

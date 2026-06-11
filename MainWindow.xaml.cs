@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using Microsoft.Data.SqlClient;
 using System.IO;
@@ -23,6 +23,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly List<string> _rawJsons = [];
     private readonly ObservableCollection<WebhookTestCase> _testCases = [];
     private CancellationTokenSource? _testCts;
+
 
     // ── Sidebar navigation state ──────────────────────────────────────────────
     private System.Windows.Controls.Button? _activeNavBtn;
@@ -87,9 +88,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         InitWebhookTests();   // must run AFTER LoadSettings so EntityCustomBox is populated
         UpdateEnvironmentUI();
         AutoDetectLocalSettingsOnStartup();   // fill Local DB boxes from INI if not already saved
-        // Apply restricted mode — forced on all non-dev machines
-        bool restricted = !_isDevMachine || RestrictedModeChk.IsChecked == true;
+        // Apply restricted mode — full access only when signed in with dev email
+        var startupSettings = Services.SettingsService.Load();
+        bool restricted = !IsDevEmail(startupSettings.BqeLoginEmail);
         ApplyRestrictedMode(restricted);
+        // Re-enforce user's saved HiddenTabs — ApplyRestrictedMode may have made hidden tabs visible
+        ApplyTabVisibility(startupSettings.HiddenTabs ?? []);
         // Always start on Transaction Viewer (visible in both modes)
         _activeNavBtn = (System.Windows.Controls.Button)NavTxnViewer;
         MainTabControl.SelectedIndex = 0;
@@ -171,8 +175,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _activeNavBtn = btn;
     }
 
-    // ── Dev-machine detection ─────────────────────────────────────────────────
-    // True only on Shaheen's machine — everyone else gets restricted mode forced on.
+    // ── Developer access detection ────────────────────────────────────────────
+    // Full access is granted when the BQE Core login email matches the dev account.
+    // Evaluated at startup (from saved settings) and re-evaluated on every sign-in/out.
+    private const string DevEmail = "Shaheen.Vakil@bqe.com";
+
+    private static bool IsDevEmail(string? email) =>
+        !string.IsNullOrEmpty(email) &&
+        (email.EndsWith("@bqe.com", StringComparison.OrdinalIgnoreCase) ||
+         email.Equals(DevEmail, StringComparison.OrdinalIgnoreCase));
+
+    // Keep _isDevMachine as fallback for proxy-enable logic only
     private static readonly bool _isDevMachine =
         Environment.UserName.Equals("Shaheen.Vakil", StringComparison.OrdinalIgnoreCase) ||
         Environment.UserName.Equals("Shaheen",       StringComparison.OrdinalIgnoreCase);
@@ -184,52 +197,177 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// Visible  — Transaction Viewer, Transactions, Line Items, Webhook Tests, Settings (connection strings).
     /// Hidden   — everything else (dev/admin tools not needed by QA users).
     /// </summary>
+    /// <summary>
+    /// Restricted mode only COLLAPSES certain tabs — it never shows tabs.
+    /// Tab Visibility checkboxes (ApplyTabVisibility) are always the final authority.
+    /// Calling ApplyRestrictedMode(false) is intentionally a no-op for visibility:
+    /// let ApplyTabVisibility restore the user's saved preferences instead.
+    /// </summary>
     private void ApplyRestrictedMode(bool restricted)
     {
-        var hiddenInRestricted = new[]
+        if (restricted)
         {
-            NavRawJson,      // Tag 4  — Raw JSON
-            NavJsonTools,    // Tag 5  — JSON Tools
-            NavCrypto,       // Tag 6  — Crypto
-            NavPortal,       // Tag 7  — Payrix Portal (signup wizard)
-            NavHelp,         // Tag 9  — Help & Docs
-            NavDashboard,    // Tag 10 — Dashboard
-            NavDisbursements,// Tag 11 — Disbursements
-            NavAccounts,     // Tag 12 — Accounts
-            NavMerchants,    // Tag 13 — Merchants
-            NavReports,      // Tag 14 — Reports
-            NavHttpClient,   // Tag 15 — HTTP Client
-            NavPerf,         // Tag 16 — Performance Tester
-            NavSubscriptions,// Tag 17 — Subscriptions
-            NavFiddler,      // Tag 18 — Fiddler / Proxy
-            NavCoreDb,       // Tag 19 — Core DB Utility
-        };
+            // In restricted mode: enforce minimum visible set — hide dev/admin tabs.
+            // These are collapsed on top of whatever the user's HiddenTabs says.
+            var forceHidden = new[]
+            {
+                NavRawJson, NavJsonTools, NavCrypto, NavPortal,
+                NavHelp, NavDashboard, NavDisbursements, NavAccounts,
+                NavMerchants, NavReports, NavHttpClient, NavPerf,
+                NavSubscriptions, NavFiddler, NavCoreDb,
+            };
+            foreach (var btn in forceHidden)
+                if (btn != null) btn.Visibility = Visibility.Collapsed;
+        }
+        // restricted = false → do nothing. ApplyTabVisibility (called by every caller
+        // after this method) will restore exactly what the user has checked.
 
-        var vis = restricted ? Visibility.Collapsed : Visibility.Visible;
-        foreach (var btn in hiddenInRestricted)
-            btn.Visibility = vis;
-
-        // Settings stays visible in restricted mode so users can enter API keys / connection strings
+        // Settings is always visible regardless of mode
         NavSettings.Visibility = Visibility.Visible;
     }
 
     private void RestrictedModeChk_Changed(object sender, RoutedEventArgs e)
     {
-        if (!_isInitialized) return;   // fired during XAML init — controls not ready yet
+        if (!_isInitialized) return;
 
         bool restricted = RestrictedModeChk.IsChecked == true;
         ApplyRestrictedMode(restricted);
+        // Re-apply the user's tab visibility choices — they always win over restricted mode
+        ApplyTabVisibility(Services.SettingsService.Load().HiddenTabs ?? []);
 
-        // Hidden tab indices — if current page just got hidden, jump to Transaction Viewer
-        var hiddenTabs = new[] { 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19 };
-        if (restricted && hiddenTabs.Contains(MainTabControl.SelectedIndex))
+        // If the active tab just got hidden, jump back to Transaction Viewer
+        if (_activeNavBtn?.Visibility == Visibility.Collapsed)
         {
-            MainTabControl.SelectedIndex = 0;   // Transaction Viewer
+            MainTabControl.SelectedIndex = 0;
             NavTxnViewer.Style = (System.Windows.Style)Resources["NavBtnActive"];
             if (_activeNavBtn != null) _activeNavBtn.Style = (System.Windows.Style)Resources["NavBtn"];
             _activeNavBtn = NavTxnViewer;
         }
 
+        SaveSettings();
+    }
+
+    // ── Tab Visibility ────────────────────────────────────────────────────────
+
+    /// <summary>Maps nav-button Tag (int) → the corresponding top-bar TabItem.</summary>
+    private System.Windows.Controls.TabItem? GetTabItem(int tag) => tag switch
+    {
+        0  => TabItem0,  1  => TabItem1,  2  => TabItem2,  3  => TabItem3,
+        4  => TabItem4,  5  => TabItem5,  6  => TabItem6,  7  => TabItem7,
+        8  => TabItem8,  9  => TabItem9,  10 => TabItem10, 11 => TabItem11,
+        12 => TabItem12, 13 => TabItem13, 14 => TabItem14, 15 => TabItem15,
+        16 => TabItem16, 17 => TabItem17, 18 => TabItem18, 19 => TabItem19,
+        _ => null
+    };
+
+    /// <summary>Maps nav-button Tag (int) → its Button control.</summary>
+    private System.Windows.Controls.Button? GetNavButton(int tag) => tag switch
+    {
+        0  => NavTxnViewer, 1  => NavTxn,        2  => NavLineItems,
+        3  => NavWebhooks,  4  => NavRawJson,     5  => NavJsonTools,
+        6  => NavCrypto,    7  => NavPortal,      8  => NavSettings,
+        9  => NavHelp,      10 => NavDashboard,   11 => NavDisbursements,
+        12 => NavAccounts,  13 => NavMerchants,   14 => NavReports,
+        15 => NavHttpClient,16 => NavPerf,        17 => NavSubscriptions,
+        18 => NavFiddler,   19 => NavCoreDb,
+        _ => null
+    };
+
+    /// <summary>Returns the CheckBox for a given tab tag.</summary>
+    private System.Windows.Controls.CheckBox? GetTabCheckBox(int tag) => tag switch
+    {
+        0  => TabChk0,  1  => TabChk1,  2  => TabChk2,  3  => TabChk3,
+        4  => TabChk4,  5  => TabChk5,  6  => TabChk6,  7  => TabChk7,
+        8  => TabChk8,  9  => TabChk9,  10 => TabChk10, 11 => TabChk11,
+        12 => TabChk12, 13 => TabChk13, 14 => TabChk14, 15 => TabChk15,
+        16 => TabChk16, 17 => TabChk17, 18 => TabChk18, 19 => TabChk19,
+        _ => null
+    };
+
+    private static readonly int[] PinnedTabs = { 0, 8 }; // Overview + Settings always visible
+
+    /// <summary>Applies HiddenTabs from settings: hides sidebar buttons, top TabItems, updates checkboxes.</summary>
+    private void ApplyTabVisibility(List<int> hiddenTags)
+    {
+        for (int tag = 0; tag <= 19; tag++)
+        {
+            if (PinnedTabs.Contains(tag)) continue; // always visible
+            bool hidden = hiddenTags.Contains(tag);
+            var  vis    = hidden ? Visibility.Collapsed : Visibility.Visible;
+            var  btn    = GetNavButton(tag);
+            var  tab    = GetTabItem(tag);
+            var  chk    = GetTabCheckBox(tag);
+            if (btn != null) btn.Visibility = vis;
+            if (tab != null) tab.Visibility = vis;
+            if (chk != null) chk.IsChecked  = !hidden;
+        }
+        // If current tab got hidden, jump to Overview
+        if (_activeNavBtn?.Visibility == Visibility.Collapsed)
+        {
+            MainTabControl.SelectedIndex = 0;
+            NavTxnViewer.Style = (System.Windows.Style)Resources["NavBtnActive"];
+            if (_activeNavBtn != null) _activeNavBtn.Style = (System.Windows.Style)Resources["NavBtn"];
+            _activeNavBtn = NavTxnViewer;
+        }
+    }
+
+    private void TabVisibility_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!_isInitialized) return;
+        if (sender is not System.Windows.Controls.CheckBox chk) return;
+        if (!int.TryParse(chk.Tag?.ToString(), out var tag)) return;
+        if (PinnedTabs.Contains(tag)) return;
+
+        var btn     = GetNavButton(tag);
+        var tabItem = GetTabItem(tag);
+
+        bool show = chk.IsChecked == true;
+        var  vis  = show ? Visibility.Visible : Visibility.Collapsed;
+        if (btn     != null) btn.Visibility     = vis;
+        if (tabItem != null) tabItem.Visibility = vis;
+
+        // If current tab was just hidden, jump to Overview
+        if (!show && _activeNavBtn == btn)
+        {
+            MainTabControl.SelectedIndex = 0;
+            NavTxnViewer.Style = (System.Windows.Style)Resources["NavBtnActive"];
+            if (btn != null) btn.Style = (System.Windows.Style)Resources["NavBtn"];
+            _activeNavBtn = NavTxnViewer;
+        }
+        SaveSettings();
+    }
+
+    private void TabVisibilityShowAll_Click(object sender, RoutedEventArgs e)
+    {
+        for (int tag = 0; tag <= 19; tag++)
+        {
+            var btn     = GetNavButton(tag);
+            var tabItem = GetTabItem(tag);
+            var chk     = GetTabCheckBox(tag);
+            if (btn     != null) btn.Visibility     = Visibility.Visible;
+            if (tabItem != null) tabItem.Visibility = Visibility.Visible;
+            if (chk != null && !PinnedTabs.Contains(tag)) chk.IsChecked = true;
+        }
+        SaveSettings();
+    }
+
+    private void TabVisibilityHideAll_Click(object sender, RoutedEventArgs e)
+    {
+        for (int tag = 0; tag <= 19; tag++)
+        {
+            if (PinnedTabs.Contains(tag)) continue;
+            var btn     = GetNavButton(tag);
+            var tabItem = GetTabItem(tag);
+            var chk     = GetTabCheckBox(tag);
+            if (btn     != null) btn.Visibility     = Visibility.Collapsed;
+            if (tabItem != null) tabItem.Visibility = Visibility.Collapsed;
+            if (chk != null) chk.IsChecked = false;
+        }
+        // Always jump to Overview since everything else is hidden
+        MainTabControl.SelectedIndex = 0;
+        if (_activeNavBtn != null) _activeNavBtn.Style = (System.Windows.Style)Resources["NavBtn"];
+        NavTxnViewer.Style = (System.Windows.Style)Resources["NavBtnActive"];
+        _activeNavBtn = NavTxnViewer;
         SaveSettings();
     }
 
@@ -383,17 +521,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             KpiToggleBorder.Background = new WpfBrush(WpfColor.FromRgb(224, 231, 255));
         }
 
-        // Restore section collapse states
-        // Email: default Visible in XAML — collapse only if previously saved as collapsed
+        // Restore section collapse states — all default to Visible (XAML defaults).
+        // Only collapse if the user previously saved them as collapsed.
         if (s.EmailSectionCollapsed)  { EmailSectionContent.Visibility  = Visibility.Collapsed; EmailSectionArrow.Text  = "▶"; }
         if (s.TxnSectionCollapsed)    { TxnSectionContent.Visibility    = Visibility.Collapsed; TxnSectionArrow.Text    = "▶"; }
-        // Disb: default Collapsed in XAML — expand only if previously saved as NOT collapsed
-        if (!s.DisbSectionCollapsed)  { DisbSectionContent.Visibility   = Visibility.Visible;   DisbSectionArrow.Text   = "▼"; }
+        if (s.DisbSectionCollapsed)   { DisbSectionContent.Visibility   = Visibility.Collapsed; DisbSectionArrow.Text   = "▶"; }
         if (s.SearchPanelCollapsed)   { SearchSectionsPanel.Visibility  = Visibility.Collapsed; ControlsCardArrow.Text  = "Expand"; }
         // Restore pin states
         if (s.EmailSectionPinned) { EmailPinBtn.Tag = "pinned"; EmailPinBtn.Text = "📌"; EmailPinBtn.ToolTip = "Unpin section"; EmailSectionContent.Visibility = Visibility.Visible; EmailSectionArrow.Text = "▼"; }
         if (s.TxnSectionPinned)   { TxnPinBtn.Tag   = "pinned"; TxnPinBtn.Text   = "📌"; TxnPinBtn.ToolTip   = "Unpin section"; TxnSectionContent.Visibility   = Visibility.Visible; TxnSectionArrow.Text   = "▼"; }
         if (s.DisbSectionPinned)  { DisbPinBtn.Tag  = "pinned"; DisbPinBtn.Text  = "📌"; DisbPinBtn.ToolTip  = "Unpin section"; DisbSectionContent.Visibility  = Visibility.Visible; DisbSectionArrow.Text  = "▼"; }
+
+        // Tab visibility — always apply so sidebar + checkboxes stay in sync
+        ApplyTabVisibility(s.HiddenTabs ?? []);
 
         // Webhook config panel (date filter / entity custom / DB strings)
         if (s.WebhookConfigExpanded)
@@ -414,7 +554,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         // Access mode:
         //   Dev machine  → use saved preference (defaults to unrestricted)
         //   Other machine → always force restricted, saved value ignored
-        RestrictedModeChk.IsChecked = _isDevMachine ? s.IsRestrictedMode : true;
+        // Checkbox reflects current email-based access: checked = restricted, unchecked = full
+        RestrictedModeChk.IsChecked = !IsDevEmail(s.BqeLoginEmail);
 
         // Host DB connection strings per environment
         // Migrate legacy single value into Local slot if present
@@ -448,8 +589,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             () => UpdateFiddlerTabProxyStatus());
 
         // BQE Core account sign-in
-        if (!string.IsNullOrEmpty(s.BqeCoreBaseUrl))  BqeCoreUrlBox.Text   = s.BqeCoreBaseUrl;
-        if (!string.IsNullOrEmpty(s.BqeLoginEmail))   BqeEmailBox.Text     = s.BqeLoginEmail;
+        if (!string.IsNullOrEmpty(s.BqeCoreBaseUrl))   BqeCoreUrlBox.Text      = s.BqeCoreBaseUrl;
+        if (!string.IsNullOrEmpty(s.BqeLoginEmail))    BqeEmailBox.Text        = s.BqeLoginEmail;
+        if (!string.IsNullOrEmpty(s.BqeLoginPassword)) BqePasswordBox.Password = s.BqeLoginPassword;
         if (!string.IsNullOrEmpty(s.BqeJwtToken))
             ApplyBqeSignedInState(s.BqeLoggedInUser, s.BqeJwtToken);
 
@@ -527,6 +669,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             WebhookConfigExpanded = WebhookDateFilterPanel.Visibility == Visibility.Visible,
             IsDarkMode         = _isDarkMode,
             IsRestrictedMode   = RestrictedModeChk.IsChecked == true,
+            HiddenTabs         = Enumerable.Range(0, 20)
+                                    .Where(t => !PinnedTabs.Contains(t) && GetNavButton(t)?.Visibility == Visibility.Collapsed)
+                                    .ToList(),
             WindowWidth      = Width,
             WindowHeight     = Height,
             WindowLeft       = Left,
@@ -536,10 +681,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             ProxyUrl         = FiddlerTabProxyUrlBox.Text.Trim(),
             ProxyBypassLocal = FiddlerTabBypassLocalChk.IsChecked == true,
             // BQE Core account
-            BqeCoreBaseUrl  = BqeCoreUrlBox.Text.Trim(),
-            BqeLoginEmail   = BqeEmailBox.Text.Trim(),
-            BqeJwtToken     = existing.BqeJwtToken,     // preserved — only updated by sign-in/out
-            BqeLoggedInUser = existing.BqeLoggedInUser,
+            BqeCoreBaseUrl   = BqeCoreUrlBox.Text.Trim(),
+            BqeLoginEmail    = BqeEmailBox.Text.Trim(),
+            BqeLoginPassword = BqePasswordBox.Password,  // saved so user doesn't retype each session
+            BqeJwtToken      = existing.BqeJwtToken,     // preserved — only updated by sign-in/out
+            BqeLoggedInUser  = existing.BqeLoggedInUser,
             // Core DB Utility
             CoreHostServer   = HostServerBox.Text.Trim(),
             CoreHostUser     = HostUserBox.Text.Trim(),
@@ -611,7 +757,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void BqeUrlPreset_Click(object sender, RoutedEventArgs e)
     {
         if ((sender as System.Windows.Controls.Button)?.Tag is string url)
+        {
             BqeCoreUrlBox.Text = url;
+            SaveSettings();   // persist URL immediately so subscription/API calls use correct host
+        }
     }
 
     /// <summary>Returns only scheme+host+port from any URL (strips all path segments).</summary>
@@ -731,19 +880,34 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void PersistAndApplyBqeToken(string url, string email, string userName, string token)
     {
         var s = Services.SettingsService.Load();
-        s.BqeJwtToken     = token;
-        s.BqeLoggedInUser = userName;
+        s.BqeJwtToken      = token;
+        s.BqeLoggedInUser  = userName;
         // Store only scheme+host+port — strip any API path the user may have included
-        s.BqeCoreBaseUrl  = GetHostRoot(url);
-        s.BqeLoginEmail   = email;
+        s.BqeCoreBaseUrl   = GetHostRoot(url);
+        s.BqeLoginEmail    = email;
+        s.BqeLoginPassword = BqePasswordBox.Password;  // persist so it pre-fills on next launch
         Services.SettingsService.Save(s);
 
-        BqePasswordBox.Clear();
+        // Do NOT clear password box — user expects it to remain for convenience
         _bqePendingPassword = null;
         ApplyBqeSignedInState(userName, token);
 
-        BqeSignInStatus.Text       = "✅  Signed in successfully.";
-        BqeSignInStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+        // Unlock / lock tabs based on login email
+        bool restricted = !IsDevEmail(email);
+        ApplyRestrictedMode(restricted);
+        // Re-enforce saved HiddenTabs — ApplyRestrictedMode may have overridden them
+        ApplyTabVisibility(Services.SettingsService.Load().HiddenTabs ?? []);
+        RestrictedModeChk.IsChecked = restricted;
+        if (!restricted)
+        {
+            BqeSignInStatus.Text       = "✅  Signed in — full access enabled.";
+            BqeSignInStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+        }
+        else
+        {
+            BqeSignInStatus.Text       = "✅  Signed in (restricted mode).";
+            BqeSignInStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+        }
     }
 
     private void BqeSignOutBtn_Click(object sender, RoutedEventArgs e)
@@ -757,6 +921,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         BqeSignedInBanner.Visibility = Visibility.Collapsed;
         BqeSignInStatus.Text         = "Signed out.";
         BqeSignInStatus.Foreground   = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+
+        // Revert to restricted mode on sign-out
+        ApplyRestrictedMode(true);
+        RestrictedModeChk.IsChecked = true;
 
         // Update sidebar user badge
         UpdateSidebarBqeBadge("", false);
@@ -2069,7 +2237,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         SubStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
         _subscriptions.Clear();
         SubChangeExpiryCard.Visibility = Visibility.Collapsed;
-        SubRawLogCard.Visibility       = Visibility.Collapsed;
+        // Don't hide SubRawLogCard here — it may contain a PlaceOrder debug log the user needs to read.
 
         try
         {
@@ -2769,10 +2937,17 @@ ORDER BY MAX(s.ExpiresOn) DESC";
             }
 
             SubAddStatus.Text = $"⏳  Placing order for company {companyId.ToString()[..8]}…";
-            var (ok, err) = await Services.BqeSubscriptionService.PlaceOrderAsync(
+            var (ok, err, placeLog) = await Services.BqeSubscriptionService.PlaceOrderAsync(
                 settings.BqeCoreBaseUrl, token,
                 companyId, packageId, planId,
                 licenses, startDate, autoRenew);
+
+            // Always show the raw PlaceOrder log so we can debug what the server returned
+            if (!string.IsNullOrWhiteSpace(placeLog))
+            {
+                SubRawLogBox.Text        = placeLog;
+                SubRawLogCard.Visibility = Visibility.Visible;
+            }
 
             if (!ok)
             {
@@ -2780,19 +2955,15 @@ ORDER BY MAX(s.ExpiresOn) DESC";
                 SubAddStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
                 Services.WebhookLogger.LogError("Add Subscription", err ?? "Unknown error",
                     $"Company={companyId}  Package={packageId}  Plan={planId}  Licenses={licenses}");
-                // Show raw log in debug box
-                if (SubRawLogCard is not null) SubRawLogCard.Visibility = Visibility.Visible;
                 return;
             }
 
-            SubAddStatus.Text       = "✅  Subscription added successfully!";
             Services.WebhookLogger.LogSuccess("Add Subscription", $"Company={companyId} Package={packageId}");
             SubAddStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+            SubAddStatus.Text       = "✅  Order sent — check the debug log below for server response, then click Fetch to reload.";
             SubAddCard.Visibility   = Visibility.Collapsed;
-
-            // Reload subscriptions
-            await Task.Delay(500);
-            SubFetchBtn_Click(sender, e);
+            // Do NOT auto-fetch — that would wipe the PlaceOrder debug log immediately.
+            // User should read the log first, then click Fetch / Fetch from DB to verify.
         }
         finally
         {
@@ -4223,7 +4394,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
 
             var inner   = ProxyConfig.MakeHandler();
             var handler = new LoggingHandler("BQE Portal", inner);
-            using var http = new System.Net.Http.HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
+            using var http = new System.Net.Http.HttpClient(handler) { Timeout = TimeSpan.FromSeconds(60) };
             http.DefaultRequestHeaders.Authorization =
                 new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", bqeToken);
             http.DefaultRequestHeaders.Add("X-BaseUrl", root);
@@ -4348,8 +4519,8 @@ ORDER BY MAX(s.ExpiresOn) DESC";
                 Metadata     : metadata);
 
             // ── Switch to Portal tab FIRST so WebView2 initialises ───────
-            if (PortalTab is not null)
-                MainTabControl.SelectedItem = PortalTab;
+            if (TabItem7 is not null)
+                MainTabControl.SelectedItem = TabItem7;
 
             // Store signup URL for redirect-after-login
             _signupReturnUrl  = fullUrl;
@@ -4717,7 +4888,11 @@ ORDER BY MAX(s.ExpiresOn) DESC";
             }
             else
             {
-                AchPostStatus.Text = $"✅  Merchant created: {newMerchantId} — creating member…";
+                // Configure merchant: bank account + extended volume fields
+                AchPostStatus.Text = $"⏳  Merchant created: {newMerchantId} — configuring (bank account, volume fields)…";
+                var (cfgLog2, _) = await service.ConfigureMerchantAsync(newMerchantId, entityId!);
+                WebhookPayloadBox.Text += $"\n\nConfigureMerchant steps:\n{cfgLog2}";
+                AchPostStatus.Text = $"✅  Merchant created & configured: {newMerchantId} — creating member…";
                 AchPostStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
                 Services.WebhookLogger.LogSuccess("Create Merchant (Payrix)", $"merchantId={newMerchantId}");
 
@@ -5507,7 +5682,7 @@ WHERE {filter}
                 ServerCertificateCustomValidationCallback =
                     System.Net.Http.HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
             };
-            using var client  = new System.Net.Http.HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
+            using var client  = new System.Net.Http.HttpClient(handler) { Timeout = TimeSpan.FromSeconds(60) };
             using var content = new System.Net.Http.StringContent(
                 payload, System.Text.Encoding.UTF8, "application/json");
 
@@ -6603,7 +6778,7 @@ WHERE {filter}
     }
 
     // Called when the Portal tab is focused
-    private async void PortalTab_GotFocus(object sender, RoutedEventArgs e)
+    private async void TabItem7_GotFocus(object sender, RoutedEventArgs e)
     {
         if (!_portalInitialised)
         {
@@ -7859,12 +8034,12 @@ WHERE {filter}
 
         // Switch to Portal tab
         var tabCtrl = FindTabControl();
-        if (tabCtrl != null) tabCtrl.SelectedItem = PortalTab;
+        if (tabCtrl != null) tabCtrl.SelectedItem = TabItem7;
 
         if (!_portalInitialised)
         {
             _pendingPortalUrl = url;
-            // Init will happen via PortalTab_GotFocus → then NavigationCompleted will redirect
+            // Init will happen via TabItem7_GotFocus → then NavigationCompleted will redirect
             var loginUrl = $"{ActivePortalUrl}/login";
             PortalAddressBar.Text = loginUrl;
             _ = InitAndNavigateAsync(loginUrl, url);
@@ -8254,12 +8429,14 @@ WHERE {filter}
             // ── Step 1: get connection string for selected environment ────────
             var s   = Services.SettingsService.Load();
             var env = (VerifyMerchantEnvBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Local";
+            // MainDbConnectionString → BQECoreHost (has Company table + company DBs)
+            // HostDbConnectionString → BQECorePaymentService (wrong DB for company lookup)
             var hostConn = env switch
             {
-                "Staging"    => s.StagingHostDbConnectionString,
-                "Sprint"     => s.SprintHostDbConnectionString,
-                "Production" => s.ProductionHostDbConnectionString,
-                _            => s.LocalHostDbConnectionString,
+                "Staging"    => s.StagingMainDbConnectionString,
+                "Sprint"     => s.SprintMainDbConnectionString,
+                "Production" => s.ProductionMainDbConnectionString,
+                _            => s.LocalMainDbConnectionString,
             };
 
             if (string.IsNullOrWhiteSpace(hostConn))
@@ -8298,12 +8475,13 @@ WHERE {filter}
             var payrixApiKey = !string.IsNullOrEmpty(apiKey) ? apiKey
                 : (isTest ? SandboxApiKeyBox.Password : ProductionApiKeyBox.Password);
 
-            var svc = new Services.PayrixService(payrixApiKey, isTest);
+            var svc = new Services.PayrixService(payrixApiKey,
+                isTest ? Services.PayrixEnvironment.Sandbox : Services.PayrixEnvironment.Production);
             var (merchant, rawJson, apiErr) = await svc.GetMerchantAsync(merchantId);
 
             if (apiErr != null || merchant == null)
             {
-                // Merchant not found in Payrix
+                // Merchant not found in Payrix — show Fix panel if we have an entity ID
                 var envLabel = isTest ? "Sandbox" : "Production";
                 VmMerchantName.Text   = "(not found)";
                 VmMerchantStatus.Text = "NOT FOUND";
@@ -8314,45 +8492,55 @@ WHERE {filter}
                     $"• The ePayments signup was started but not completed\n" +
                     $"• The merchant was deleted from Payrix\n" +
                     $"• IsTestMode={isTest} but the merchant is in the other environment\n\n" +
-                    $"Fix: Re-run ePayments setup in BQE Core → Settings → ePayments → Get Started\n\n" +
                     $"API error: {apiErr}";
                 ShowVerifyResult(false,
                     $"❌  Merchant not found in Payrix {envLabel}.\nThe stored ID ({merchantId}) does not exist.",
                     "#DC2626");
+
+                // Fix panel always visible
+                VmFixPanel.Visibility    = Visibility.Visible;
+                VmFixLogPanel.Visibility = Visibility.Collapsed;
+                VmFixResult.Text         = "";
                 return;
             }
 
+            // Fix panel always visible (user can re-create even if merchant exists)
+            VmFixPanel.Visibility = Visibility.Visible;
+
             // ── Step 4: merchant found — show details ────────────────────────
             var statusCode = merchant.Status;
-            var statusText = statusCode switch { 1 => "Active", 2 => "Inactive", 3 => "Suspended", _ => $"Unknown ({statusCode})" };
-            var statusOk   = statusCode == 1;
+            // Payrix codes: 0=Pending, 1=Active, 2=Boarded (live), 3=Inactive/Deactivated
+            // Both 1 and 2 are live states that can process payments
+            var statusText  = statusCode switch { 0 => "Pending", 1 => "Active", 2 => "Boarded", 3 => "Inactive", _ => $"Unknown ({statusCode})" };
+            var statusOk    = statusCode == 1 || statusCode == 2;  // both Active and Boarded are live
             var statusColor = statusOk
                 ? WpfColor.FromRgb(22, 101, 52)
                 : WpfColor.FromRgb(217, 119, 6);
 
-            VmMerchantName.Text                  = merchant.Name ?? "(no name)";
-            VmMerchantStatus.Text                = statusOk ? $"✅  Active" : $"⚠️  {statusText}";
-            VmMerchantStatus.Foreground          = new WpfBrush(statusColor);
+            VmMerchantName.Text     = merchant.Name ?? "(no name)";
+            VmMerchantStatus.Text   = statusOk ? $"✅  {statusText}" : $"⚠️  {statusText}";
+            VmMerchantStatus.Foreground = new WpfBrush(statusColor);
 
             var diagLines = new System.Text.StringBuilder();
             if (statusOk)
             {
-                diagLines.AppendLine("✅  Merchant exists and is active in Payrix.");
+                diagLines.AppendLine($"✅  Merchant exists and is {statusText} in Payrix — payments should work.");
                 diagLines.AppendLine();
                 diagLines.AppendLine("If payments are still failing with 'no_such_record', check:");
                 diagLines.AppendLine("• The BQE Core payment page is hitting the same environment (sandbox/production)");
                 diagLines.AppendLine("• The API key on the payment page matches this merchant's environment");
+                diagLines.AppendLine("• IIS / app-pool has been recycled after the last DB update");
             }
             else
             {
-                diagLines.AppendLine($"⚠️  Merchant exists but status is '{statusText}'.");
-                diagLines.AppendLine("Payments will fail until the merchant is activated in Payrix portal.");
+                diagLines.AppendLine($"⚠️  Merchant exists but status is '{statusText}' (code {statusCode}).");
+                diagLines.AppendLine("Payments will fail until the merchant is activated.");
             }
             VmDiagnosis.Text = diagLines.ToString().TrimEnd();
 
             ShowVerifyResult(statusOk,
                 statusOk
-                    ? $"✅  Merchant found and active in Payrix {(isTest ? "Sandbox" : "Production")}."
+                    ? $"✅  Merchant found and {statusText} in Payrix {(isTest ? "Sandbox" : "Production")}."
                     : $"⚠️  Merchant found but status = {statusText}. Payments may fail.",
                 statusOk ? "#166534" : "#92400E");
         }
@@ -8364,6 +8552,1304 @@ WHERE {filter}
         {
             VerifyMerchantBtn.IsEnabled = true;
         }
+    }
+
+    // ── Fix: Re-create missing Payrix merchant ────────────────────────────────
+
+    private async void VmFixBtn_Click(object sender, RoutedEventArgs e)
+    {
+        VmFixBtn.IsEnabled        = false;
+        VmFixLogPanel.Visibility  = Visibility.Visible;
+        VmFixResult.Foreground    = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+        VmFixResult.Text          = "⏳  Starting…";
+
+        // ── log to file + UI ──────────────────────────────────────────────────
+        string logPath = @"C:\merchant_fix.log";
+        try { System.IO.File.WriteAllText(logPath, $"=== {DateTime.Now:yyyy-MM-dd HH:mm:ss} ==={Environment.NewLine}"); }
+        catch { logPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "merchant_fix.log"); }
+
+        var sb = new System.Text.StringBuilder();
+        void Log(string msg)
+        {
+            var line = $"[{DateTime.Now:HH:mm:ss.fff}]  {msg}";
+            sb.AppendLine(line);
+            try { System.IO.File.AppendAllText(logPath, line + "\r\n"); } catch { }
+            // Safe UI update from any thread
+            if (Dispatcher.CheckAccess())
+                VmFixResult.Text = sb.ToString();
+            else
+                Dispatcher.BeginInvoke(() => VmFixResult.Text = sb.ToString());
+        }
+        Log($"Log: {logPath}");
+
+        try
+        {
+            var s   = Services.SettingsService.Load();
+            var env = (VerifyMerchantEnvBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Local";
+
+            // ── Resolve company ID ────────────────────────────────────────────
+            // Priority 1: EntityCustomBox  (format "accountId,companyId" — use whatever is selected there)
+            // Priority 2: VerifyMerchantCompanyBox (manual GUID entry)
+            string companyId = "";
+            var entityCustomText = EntityCustomBox?.Text?.Trim() ?? "";
+            if (!string.IsNullOrWhiteSpace(entityCustomText))
+            {
+                var parts = entityCustomText.Split(',');
+                // second part is companyId; if only one part treat it as companyId
+                var candidate = parts.Length >= 2 ? parts[1].Trim() : parts[0].Trim();
+                if (Guid.TryParse(candidate, out _))
+                {
+                    companyId = candidate;
+                    Log($"Company GUID resolved from EntityCustom dropdown: {companyId}");
+                }
+            }
+            if (string.IsNullOrWhiteSpace(companyId))
+            {
+                companyId = VerifyMerchantCompanyBox.Text.Trim();
+                Log($"Company GUID from VerifyMerchant box: {companyId}");
+            }
+            if (!Guid.TryParse(companyId, out _))
+            {
+                Log("ERROR: No valid Company GUID found. Set the EntityCustom dropdown (accountId,companyId) or enter a GUID in the Company box.");
+                VmFixResult.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+                return;
+            }
+
+            // MainDbConnectionString → BQECoreHost (has Company table + company DBs)
+            // HostDbConnectionString → BQECorePaymentService (wrong DB for company lookup)
+            var hostConn = env switch
+            {
+                "Staging"    => s.StagingMainDbConnectionString,
+                "Sprint"     => s.SprintMainDbConnectionString,
+                "Production" => s.ProductionMainDbConnectionString,
+                _            => s.LocalMainDbConnectionString,
+            };
+
+            Log($"Environment  : {env}");
+            Log($"Company GUID : {companyId}");
+            Log($"User email   : {s.UserEmail}");
+            Log("");
+
+            // ── Step 1: read ThirdPartySettings from Core DB ──────────────────
+            Log("STEP 1: Reading ThirdPartySettings from Core DB…");
+            var (_, _, isTest, _, dbErr) = await GetPaymentServiceEntityAsync(hostConn, companyId);
+            Log($"  isTest={isTest}  dbErr={dbErr ?? "none"}");
+
+            string accountId = "", existingAccessToken = "", existingCustom = "";
+            string existingEntityId = "", existingMerchantId = "";
+            try
+            {
+                await Task.Run(async () =>
+                {
+                    var cs   = Services.HostDbService.SanitizeConnectionStringPublic(hostConn);
+                    if (!cs.Contains("TrustServerCertificate")) cs = cs.TrimEnd(';') + ";TrustServerCertificate=True";
+                    var dbId = await Services.HostDbService.GetCompanyDatabaseIdAsync(cs, companyId);
+                    Log($"  Company DB   : {dbId}");
+                    var cc   = Services.HostDbService.ReplaceInitialCatalogPublic(cs, dbId);
+                    await using var c   = new Microsoft.Data.SqlClient.SqlConnection(cc);
+                    await c.OpenAsync();
+                    await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(
+                        "SELECT TOP 1 AccessToken FROM ThirdPartySettings WHERE Type=19 ORDER BY LastSyncDate DESC", c);
+                    existingAccessToken = (await cmd.ExecuteScalarAsync())?.ToString() ?? "";
+                    Log($"  AccessToken  : {existingAccessToken}");
+                    try
+                    {
+                        var doc  = System.Text.Json.JsonDocument.Parse(existingAccessToken);
+                        var root = doc.RootElement;
+                        existingCustom     = root.TryGetProperty("custom",  out var cv) ? cv.GetString() ?? "" : "";
+                        existingEntityId   = root.TryGetProperty("entity",  out var ev) ? ev.GetString() ?? "" : "";
+                        existingMerchantId = root.TryGetProperty("id",      out var iv) ? iv.GetString() ?? "" : "";
+                        var parts = existingCustom.Split(',');
+                        accountId = parts.Length >= 1 ? parts[0].Trim() : "";
+                    }
+                    catch (Exception ex2) { Log($"  AccessToken parse error: {ex2.Message}"); }
+                });
+            }
+            catch (Exception ex) { Log($"  DB read error: {ex.Message}"); }
+
+            Log($"  existing entity  : {(string.IsNullOrEmpty(existingEntityId)  ? "(none)" : existingEntityId)}");
+            Log($"  existing merchant: {(string.IsNullOrEmpty(existingMerchantId) ? "(none)" : existingMerchantId)}");
+            Log($"  custom field     : {(string.IsNullOrEmpty(existingCustom)     ? "(none)" : existingCustom)}");
+            Log($"  accountId parsed : {(string.IsNullOrEmpty(accountId)          ? "(none)" : accountId)}");
+
+            var payrixApiKey = isTest ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+            if (string.IsNullOrEmpty(payrixApiKey))
+            {
+                Log($"  ERROR: No {(isTest ? "Sandbox" : "Production")} API key configured in Settings.");
+                VmFixResult.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+                return;
+            }
+            Log($"  Payrix env       : {(isTest ? "Sandbox" : "Production")}  key=****{payrixApiKey[^4..]}");
+
+            var svc = new Services.PayrixService(payrixApiKey,
+                isTest ? Services.PayrixEnvironment.Sandbox : Services.PayrixEnvironment.Production);
+
+            // custom value sent to Payrix — "accountId,companyId" from ThirdPartySettings
+            // Use existingCustom if available (it has the correct BQE-internal companyId),
+            // otherwise fall back to the Core GUID the user typed.
+            var customField = !string.IsNullOrEmpty(existingCustom) ? existingCustom
+                            : !string.IsNullOrEmpty(accountId)      ? $"{accountId},{companyId}"
+                            : companyId;
+            Log($"  customField      : {customField}");
+            Log("");
+
+            // ── Step 2: fetch company name ────────────────────────────────────
+            Log("STEP 2: Fetching company name from Core DB…");
+            string resolvedCompanyName = companyId[..Math.Min(30, companyId.Length)];
+            try
+            {
+                var cs = Services.HostDbService.SanitizeConnectionStringPublic(hostConn);
+                if (!cs.Contains("TrustServerCertificate")) cs = cs.TrimEnd(';') + ";TrustServerCertificate=True";
+                var (cName, _) = await Services.HostDbService.GetCompanyNameAsync(cs, companyId);
+                if (!string.IsNullOrWhiteSpace(cName))
+                    resolvedCompanyName = cName[..Math.Min(50, cName.Length)];
+            }
+            catch (Exception ex) { Log($"  Company name fetch error: {ex.Message}"); }
+            Log($"  Company name: {resolvedCompanyName}");
+            Log("");
+
+            // ── Step 3: POST /logins ──────────────────────────────────────────
+            Log("STEP 3: POST /logins → Payrix (creates entity + merchant + member + bank account)…");
+            var loginEmail = s.UserEmail.Trim().Length > 0 ? s.UserEmail : "merchant@bqe.com";
+            Log($"  loginEmail  : {loginEmail}");
+            Log($"  companyName : {resolvedCompanyName}");
+            Log($"  custom      : {customField}");
+
+            var (newEntityId, loginId, signupRaw, signupErr) = await svc.SignUpViaLoginsAsync(
+                loginEmail    : loginEmail,
+                companyCustom : customField,
+                companyName   : resolvedCompanyName,
+                dba           : resolvedCompanyName);
+
+            // Write full raw to file only — don't flood the UI
+            try { System.IO.File.AppendAllText(logPath, $"\r\n── /logins raw ──\r\n{signupRaw}\r\n── end raw ──\r\n\r\n"); } catch { }
+            Log($"  /logins HTTP OK — raw written to log file");
+
+            if (signupErr != null)
+            {
+                Log($"  ERROR: {signupErr}");
+                VmFixResult.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+                return;
+            }
+            Log($"  returnedId (raw): {newEntityId ?? "(null)"}");
+
+            // ── Step 4: resolve entity ID from /logins response ───────────────
+            Log("STEP 4: Resolving entity + merchant IDs…");
+
+            // Extract entity ID only — NEVER trust merchant ID from /logins response.
+            // Payrix sometimes stores the entity suffix as the merchant ID in the response.
+            // Always fetch the real merchant ID via GET /merchants?entity=... below.
+            string? resolvedEntityId = null;
+            if (!string.IsNullOrEmpty(newEntityId))
+            {
+                // Strip pipe-separated merchant suffix if present (we ignore it)
+                resolvedEntityId = newEntityId.Contains('|') ? newEntityId.Split('|')[0] : newEntityId;
+                // Must start with _ent_ to be valid
+                if (!resolvedEntityId.Contains("_ent_", StringComparison.OrdinalIgnoreCase))
+                {
+                    Log($"  Response entity looks wrong ({resolvedEntityId}) — will search by custom field");
+                    resolvedEntityId = null;
+                }
+            }
+            Log($"  entity from /logins: {resolvedEntityId ?? "(null — will search)"}");
+
+            // If entity not in response, find via custom field search
+            if (string.IsNullOrEmpty(resolvedEntityId))
+            {
+                Log($"  Waiting 5s then searching by custom: '{customField}'");
+                await Task.Delay(5000);
+                var (foundId, _, _, findErr) = await svc.FindEntityByCustomAsync(accountId, companyId);
+                Log($"  FindEntityByCustom: {foundId ?? "(null)"}  err={findErr ?? "none"}");
+                if (string.IsNullOrEmpty(foundId))
+                {
+                    await Task.Delay(5000);
+                    (foundId, _, _, findErr) = await svc.FindEntityByCustomAsync(accountId, companyId);
+                    Log($"  FindEntityByCustom retry: {foundId ?? "(null)"}  err={findErr ?? "none"}");
+                }
+                resolvedEntityId = foundId;
+            }
+
+            if (string.IsNullOrEmpty(resolvedEntityId))
+            {
+                Log("  FAILED: entity ID not found.");
+                VmFixResult.Foreground = new WpfBrush(WpfColor.FromRgb(217, 119, 6));
+                return;
+            }
+
+            // NOTE: Do NOT fetch merchant ID here — the initial merchant created by /logins
+            // has an entity-suffix ID that Payrix replaces when auto-boarding fires.
+            // We must fix the member, trigger boarding, wait for status=2, THEN fetch the
+            // final boarded merchant ID and write it to the DB.
+
+            Log($"  Entity resolved: {resolvedEntityId}");
+            Log($"  Waiting 4s for Payrix to finish creating initial records…");
+            await Task.Delay(4000);
+            Log("");
+
+            // ── Step 5: find initial merchant for entity, fix member ──────────
+            Log("STEP 5: Finding initial merchant and fixing member (primary=1, dob=19841031)…");
+            string? initialMerchantId = null;
+            try
+            {
+                var (initMer, _, initErr) = await svc.GetMerchantByEntityAsync(resolvedEntityId);
+                initialMerchantId = initMer?.Id;
+                Log($"  Initial merchant: {initialMerchantId ?? "(null)"}  err={initErr ?? "none"}");
+                if (string.IsNullOrEmpty(initialMerchantId))
+                {
+                    // One retry after a short delay
+                    await Task.Delay(5000);
+                    (initMer, _, initErr) = await svc.GetMerchantByEntityAsync(resolvedEntityId);
+                    initialMerchantId = initMer?.Id;
+                    Log($"  Initial merchant (retry): {initialMerchantId ?? "(null)"}  err={initErr ?? "none"}");
+                }
+            }
+            catch (Exception ex) { Log($"  Initial merchant fetch error: {ex.Message}"); }
+
+            if (string.IsNullOrEmpty(initialMerchantId))
+            {
+                Log("  FAILED: cannot find merchant in Payrix after /logins.");
+                VmFixResult.Foreground = new WpfBrush(WpfColor.FromRgb(217, 119, 6));
+                return;
+            }
+
+            // Fix member on initial merchant so auto-boarding can trigger
+            try
+            {
+                var membersRaw = await svc.GetRawAsync($"/members?merchant={initialMerchantId}");
+                var membersDoc = System.Text.Json.JsonDocument.Parse(membersRaw);
+                var membersArr = membersDoc.RootElement.GetProperty("response").GetProperty("data");
+                string? primaryMemberId = null;
+                foreach (var mbr in membersArr.EnumerateArray())
+                {
+                    var mbrMerchant = mbr.TryGetProperty("merchant", out var mm) ? mm.GetString() : null;
+                    if (mbrMerchant == initialMerchantId)
+                    {
+                        primaryMemberId = mbr.TryGetProperty("id", out var mid) ? mid.GetString() : null;
+                        break;
+                    }
+                }
+                if (!string.IsNullOrEmpty(primaryMemberId))
+                {
+                    var patchBody = System.Text.Json.JsonSerializer.Serialize(new { primary = 1, dob = 19841031 });
+                    await svc.PutRawAsync($"/members/{primaryMemberId}", patchBody);
+                    Log($"  Patched member {primaryMemberId}: primary=1, dob=19841031 ✅");
+                }
+                else
+                    Log("  No member found for initial merchant — skipping member fix");
+            }
+            catch (Exception ex) { Log($"  Member fix error (non-fatal): {ex.Message}"); }
+            Log("");
+
+            // ── Step 6: board merchant — poll ALL entity merchants until status=2 ────
+            // IMPORTANT: Payrix auto-boarding creates a NEW merchant with a DIFFERENT ID
+            // than the initial entity-suffix merchant.  Do NOT poll by initialMerchantId —
+            // poll by entity so we catch whichever merchant Payrix boards.
+            //
+            // ALSO: Payrix sometimes returns "status" as a JSON STRING ("2") not a number.
+            // Always use SafeGetInt() to avoid silent exceptions swallowing the status check.
+            static int SafeGetInt(System.Text.Json.JsonElement el, string prop, int fallback = -1)
+            {
+                if (!el.TryGetProperty(prop, out var v)) return fallback;
+                if (v.ValueKind == System.Text.Json.JsonValueKind.Number) return v.GetInt32();
+                if (v.ValueKind == System.Text.Json.JsonValueKind.String &&
+                    int.TryParse(v.GetString(), out var parsed)) return parsed;
+                return fallback;
+            }
+
+            Log("STEP 6: Boarding merchant (PUT status=1, polling entity for status=2)…");
+            bool boarded = false;
+            string? boardedMerchantId = null;
+            try
+            {
+                await Task.Delay(2000); // let member primary=1 propagate first
+                await svc.PutRawAsync($"/merchants/{initialMerchantId}",
+                    System.Text.Json.JsonSerializer.Serialize(new { status = 1 }));
+                Log("  PUT status=1 sent — polling entity for any status=2 merchant (up to 90s)…");
+
+                // Poll every 5s for up to 90s — query by ENTITY not by merchant ID
+                for (int poll = 1; poll <= 18; poll++)
+                {
+                    await Task.Delay(5000);
+                    try
+                    {
+                        var raw = await svc.GetRawAsync(
+                            $"/merchants?search[entity][eq]={Uri.EscapeDataString(resolvedEntityId)}&page[limit]=20");
+                        var doc  = System.Text.Json.JsonDocument.Parse(raw);
+                        var data = doc.RootElement.GetProperty("response").GetProperty("data");
+                        // Scan ALL merchants returned for this entity — pick status=2
+                        foreach (var el in data.EnumerateArray())
+                        {
+                            var elEntity = el.TryGetProperty("entity", out var eev) ? eev.GetString() : null;
+                            if (!string.Equals(elEntity, resolvedEntityId, StringComparison.OrdinalIgnoreCase)) continue;
+                            var st  = SafeGetInt(el, "status");
+                            var ab  = SafeGetInt(el, "autoBoarded", 0);
+                            var mid = el.TryGetProperty("id", out var iv) ? iv.GetString() : null;
+                            Log($"  [{poll * 5}s] merchant={mid}  status={st}  autoBoarded={ab}");
+                            if (st == 2)
+                            {
+                                boarded           = true;
+                                boardedMerchantId = mid;
+                                Log($"  ✅  Boarded merchant found: {boardedMerchantId}");
+                                break;
+                            }
+                        }
+                        if (boarded) break;
+                    }
+                    catch (Exception ex2) { Log($"  poll error: {ex2.Message}"); }
+                }
+                if (!boarded)
+                    Log("  ⚠️  No status=2 merchant found within 90s — will attempt entity re-query.");
+            }
+            catch (Exception ex) { Log($"  Boarding error: {ex.Message}"); }
+            Log("");
+
+            // ── Step 7: confirm FINAL boarded merchant ID ─────────────────────
+            // boardedMerchantId was set during polling if status=2 was detected.
+            // If boarding timed out, do one last entity scan — Payrix may have just been slow.
+            Log("STEP 7: Confirming final boarded merchant ID…");
+            string? resolvedMerchantId = boardedMerchantId;
+            if (string.IsNullOrEmpty(resolvedMerchantId))
+            {
+                Log("  Doing final entity scan for any status=2 merchant…");
+                await Task.Delay(5000);
+                for (int attempt = 1; attempt <= 3 && string.IsNullOrEmpty(resolvedMerchantId); attempt++)
+                {
+                    try
+                    {
+                        var raw = await svc.GetRawAsync(
+                            $"/merchants?search[entity][eq]={Uri.EscapeDataString(resolvedEntityId)}&page[limit]=20");
+                        var doc  = System.Text.Json.JsonDocument.Parse(raw);
+                        var data = doc.RootElement.GetProperty("response").GetProperty("data");
+                        string? anyMerchantForEntity = null;
+                        foreach (var el in data.EnumerateArray())
+                        {
+                            var elEntity = el.TryGetProperty("entity", out var eev) ? eev.GetString() : null;
+                            if (!string.Equals(elEntity, resolvedEntityId, StringComparison.OrdinalIgnoreCase)) continue;
+                            var st  = SafeGetInt(el, "status");
+                            var mid = el.TryGetProperty("id", out var iv) ? iv.GetString() : null;
+                            Log($"  Scan {attempt}: merchant={mid}  status={st}");
+                            if (st == 2) { resolvedMerchantId = mid; break; }
+                            anyMerchantForEntity ??= mid; // remember as fallback
+                        }
+                        // If no status=2 found yet but we have a merchant, use it on last attempt
+                        if (string.IsNullOrEmpty(resolvedMerchantId) && attempt == 3 && !string.IsNullOrEmpty(anyMerchantForEntity))
+                        {
+                            resolvedMerchantId = anyMerchantForEntity;
+                            Log($"  No status=2 found — using best available: {resolvedMerchantId}");
+                        }
+                    }
+                    catch (Exception ex2) { Log($"  scan error: {ex2.Message}"); }
+                    if (string.IsNullOrEmpty(resolvedMerchantId) && attempt < 3)
+                        await Task.Delay(8000);
+                }
+            }
+
+            if (string.IsNullOrEmpty(resolvedMerchantId))
+            {
+                resolvedMerchantId = initialMerchantId;
+                Log($"  Last resort — using initial merchant: {resolvedMerchantId}");
+            }
+            Log($"  RESOLVED: entity={resolvedEntityId}  merchant={resolvedMerchantId}");
+            Log("");
+
+            // ── Step 8: update ThirdPartySetting in Core DB ───────────────────
+            Log("STEP 8: Updating ThirdPartySetting.AccessToken in Core DB…");
+            var patchErr = await PatchThirdPartySettingMerchantIdAsync(
+                hostConn, companyId, resolvedEntityId, resolvedMerchantId);
+            if (patchErr != null)
+            {
+                Log($"  ERROR: {patchErr}");
+                Log($"  Merchant was created ({resolvedMerchantId}) but DB update failed.");
+                VmFixResult.Foreground = new WpfBrush(WpfColor.FromRgb(217, 119, 6));
+                return;
+            }
+            Log("  ThirdPartySetting updated ✅");
+            Log("");
+
+            // ── Step 9: upsert BQSTable ───────────────────────────────────────
+            Log("STEP 9: Upserting BQSTable signup entry…");
+            var tpsId = "";
+            try
+            {
+                await Task.Run(async () =>
+                {
+                    var hc = env switch
+                    {
+                        "Staging"    => s.StagingMainDbConnectionString,
+                        "Sprint"     => s.SprintMainDbConnectionString,
+                        "Production" => s.ProductionMainDbConnectionString,
+                        _            => s.LocalMainDbConnectionString,
+                    };
+                    var cs   = Services.HostDbService.SanitizeConnectionStringPublic(hc);
+                    if (!cs.Contains("TrustServerCertificate")) cs = cs.TrimEnd(';') + ";TrustServerCertificate=True";
+                    var dbId = await Services.HostDbService.GetCompanyDatabaseIdAsync(cs, companyId);
+                    var cc   = Services.HostDbService.ReplaceInitialCatalogPublic(cs, dbId);
+                    await using var c   = new Microsoft.Data.SqlClient.SqlConnection(cc);
+                    await c.OpenAsync();
+                    await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(
+                        "SELECT TOP 1 ThirdPartySetting_ID FROM ThirdPartySettings WHERE Type=19 ORDER BY LastSyncDate DESC", c);
+                    tpsId = (await cmd.ExecuteScalarAsync())?.ToString() ?? "";
+                    Log($"  ThirdPartySetting_ID: {tpsId}");
+                });
+            }
+            catch (Exception ex) { Log($"  tpsId fetch error (non-fatal): {ex.Message}"); }
+
+            var bqsErr = await UpsertBQSTableSignupAsync(
+                hostConn, companyId, resolvedEntityId, resolvedMerchantId, tpsId);
+            Log(bqsErr == null ? "  BQSTable upsert ✅" : $"  BQSTable upsert ⚠️: {bqsErr}");
+            Log("");
+
+            // ── Verify DB was written correctly ───────────────────────────────
+            Log("VERIFY: Reading back ThirdPartySettings from DB to confirm…");
+            try
+            {
+                await Task.Run(async () =>
+                {
+                    var cs   = Services.HostDbService.SanitizeConnectionStringPublic(hostConn);
+                    if (!cs.Contains("TrustServerCertificate")) cs = cs.TrimEnd(';') + ";TrustServerCertificate=True";
+                    var dbId = await Services.HostDbService.GetCompanyDatabaseIdAsync(cs, companyId);
+                    var cc   = Services.HostDbService.ReplaceInitialCatalogPublic(cs, dbId);
+                    await using var c   = new Microsoft.Data.SqlClient.SqlConnection(cc);
+                    await c.OpenAsync();
+                    await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(
+                        "SELECT TOP 1 AccessToken FROM ThirdPartySettings WHERE Type=19 ORDER BY LastSyncDate DESC", c);
+                    var tok = (await cmd.ExecuteScalarAsync())?.ToString() ?? "";
+                    using var doc  = System.Text.Json.JsonDocument.Parse(tok);
+                    var dbMerId    = doc.RootElement.TryGetProperty("id",     out var idEl)  ? idEl.GetString()  : "(none)";
+                    var dbEntId    = doc.RootElement.TryGetProperty("entity", out var entEl) ? entEl.GetString() : "(none)";
+                    Log($"  DB merchant id : {dbMerId}");
+                    Log($"  DB entity  id  : {dbEntId}");
+                    Log($"  Expected merchant: {resolvedMerchantId}");
+                    Log(dbMerId == resolvedMerchantId ? "  ✅ DB matches!" : "  ❌ MISMATCH — DB has different ID than expected!");
+                });
+            }
+            catch (Exception ex) { Log($"  DB verify error: {ex.Message}"); }
+            Log("");
+
+            // ── Done ──────────────────────────────────────────────────────────
+            Log("=== FIX COMPLETE ===");
+            Log($"  Merchant ID : {resolvedMerchantId}");
+            Log($"  Entity ID   : {resolvedEntityId}");
+            Log($"  Boarded?    : {boarded}");
+            Log($"  Log saved to: {logPath}");
+            Log("");
+            Log("Run iisreset / app-pool recycle on the BQE Core server,");
+            Log("then click 🔎 Verify Merchant to confirm.");
+
+            VmFixResult.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+            VmMerchantId.Text = resolvedMerchantId;
+            SetVerifyBanner("#166534", "✅  Fix applied — new merchant created and Core DB updated.");
+        }
+        catch (Exception ex)
+        {
+            Log($"UNHANDLED EXCEPTION: {ex}");
+            Dispatcher.BeginInvoke(() =>
+            {
+                VmFixResult.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            });
+        }
+        finally
+        {
+            Log($"--- end ({DateTime.Now:HH:mm:ss}) ---");
+            var finalLog = sb.ToString();
+            Dispatcher.BeginInvoke(() =>
+            {
+                VmFixBtn.IsEnabled       = true;
+                VmFixLogPanel.Visibility = Visibility.Visible;
+                VmFixLogTitle.Text       = $"Fix Log — {System.IO.Path.GetFileName(logPath)}";
+                VmFixResult.Text         = finalLog;
+                // Scroll to top so user sees the beginning
+                var sv = VmFixResult.Parent as System.Windows.Controls.ScrollViewer
+                      ?? (VmFixResult.Parent as System.Windows.FrameworkElement)
+                         ?.FindName("PART_ContentHost") as System.Windows.Controls.ScrollViewer;
+                sv?.ScrollToTop();
+            });
+        }
+    }
+
+    private void VmFixExportBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var log = VmFixResult.Text;
+        if (string.IsNullOrWhiteSpace(log)) return;
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Title            = "Export Fix Log",
+            Filter           = "Log files (*.log)|*.log|Text files (*.txt)|*.txt|All files (*.*)|*.*",
+            FileName         = $"merchant_fix_{DateTime.Now:yyyyMMdd_HHmmss}.log",
+            DefaultExt       = ".log",
+            InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
+        };
+        if (dlg.ShowDialog() == true)
+        {
+            try
+            {
+                System.IO.File.WriteAllText(dlg.FileName, log);
+                SetStatus($"Log exported → {dlg.FileName}");
+            }
+            catch (Exception ex)
+            {
+                System.Windows.MessageBox.Show($"Export failed: {ex.Message}", "Export Error",
+                    System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
+            }
+        }
+    }
+
+    private void VmFixCloseLogBtn_Click(object sender, RoutedEventArgs e)
+    {
+        VmFixLogPanel.Visibility = Visibility.Collapsed;
+        VmFixResult.Text         = "";
+    }
+
+    /// <summary>
+    /// Updates ThirdPartySettings.AccessToken for the company — replaces the "id" (merchant ID)
+    /// field in the JSON while keeping all other fields (entity, custom, etc.) intact.
+    /// Returns null on success, error message on failure.
+    /// </summary>
+    private static async Task<string?> PatchThirdPartySettingMerchantIdAsync(
+        string hostConnStr, string companyId, string entityId, string newMerchantId)
+    {
+        hostConnStr = Services.HostDbService.SanitizeConnectionStringPublic(hostConnStr);
+        if (!hostConnStr.Contains("TrustServerCertificate", StringComparison.OrdinalIgnoreCase))
+            hostConnStr = hostConnStr.TrimEnd(';') + ";TrustServerCertificate=True";
+
+        if (!Guid.TryParse(companyId, out var cGuid))
+            return $"Invalid company ID: {companyId}";
+
+        try
+        {
+            // ── Get company Core DB name ──────────────────────────────────────
+            string? companyDbName = null;
+            await using (var hostConn = new Microsoft.Data.SqlClient.SqlConnection(hostConnStr))
+            {
+                await hostConn.OpenAsync();
+                await using var dbCmd = new Microsoft.Data.SqlClient.SqlCommand(
+                    "SELECT TOP 1 DatabaseID FROM Company WHERE ID = @cid", hostConn);
+                dbCmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@cid",
+                    System.Data.SqlDbType.UniqueIdentifier) { Value = cGuid });
+                companyDbName = (await dbCmd.ExecuteScalarAsync())?.ToString()?.Trim();
+            }
+            if (string.IsNullOrWhiteSpace(companyDbName))
+                return $"Company not found in Host DB (ID={companyId}).";
+
+            var coreConn = Services.HostDbService.ReplaceInitialCatalogPublic(hostConnStr, companyDbName);
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(coreConn);
+            await conn.OpenAsync();
+
+            // ── Read current AccessToken ──────────────────────────────────────
+            string? currentToken = null;
+            await using (var readCmd = new Microsoft.Data.SqlClient.SqlCommand(
+                "SELECT TOP 1 AccessToken FROM ThirdPartySettings WHERE Type = 19 ORDER BY LastSyncDate DESC, CreatedOn DESC",
+                conn))
+            {
+                var raw = await readCmd.ExecuteScalarAsync();
+                currentToken = raw as string;
+            }
+
+            if (string.IsNullOrWhiteSpace(currentToken))
+                return "No ThirdPartySetting (Type=19) found in company DB.";
+
+            // ── Patch the "id" field in the JSON ─────────────────────────────
+            string updatedToken;
+            try
+            {
+                using var doc  = System.Text.Json.JsonDocument.Parse(currentToken);
+                var dict = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, System.Text.Json.JsonElement>>(currentToken)
+                           ?? new Dictionary<string, System.Text.Json.JsonElement>();
+
+                // Rebuild as a plain object with updated "id" and "entity"
+                var rebuilt = new Dictionary<string, object?>();
+                foreach (var kv in dict)
+                {
+                    if (kv.Key == "id")
+                        rebuilt[kv.Key] = newMerchantId;
+                    else if (kv.Key == "entity" && !string.IsNullOrEmpty(entityId))
+                        rebuilt[kv.Key] = entityId;
+                    else
+                        rebuilt[kv.Key] = kv.Value;
+                }
+                if (!rebuilt.ContainsKey("id")) rebuilt["id"] = newMerchantId;
+                if (!rebuilt.ContainsKey("entity") && !string.IsNullOrEmpty(entityId)) rebuilt["entity"] = entityId;
+
+                updatedToken = System.Text.Json.JsonSerializer.Serialize(rebuilt);
+            }
+            catch (Exception ex)
+            {
+                return $"Failed to parse/patch AccessToken JSON: {ex.Message}";
+            }
+
+            // ── Update all Type=19 rows (both CC and ACH records share same entity) ─
+            await using var updCmd = new Microsoft.Data.SqlClient.SqlCommand(
+                "UPDATE ThirdPartySettings SET AccessToken = @tok, LastSyncDate = GETUTCDATE() WHERE Type = 19",
+                conn);
+            updCmd.Parameters.AddWithValue("@tok", updatedToken);
+            var rows = await updCmd.ExecuteNonQueryAsync();
+            if (rows == 0) return "UPDATE ran but affected 0 rows — ThirdPartySetting may have been deleted.";
+
+            return null;   // success
+        }
+        catch (Exception ex) { return ex.Message; }
+    }
+
+    /// <summary>
+    /// Inserts or updates the BQSTable "PaymentService_SignUpProcess_Payrix,{accountId},{companyId}" entry
+    /// with Status=2 (Completed) so BQE Core treats ePayments signup as done.
+    /// Reads accountId from the AccessToken JSON's "custom" field (format: "accountId,companyId").
+    /// Returns null on success, error message on failure.
+    /// </summary>
+    private static async Task<string?> UpsertBQSTableSignupAsync(
+        string hostConnStr, string companyId, string entityId, string merchantId, string tpsId)
+    {
+        hostConnStr = Services.HostDbService.SanitizeConnectionStringPublic(hostConnStr);
+        if (!hostConnStr.Contains("TrustServerCertificate", StringComparison.OrdinalIgnoreCase))
+            hostConnStr = hostConnStr.TrimEnd(';') + ";TrustServerCertificate=True";
+
+        if (!Guid.TryParse(companyId, out var cGuid))
+            return $"Invalid company ID: {companyId}";
+
+        try
+        {
+            // Get company DB name
+            string? companyDbName = null;
+            await using (var hostConn = new Microsoft.Data.SqlClient.SqlConnection(hostConnStr))
+            {
+                await hostConn.OpenAsync();
+                await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(
+                    "SELECT TOP 1 DatabaseID FROM Company WHERE ID = @cid", hostConn);
+                cmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@cid",
+                    System.Data.SqlDbType.UniqueIdentifier) { Value = cGuid });
+                companyDbName = (await cmd.ExecuteScalarAsync())?.ToString()?.Trim();
+            }
+            if (string.IsNullOrWhiteSpace(companyDbName))
+                return $"Company not found in Host DB (ID={companyId}).";
+
+            var coreConnStr = Services.HostDbService.ReplaceInitialCatalogPublic(hostConnStr, companyDbName);
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(coreConnStr);
+            await conn.OpenAsync();
+
+            // Read accountId from ThirdPartySettings.AccessToken "custom" field
+            string accountId = "";
+            await using (var readCmd = new Microsoft.Data.SqlClient.SqlCommand(
+                "SELECT TOP 1 AccessToken FROM ThirdPartySettings WHERE Type=19 ORDER BY LastSyncDate DESC, CreatedOn DESC", conn))
+            {
+                var raw = (await readCmd.ExecuteScalarAsync()) as string;
+                if (!string.IsNullOrEmpty(raw))
+                {
+                    try
+                    {
+                        var doc = System.Text.Json.JsonDocument.Parse(raw);
+                        var custom = doc.RootElement.TryGetProperty("custom", out var cp) ? cp.GetString() ?? "" : "";
+                        accountId = custom.Split(',').FirstOrDefault()?.Trim() ?? "";
+                    }
+                    catch { }
+                }
+            }
+            if (string.IsNullOrEmpty(accountId))
+                return "Could not read AccountId from ThirdPartySettings.AccessToken.custom.";
+
+            var paramName  = $"PaymentService_SignUpProcess_Payrix,{accountId},{companyId}";
+            var paramValue = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                merchant_application = (object?)null,
+                redirect_uri         = (object?)null,
+                Status               = 2,
+                PaymentType          = 0,
+                Gateway              = 6,
+                ThirdPartySetting_ID = tpsId,
+                MerchantId           = merchantId,
+                EntityID             = entityId,
+            });
+
+            // Upsert
+            await using var upsertCmd = new Microsoft.Data.SqlClient.SqlCommand(@"
+                IF EXISTS (SELECT 1 FROM BQSTable WHERE ParamName = @k)
+                    UPDATE BQSTable SET ParamValue = @v, LastUpdated = GETDATE() WHERE ParamName = @k
+                ELSE
+                    INSERT INTO BQSTable (BQSTable_ID, ParamName, ParamValue, CreatedOn, LastUpdated)
+                    VALUES (NEWID(), @k, @v, GETDATE(), GETDATE())", conn);
+            upsertCmd.Parameters.AddWithValue("@k", paramName);
+            upsertCmd.Parameters.AddWithValue("@v", paramValue);
+            await upsertCmd.ExecuteNonQueryAsync();
+
+            return null;  // success
+        }
+        catch (Exception ex) { return ex.Message; }
+    }
+
+    // ── Full ePayments Health Check ───────────────────────────────────────────
+
+    private async void VmHealthCheckBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var companyId = VerifyMerchantCompanyBox.Text.Trim();
+        if (!Guid.TryParse(companyId, out _))
+        {
+            ShowHealthSummary(false, "❌  Enter a valid Company GUID first.");
+            return;
+        }
+
+        VmHealthCheckBtn.IsEnabled = false;
+        VmHealthSummary.Visibility = Visibility.Collapsed;
+
+        var rows = new System.Collections.ObjectModel.ObservableCollection<HealthCheckRow>();
+        VmHealthRows.ItemsSource = rows;
+
+        void Add(string icon, string label, string detail, bool ok)
+        {
+            var color = ok ? "#166534" : (icon == "⏳" ? "#6B7280" : "#DC2626");
+            Dispatcher.BeginInvoke(() => rows.Add(new HealthCheckRow
+            {
+                Icon = icon, Label = label, Detail = detail,
+                DetailColor = color
+            }));
+        }
+        void Update(int idx, string icon, string detail, bool ok)
+        {
+            var color = ok ? "#166534" : "#DC2626";
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (idx < rows.Count)
+                    rows[idx] = new HealthCheckRow { Icon = icon, Label = rows[idx].Label, Detail = detail, DetailColor = color };
+            });
+        }
+
+        try
+        {
+            var s = Services.SettingsService.Load();
+            var env = (VerifyMerchantEnvBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Local";
+            // MainDbConnectionString → BQECoreHost (has Company table + company DBs)
+            // HostDbConnectionString → BQECorePaymentService (wrong DB for company lookup)
+            var hostConn = env switch
+            {
+                "Staging"    => s.StagingMainDbConnectionString,
+                "Sprint"     => s.SprintMainDbConnectionString,
+                "Production" => s.ProductionMainDbConnectionString,
+                _            => s.LocalMainDbConnectionString,
+            };
+            var sandboxKey = SandboxApiKeyBox.Password.Trim();
+            var prodKey    = ProductionApiKeyBox.Password.Trim();
+
+            int pass = 0, fail = 0;
+
+            // ── Check 1: Host DB reachable + company exists ─────────────────
+            Add("⏳", "1. Host DB / Company", "checking…", true);
+            string? companyDbName = null;
+            string? tpsAccessToken = null;
+            string? entityId = null, merchantId = null;
+            bool isTest = true;
+            try
+            {
+                var hc = Services.HostDbService.SanitizeConnectionStringPublic(hostConn ?? "");
+                if (!hc.Contains("TrustServerCertificate", StringComparison.OrdinalIgnoreCase))
+                    hc = hc.TrimEnd(';') + ";TrustServerCertificate=True";
+                await using var hConn = new Microsoft.Data.SqlClient.SqlConnection(hc);
+                await hConn.OpenAsync();
+                await using var dbCmd = new Microsoft.Data.SqlClient.SqlCommand(
+                    "SELECT TOP 1 DatabaseID FROM Company WHERE ID = @cid", hConn);
+                dbCmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@cid",
+                    System.Data.SqlDbType.UniqueIdentifier) { Value = Guid.Parse(companyId) });
+                companyDbName = (await dbCmd.ExecuteScalarAsync())?.ToString()?.Trim();
+                if (!string.IsNullOrEmpty(companyDbName)) { Update(0, "✅", $"Company found → DB: {companyDbName}", true); pass++; }
+                else { Update(0, "❌", "Company not found in Host DB", false); fail++; }
+            }
+            catch (Exception ex) { Update(0, "❌", $"Host DB error: {ex.Message}", false); fail++; }
+
+            if (string.IsNullOrEmpty(companyDbName)) { ShowHealthSummary(false, $"❌  Stopped — cannot reach company DB. {fail} failed."); VmHealthCheckBtn.IsEnabled = true; return; }
+
+            var coreConnStr = Services.HostDbService.ReplaceInitialCatalogPublic(
+                Services.HostDbService.SanitizeConnectionStringPublic(hostConn!) + (hostConn!.Contains("TrustServerCertificate", StringComparison.OrdinalIgnoreCase) ? "" : ";TrustServerCertificate=True"),
+                companyDbName);
+
+            // ── Check 2: ThirdPartySetting (Type=19) ────────────────────────
+            Add("⏳", "2. ThirdPartySetting", "checking…", true);
+            try
+            {
+                await using var cConn = new Microsoft.Data.SqlClient.SqlConnection(coreConnStr);
+                await cConn.OpenAsync();
+                await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(
+                    "SELECT TOP 1 AccessToken FROM ThirdPartySettings WHERE Type = 19 ORDER BY LastSyncDate DESC, CreatedOn DESC", cConn);
+                tpsAccessToken = (await cmd.ExecuteScalarAsync()) as string;
+                if (!string.IsNullOrEmpty(tpsAccessToken))
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(tpsAccessToken);
+                    doc.RootElement.TryGetProperty("id",     out var p1); merchantId = p1.GetString();
+                    doc.RootElement.TryGetProperty("entity", out var p2); entityId   = p2.GetString();
+                    isTest = merchantId?.StartsWith("txn1_", StringComparison.OrdinalIgnoreCase) == true
+                          || merchantId?.StartsWith("t1_mer_", StringComparison.OrdinalIgnoreCase) == true;
+                    Update(1, "✅", $"merchant={merchantId?[..Math.Min(24, merchantId?.Length ?? 0)]}  entity={entityId?[..Math.Min(24, entityId?.Length ?? 0)]}", true); pass++;
+                }
+                else { Update(1, "❌", "No ThirdPartySetting (Type=19) found", false); fail++; }
+            }
+            catch (Exception ex) { Update(1, "❌", $"Error: {ex.Message}", false); fail++; }
+
+            // ── Check 3: BQSTable KV record Status=2 ────────────────────────
+            Add("⏳", "3. BQSTable KV (Status=2)", "checking…", true);
+            try
+            {
+                await using var cConn2 = new Microsoft.Data.SqlClient.SqlConnection(coreConnStr);
+                await cConn2.OpenAsync();
+                await using var cmd2 = new Microsoft.Data.SqlClient.SqlCommand(
+                    "SELECT TOP 1 ParamValue FROM BQSTable WHERE ParamName LIKE 'PaymentService_SignUpProcess_Payrix%' ORDER BY CreatedOn DESC", cConn2);
+                var kvVal = (await cmd2.ExecuteScalarAsync()) as string;
+                if (!string.IsNullOrEmpty(kvVal))
+                {
+                    string status = "?";
+                    try { using var d = System.Text.Json.JsonDocument.Parse(kvVal); status = d.RootElement.TryGetProperty("Status", out var sp) ? sp.GetInt32().ToString() : "?"; } catch { }
+                    bool kvOk = status == "2";
+                    Update(2, kvOk ? "✅" : "⚠️", $"KV found  Status={status} {(kvOk ? "(Completed)" : "(Expected 2=Completed)")}", kvOk);
+                    if (kvOk) pass++; else fail++;
+                }
+                else { Update(2, "❌", "No PaymentService_SignUpProcess_Payrix record in BQSTable", false); fail++; }
+            }
+            catch (Exception ex) { Update(2, "❌", $"Error: {ex.Message}", false); fail++; }
+
+            // ── Check 4: PaymentService records (CC + ACH) ──────────────────
+            Add("⏳", "4. PaymentService records", "checking…", true);
+            try
+            {
+                await using var cConn3 = new Microsoft.Data.SqlClient.SqlConnection(coreConnStr);
+                await cConn3.OpenAsync();
+                await using var cmd3 = new Microsoft.Data.SqlClient.SqlCommand(
+                    "SELECT Method, IsActive FROM PaymentService WHERE ServiceType = 6 ORDER BY Method", cConn3);
+                await using var rdr3 = await cmd3.ExecuteReaderAsync();
+                var methods = new System.Collections.Generic.List<string>();
+                while (await rdr3.ReadAsync())
+                {
+                    var methodVal = Convert.ToInt32(rdr3.GetValue(0)); // smallint safe
+                    var method = methodVal == 0 ? "CC" : "ACH";
+                    var active = !rdr3.IsDBNull(1) && Convert.ToBoolean(rdr3.GetValue(1));
+                    methods.Add($"{method}={( active ? "✅" : "❌inactive")}");
+                }
+                bool psOk = methods.Count >= 2 && !methods.Any(m => m.Contains("❌"));
+                Update(3, psOk ? "✅" : (methods.Count == 0 ? "❌" : "⚠️"),
+                    methods.Count == 0 ? "No PaymentService records (ServiceType=6)" : string.Join("  ", methods),
+                    psOk);
+                if (psOk) pass++; else fail++;
+            }
+            catch (Exception ex) { Update(3, "❌", $"Error: {ex.Message}", false); fail++; }
+
+            // ── Checks 5-8 require entity/merchant IDs ───────────────────────
+            if (string.IsNullOrEmpty(entityId) || string.IsNullOrEmpty(merchantId))
+            {
+                Add("⏸", "5. Entity (Payrix API)", "skipped — no entity ID", false);
+                Add("⏸", "6. Merchant (Payrix API)", "skipped — no merchant ID", false);
+                Add("⏸", "7. Members (Payrix API)", "skipped — no merchant ID", false);
+                Add("⏸", "8. Token test (POST /tokens)", "skipped — no merchant ID", false);
+                fail += 4;
+                ShowHealthSummary(false, $"❌  {fail} checks failed, {pass} passed.");
+                VmHealthCheckBtn.IsEnabled = true;
+                return;
+            }
+
+            var apiKey = isTest ? sandboxKey : prodKey;
+            if (string.IsNullOrEmpty(apiKey))
+            {
+                var envName = isTest ? "Sandbox" : "Production";
+                Add("❌", "5-8. Payrix API", $"No {envName} API key in Settings", false); fail++;
+                ShowHealthSummary(false, $"❌  No {envName} API key. Add it in Settings.");
+                VmHealthCheckBtn.IsEnabled = true;
+                return;
+            }
+            var svc = new Services.PayrixService(apiKey, isTest ? Services.PayrixEnvironment.Sandbox : Services.PayrixEnvironment.Production);
+
+            // ── Check 5: Entity exists ───────────────────────────────────────
+            Add("⏳", "5. Entity (Payrix API)", "checking…", true);
+            {
+                var (id, login, name, _, _, entErr) = await svc.GetEntityAsync(entityId);
+                if (entErr == null && id != null)
+                { Update(4, "✅", $"{name ?? login ?? id}", true); pass++; }
+                else { Update(4, "❌", entErr ?? "Not found", false); fail++; }
+            }
+
+            // ── Check 6: Merchant exists and is active ───────────────────────
+            Add("⏳", "6. Merchant (Payrix API)", "checking…", true);
+            bool merchantActive = false;
+            {
+                var (merch, _, merErr) = await svc.GetMerchantAsync(merchantId);
+                if (merErr == null && merch != null)
+                {
+                    var st = merch.Status switch { 1 => "Active", 2 => "Inactive", 3 => "Suspended", _ => $"Status={merch.Status}" };
+                    merchantActive = merch.Status == 1;
+                    Update(5, merchantActive ? "✅" : "⚠️", $"{merch.Name ?? merchantId}  —  {st}", merchantActive);
+                    if (merchantActive) pass++; else fail++;
+                }
+                else { Update(5, "❌", merErr ?? "Not found", false); fail++; }
+            }
+
+            // ── Check 7: At least one member ────────────────────────────────
+            Add("⏳", "7. Members (Payrix API)", "checking…", true);
+            {
+                var (count, firstId, _, memErr) = await svc.GetMembersForMerchantAsync(merchantId);
+                if (memErr == null && count > 0)
+                { Update(6, "✅", $"{count} member(s) found  (first: {firstId?[..Math.Min(24, firstId?.Length ?? 0)]})", true); pass++; }
+                else { Update(6, "❌", memErr ?? "No members found — principal/owner not set up", false); fail++; }
+            }
+
+            // ── Check 8: Live token test ─────────────────────────────────────
+            Add("⏳", "8. Token test (POST /tokens)", "testing with Visa 4111…", true);
+            {
+                if (!merchantActive)
+                {
+                    // Payrix rejects token creation for inactive merchants with a misleading
+                    // "[customer] The referenced resource does not exist (code 15)" error.
+                    // Skip the test and surface the real reason.
+                    Update(7, "⏸", "skipped — merchant is not Active (activate it in Payrix portal first)", false);
+                    fail++;
+                }
+                else
+                {
+                    var (tokenId, _, tokErr) = await svc.TestTokenAsync(merchantId);
+                    if (tokErr == null && !string.IsNullOrEmpty(tokenId))
+                    { Update(7, "✅", $"Token created: {tokenId}", true); pass++; }
+                    else { Update(7, "❌", tokErr ?? "Token creation failed", false); fail++; }
+                }
+            }
+
+            var allOk = fail == 0;
+            ShowHealthSummary(allOk,
+                allOk
+                    ? $"✅  All {pass} checks passed — ePayments is fully operational."
+                    : $"⚠️  {fail} check(s) failed, {pass} passed — see red rows above.");
+
+            // ── Load full Payrix details even if some checks failed ──────────
+            if (!string.IsNullOrEmpty(entityId) && !string.IsNullOrEmpty(merchantId))
+                await PopulatePayrixDetailsAsync(svc, entityId, merchantId);
+        }
+        catch (Exception ex)
+        {
+            ShowHealthSummary(false, $"❌  Unexpected error: {ex.Message}");
+        }
+        finally { VmHealthCheckBtn.IsEnabled = true; }
+    }
+
+    // ── Real Payment Test ─────────────────────────────────────────────────────
+
+    private async void PtRunBtn_Click(object sender, RoutedEventArgs e)
+    {
+        // Resolve merchant ID: explicit box → fall back to whatever verify found
+        var merchantId = PtMerchantBox.Text.Trim();
+        if (string.IsNullOrEmpty(merchantId))
+            merchantId = VmMerchantId.Text.Trim();
+
+        if (string.IsNullOrEmpty(merchantId))
+        {
+            PtSetBanner(false, "❌  No merchant ID — enter one above or run Verify Merchant first.");
+            PtResultCard.Visibility = Visibility.Visible;
+            return;
+        }
+
+        // Parse amount
+        if (!decimal.TryParse(PtAmountBox.Text.Trim(), out var amountDec) || amountDec <= 0)
+        {
+            PtSetBanner(false, "❌  Invalid amount.");
+            PtResultCard.Visibility = Visibility.Visible;
+            return;
+        }
+        var amountCents = (int)(amountDec * 100);
+
+        // Determine environment from merchant ID prefix
+        bool isTest = merchantId.StartsWith("t1_", StringComparison.OrdinalIgnoreCase);
+        var apiKey  = isTest ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            PtSetBanner(false, $"❌  No {(isTest ? "Sandbox" : "Production")} API key in Settings.");
+            PtResultCard.Visibility = Visibility.Visible;
+            return;
+        }
+
+        PtRunBtn.IsEnabled      = false;
+        PtResultCard.Visibility = Visibility.Visible;
+        PtSetBanner(true, "⏳  Running payment test…");
+        PtStep1Icon.Text = "⏳"; PtStep1Text.Text = "tokenizing card…";
+        PtStep2Icon.Text = "·";  PtStep2Text.Text = "";
+        PtStep3Icon.Text = "·";  PtStep3Text.Text = "";
+        PtTokenIdText.Text = ""; PtTxnIdText.Text = ""; PtCardText.Text = "";
+
+        var card = PtCardBox.Text.Trim();
+        var exp  = PtExpBox.Text.Trim();
+        var cvv  = PtCvvBox.Text.Trim();
+
+        var svc = new Services.PayrixService(apiKey,
+            isTest ? Services.PayrixEnvironment.Sandbox : Services.PayrixEnvironment.Production);
+
+        try
+        {
+            // ── Step 1: Tokenize ────────────────────────────────────────────
+            var (tokenId, masked, tokJson, tokErr) = await svc.TokenizeCardAsync(
+                merchantId, card, exp, cvv);
+
+            if (tokErr != null || string.IsNullOrEmpty(tokenId))
+            {
+                PtStep1Icon.Text = "❌";
+                PtStep1Text.Text = tokErr ?? "No token ID returned";
+                PtSetBanner(false, "❌  Tokenize failed — merchant may not be accepting payments.");
+                return;
+            }
+            PtStep1Icon.Text    = "✅";
+            PtStep1Text.Text    = $"OK — token created";
+            PtTokenIdText.Text  = tokenId;
+            PtCardText.Text     = masked ?? card;
+            PtStep2Icon.Text    = "⏳";
+            PtStep2Text.Text    = "charging…";
+
+            // ── Step 2: Charge $amount ──────────────────────────────────────
+            var (txnId, txnStatus, txnJson, txnErr) = await svc.ChargeSaleAsync(
+                merchantId, tokenId, amountCents);
+
+            if (txnErr != null || string.IsNullOrEmpty(txnId))
+            {
+                PtStep2Icon.Text = "❌";
+                PtStep2Text.Text = txnErr ?? "No transaction ID returned";
+                PtSetBanner(false, "❌  Charge failed.");
+                return;
+            }
+            var statusLabel = txnStatus switch
+            {
+                "1" => "Approved",
+                "2" => "Pending",
+                "3" => "Declined",
+                "4" => "Settled",
+                _   => $"Status {txnStatus}"
+            };
+            PtStep2Icon.Text  = txnStatus == "3" ? "⚠️" : "✅";
+            PtStep2Text.Text  = $"OK — {statusLabel}  |  ${amountCents / 100m:F2}";
+            PtTxnIdText.Text  = txnId;
+            PtStep3Icon.Text  = "⏳";
+            PtStep3Text.Text  = "voiding…";
+
+            // ── Step 3: Auto-void (clean up sandbox) ────────────────────────
+            var (_, _, voidJson, voidErr) = await svc.VoidTransactionAsync(txnId);
+            if (voidErr != null)
+            {
+                PtStep3Icon.Text = "⚠️";
+                PtStep3Text.Text = $"Void failed (charge stands): {voidErr}";
+            }
+            else
+            {
+                PtStep3Icon.Text = "✅";
+                PtStep3Text.Text = "Voided — no real charge left on account";
+            }
+
+            bool allGood = txnStatus != "3" && voidErr == null;
+            var env = isTest ? "Sandbox" : "Production";
+            PtSetBanner(allGood,
+                allGood
+                    ? $"✅  Payment test PASSED — {env} merchant {merchantId[..Math.Min(24, merchantId.Length)]}… is fully operational."
+                    : txnStatus == "3"
+                        ? $"⚠️  Card was DECLINED by {env}. Merchant may have risk rules blocking test cards."
+                        : $"⚠️  Charged but void failed. Check Payrix portal for txn {txnId}.");
+        }
+        catch (Exception ex)
+        {
+            PtSetBanner(false, $"❌  Unexpected error: {ex.Message}");
+        }
+        finally { PtRunBtn.IsEnabled = true; }
+    }
+
+    private void PtSetBanner(bool ok, string text)
+    {
+        var hex = ok ? "#16A34A" : "#DC2626";
+        try
+        {
+            var col = (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(hex);
+            PtSummaryBanner.Background  = new WpfBrush(WpfColor.FromArgb(30, col.R, col.G, col.B));
+            PtSummaryBanner.BorderBrush = new WpfBrush(col);
+            PtSummaryText.Foreground    = new WpfBrush(col);
+        }
+        catch { }
+        PtSummaryText.Text = text;
+    }
+
+    private async void VdUpdateMemberBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var memberId = VdUpdateMemberId.Text.Trim();
+        if (string.IsNullOrEmpty(memberId))
+        {
+            VdUpdateResult.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            VdUpdateResult.Text       = "❌  No member ID — run health check first.";
+            VdUpdateResult.Visibility = Visibility.Visible;
+            return;
+        }
+
+        VdUpdateMemberBtn.IsEnabled = false;
+        VdUpdateResult.Foreground   = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+        VdUpdateResult.Text         = "⏳  Updating member…";
+        VdUpdateResult.Visibility   = Visibility.Visible;
+
+        try
+        {
+            // Determine which Payrix environment from the current entity/merchant IDs
+            var isTest = VmEntityId.Text.StartsWith("t1_", StringComparison.OrdinalIgnoreCase)
+                      || VmMerchantId.Text.StartsWith("t1_", StringComparison.OrdinalIgnoreCase);
+            var apiKey = isTest ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+
+            if (string.IsNullOrEmpty(apiKey))
+            {
+                VdUpdateResult.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+                VdUpdateResult.Text = $"❌  No {(isTest ? "Sandbox" : "Production")} API key in Settings.";
+                return;
+            }
+
+            var svc = new Services.PayrixService(apiKey,
+                isTest ? Services.PayrixEnvironment.Sandbox : Services.PayrixEnvironment.Production);
+
+            if (!int.TryParse(VdUpdateOwnership.Text.Trim(), out var ownership)) ownership = 100;
+
+            var (rawJson, err) = await svc.UpdateMemberAsync(
+                memberId,
+                first:     VdUpdateFirst.Text.Trim(),
+                last:      VdUpdateLast.Text.Trim(),
+                email:     VdUpdateEmail.Text.Trim(),
+                phone:     VdUpdatePhone.Text.Trim(),
+                address1:  VdUpdateAddress.Text.Trim(),
+                city:      VdUpdateCity.Text.Trim(),
+                state:     VdUpdateState.Text.Trim(),
+                zip:       VdUpdateZip.Text.Trim(),
+                country:   "USA",
+                dob:       VdUpdateDob.Text.Trim(),
+                ssn:       VdUpdateSsn.Password.Trim(),
+                ownership: ownership,
+                title:     VdUpdateTitle.Text.Trim());
+
+            if (err != null)
+            {
+                VdUpdateResult.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+                VdUpdateResult.Text = $"❌  {err}";
+            }
+            else
+            {
+                VdUpdateResult.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+                VdUpdateResult.Text = "✅  Member updated successfully. Re-run health check to refresh details.";
+                VdUpdateWarning.Visibility = Visibility.Collapsed;
+            }
+        }
+        catch (Exception ex)
+        {
+            VdUpdateResult.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            VdUpdateResult.Text = $"❌  {ex.Message}";
+        }
+        finally { VdUpdateMemberBtn.IsEnabled = true; }
+    }
+
+    private async Task PopulatePayrixDetailsAsync(Services.PayrixService svc, string entityId, string merchantId)
+    {
+        // ── Entity ─────────────────────────────────────────────────────────
+        var (_, login, entName, custom, _, _) = await svc.GetEntityAsync(entityId);
+        Dispatcher.BeginInvoke(() =>
+        {
+            VdEntityId.Text     = entityId;
+            VdEntityName.Text   = entName ?? login ?? "(no name)";
+            VdEntityCustom.Text = custom ?? "";
+            VdEntityStatus.Text = "Active";
+            VdEntityStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+        });
+
+        // ── Merchant ───────────────────────────────────────────────────────
+        var (merch, _, _) = await svc.GetMerchantAsync(merchantId);
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (merch == null) return;
+            VdMerchantId.Text   = merch.Id;
+            VdMerchantDba.Text  = merch.Dba ?? merch.Name ?? "";
+            var stLabel = merch.Status switch { 1 => "✅  Active", 2 => "⚠️  Inactive", 3 => "❌  Suspended", _ => $"Status {merch.Status}" };
+            var stColor = merch.Status == 1 ? WpfColor.FromRgb(22, 101, 52) : WpfColor.FromRgb(220, 38, 38);
+            VdMerchantStatus.Text       = stLabel;
+            VdMerchantStatus.Foreground = new WpfBrush(stColor);
+            VdMerchantMcc.Text    = merch.Mcc ?? "";
+            VdMerchantEmail.Text  = merch.Email ?? "";
+            VdMerchantPhone.Text  = merch.Phone ?? "";
+            var addr = new[] { merch.Address1, merch.City, merch.State, merch.Zip, merch.Country }
+                .Where(x => !string.IsNullOrEmpty(x));
+            VdMerchantAddress.Text = string.Join(", ", addr);
+        });
+
+        // ── Members ────────────────────────────────────────────────────────
+        var (memberDicts, _, _) = await svc.GetMembersDetailAsync(merchantId);
+        Dispatcher.BeginInvoke(() =>
+        {
+            string G(System.Collections.Generic.Dictionary<string,string> d, string k) =>
+                d.TryGetValue(k, out var v) ? v : "";
+
+            var memberRows = memberDicts.Select(m =>
+            {
+                var first = G(m, "first"); var last = G(m, "last");
+                var own   = G(m, "ownership");
+                var st    = G(m, "status");
+                bool hasGaps = string.IsNullOrWhiteSpace(first) || string.IsNullOrWhiteSpace(last)
+                           || string.IsNullOrWhiteSpace(G(m, "email"))
+                           || own == "0" || own == "0.00" || string.IsNullOrWhiteSpace(own);
+                return new MemberDetailRow
+                {
+                    MemberId    = G(m, "id"),
+                    First       = first,
+                    Last        = last,
+                    FullName    = $"{first} {last}".Trim(),
+                    Email       = G(m, "email"),
+                    Phone       = G(m, "phone"),
+                    Title       = G(m, "title"),
+                    Ownership   = string.IsNullOrWhiteSpace(own) ? "" : $"{own}%",
+                    Address     = G(m, "address1"),
+                    City        = G(m, "city"),
+                    State       = G(m, "state"),
+                    Zip         = G(m, "zip"),
+                    Country     = G(m, "country"),
+                    Dob         = G(m, "dob"),
+                    Type        = G(m, "type"),
+                    Created     = G(m, "created"),
+                    StatusLabel = st switch { "1" => "✅ Active", "2" => "⚠️ Inactive", _ => string.IsNullOrEmpty(st) ? "—" : $"Status {st}" },
+                    StatusColor = st == "1" ? "#166534" : "#DC2626",
+                    HasGaps     = hasGaps,
+                };
+            }).ToList();
+
+            VdMembersList.ItemsSource = memberRows;
+            VdMembersEmpty.Visibility = memberRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+            // Pre-fill update form from first member if gaps exist
+            if (memberRows.Count > 0)
+            {
+                var first = memberRows[0];
+                VdUpdateMemberId.Text   = first.MemberId;
+                VdUpdateFirst.Text      = first.First;
+                VdUpdateLast.Text       = first.Last;
+                VdUpdateEmail.Text      = first.Email;
+                VdUpdatePhone.Text      = first.Phone;
+                VdUpdateAddress.Text    = first.Address;
+                VdUpdateCity.Text       = first.City;
+                VdUpdateState.Text      = first.State;
+                VdUpdateZip.Text        = first.Zip;
+                VdUpdateTitle.Text      = string.IsNullOrEmpty(first.Title) ? "Owner" : first.Title;
+                VdUpdateOwnership.Text  = string.IsNullOrWhiteSpace(first.Ownership) ? "100" : first.Ownership.TrimEnd('%');
+                VdUpdateDob.Text        = first.Dob;
+
+                if (first.HasGaps)
+                {
+                    VdUpdateWarning.Visibility = Visibility.Visible;
+                    VdUpdateWarning.Text = "⚠️  Member has empty fields (Name, Ownership, etc). Fill in below and click Update.";
+                }
+                else
+                {
+                    VdUpdateWarning.Visibility = Visibility.Collapsed;
+                }
+            }
+
+            VmDetailsPanel.Visibility = Visibility.Visible;
+            // Scroll the details panel into view after it becomes visible
+            VmDetailsPanel.BringIntoView();
+        });
+    }
+
+    private void ShowHealthSummary(bool ok, string text)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            var hex = ok ? "#166534" : "#7F1D1D";
+            var col = (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(ok ? "#16A34A" : "#DC2626");
+            VmHealthSummary.Background   = new WpfBrush(WpfColor.FromArgb(30, col.R, col.G, col.B));
+            VmHealthSummary.BorderBrush  = new WpfBrush(col);
+            VmHealthSummaryText.Foreground = new WpfBrush(col);
+            VmHealthSummaryText.Text       = text;
+            VmHealthSummary.Visibility     = Visibility.Visible;
+            VmHealthSummary.BringIntoView();
+        });
     }
 
     private void ShowVerifyResult(bool ok, string message, string? hexColor)
@@ -8393,8 +9879,10 @@ WHERE {filter}
     }
 
     /// <summary>
-    /// Queries PaymentServiceEntity in the Host DB for the given company's Payrix entry.
-    /// Returns (merchantId, apiKey, isTestMode, entityId, error).
+    /// Looks up the company's Payrix merchant ID from BQECoreHost → company Core DB.
+    /// Path: Host DB (Company.DatabaseID) → company DB (ThirdPartySettings Type=19 AccessToken JSON).
+    /// Returns (merchantId, apiKey=null, isTestMode, entityId, error).
+    /// API key is NOT stored in Core DB — caller falls back to the settings API-key box.
     /// </summary>
     private static async Task<(string? merchantId, string? apiKey, bool isTest, string? entityId, string? error)>
         GetPaymentServiceEntityAsync(string hostConnStr, string companyId)
@@ -8403,55 +9891,77 @@ WHERE {filter}
         if (!hostConnStr.Contains("TrustServerCertificate", StringComparison.OrdinalIgnoreCase))
             hostConnStr = hostConnStr.TrimEnd(';') + ";TrustServerCertificate=True";
 
+        if (!Guid.TryParse(companyId, out var cGuid))
+            return (null, null, true, null, $"Invalid company ID: {companyId}");
+
         try
         {
-            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(hostConnStr);
-            await conn.OpenAsync();
-
-            // ServiceType 3 = Payrix; ClientID stores the merchant ID (sometimes as JSON)
-            const string sql = @"
-                SELECT TOP 1
-                    pe.ClientID,
-                    pe.SecretKey,
-                    ISNULL(pe.IsTestMode, 1) AS IsTestMode,
-                    pe.EntityID
-                FROM PaymentServiceEntity pe
-                WHERE pe.Company_ID = @cid
-                  AND pe.ServiceType = 3
-                ORDER BY pe.CreatedOn DESC";
-
-            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
-            cmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@cid",
-                System.Data.SqlDbType.UniqueIdentifier) { Value = Guid.Parse(companyId) });
-
-            await using var rdr = await cmd.ExecuteReaderAsync();
-            if (!await rdr.ReadAsync())
-                return (null, null, true, null, null);   // no record — not an error, just not set up
-
-            var clientId  = rdr.IsDBNull(0) ? null : rdr.GetString(0);
-            var secretKey = rdr.IsDBNull(1) ? null : rdr.GetString(1);
-            var isTest    = !rdr.IsDBNull(2) && rdr.GetInt32(2) != 0;
-            var entityId  = rdr.IsDBNull(3) ? null : rdr.GetString(3);
-
-            // ClientID may be stored as JSON {"Id":"txn1_xxx","entity":"ent1_xxx"}
-            string? merchantId = null;
-            if (!string.IsNullOrEmpty(clientId))
+            // ── Step 1: get company Core DB name from Host DB ─────────────────
+            string? companyDbName = null;
+            await using (var hostConn = new Microsoft.Data.SqlClient.SqlConnection(hostConnStr))
             {
-                try
-                {
-                    var j = System.Text.Json.JsonDocument.Parse(clientId);
-                    merchantId = j.RootElement.TryGetProperty("Id",     out var idProp)  ? idProp.GetString()
-                               : j.RootElement.TryGetProperty("id",     out var idProp2) ? idProp2.GetString()
-                               : clientId;
-                    if (string.IsNullOrEmpty(entityId))
-                    {
-                        entityId = j.RootElement.TryGetProperty("entity", out var entProp) ? entProp.GetString() : null;
-                    }
-                }
-                catch { merchantId = clientId; }
+                await hostConn.OpenAsync();
+                await using var dbCmd = new Microsoft.Data.SqlClient.SqlCommand(
+                    "SELECT TOP 1 DatabaseID FROM Company WHERE ID = @cid", hostConn);
+                dbCmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@cid",
+                    System.Data.SqlDbType.UniqueIdentifier) { Value = cGuid });
+                var raw = await dbCmd.ExecuteScalarAsync();
+                companyDbName = raw?.ToString()?.Trim();
             }
 
-            return (merchantId, secretKey, isTest, entityId, null);
+            if (string.IsNullOrWhiteSpace(companyDbName))
+                return (null, null, true, null,
+                    $"Company not found in Host DB (ID={companyId}).\nVerify the connection string points to BQECoreHost.");
+
+            // ── Step 2: switch to company Core DB ─────────────────────────────
+            var coreConn = Services.HostDbService.ReplaceInitialCatalogPublic(hostConnStr, companyDbName);
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(coreConn);
+            await conn.OpenAsync();
+
+            // ── Step 3: read Payrix ThirdPartySetting (Type=19 = PayrixConnect) ─
+            // AccessToken JSON = { "id": "txn1_mer_xxx", "entity": "t1_ent_xxx", "custom": "acctId,compId", ... }
+            const string sql = @"
+                SELECT TOP 1 AccessToken
+                FROM ThirdPartySettings
+                WHERE Type = 19
+                ORDER BY LastSyncDate DESC, CreatedOn DESC";
+
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            await using var rdr = await cmd.ExecuteReaderAsync();
+            if (!await rdr.ReadAsync())
+                return (null, null, true, null, null);   // ePayments not configured for this company
+
+            var accessToken = rdr.IsDBNull(0) ? null : rdr.GetString(0);
+            if (string.IsNullOrWhiteSpace(accessToken))
+                return (null, null, true, null, "ThirdPartySetting found but AccessToken is empty.");
+
+            // ── Step 4: parse AccessToken JSON ────────────────────────────────
+            string? merchantId = null;
+            string? entityId   = null;
+            bool    isTest     = true;
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(accessToken);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("id",     out var p1)) merchantId = p1.GetString();
+                if (root.TryGetProperty("entity", out var p2)) entityId   = p2.GetString();
+
+                // Determine sandbox vs production from ID prefix (txn1_ = sandbox, t1_ = live)
+                if (!string.IsNullOrEmpty(merchantId))
+                    isTest = merchantId.StartsWith("txn1_", StringComparison.OrdinalIgnoreCase)
+                          || merchantId.StartsWith("t1_mer_", StringComparison.OrdinalIgnoreCase);
+                else if (!string.IsNullOrEmpty(entityId))
+                    isTest = entityId.StartsWith("txn1_", StringComparison.OrdinalIgnoreCase)
+                          || entityId.StartsWith("t1_ent_", StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception ex)
+            {
+                return (null, null, true, null,
+                    $"Failed to parse AccessToken JSON: {ex.Message}\nRaw: {accessToken[..Math.Min(accessToken.Length, 200)]}");
+            }
+
+            // API key is not stored in Core DB — caller falls back to settings
+            return (merchantId, null, isTest, entityId, null);
         }
         catch (Exception ex) { return (null, null, true, null, ex.Message); }
     }
@@ -11614,9 +13124,9 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
 
         // Sync detail-panel toggle button
         MDetailToggleBtn.Content    = m.ToggleStatusLabel;
-        MDetailToggleBtn.Background = m.Status == 1
-            ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(217, 119,  6))  // amber
-            : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb( 59, 130, 246)); // blue
+        MDetailToggleBtn.Background = m.IsLive
+            ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(220,  38,  38))  // red = Deactivate
+            : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb( 22, 163,  74)); // green = Activate
         MDetailToggleBtn.IsEnabled  = m.ToggleEnabled;
 
         MerchantDetailEmpty.Visibility  = Visibility.Collapsed;
@@ -11674,8 +13184,10 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
 
     private async System.Threading.Tasks.Task DoToggleMerchantStatus(Models.Merchant m)
     {
-        var newStatus = m.Status == 1 ? 2 : 1;
-        var verb = newStatus == 1 ? "Activate" : "Deactivate";
+        // Payrix: status=1=Active, status=2=Boarded (both are live).
+        // Deactivating sets status=3 (Inactive); Activating sets status=1 (Active).
+        var newStatus = m.IsLive ? 3 : 1;
+        var verb = m.IsLive ? "Deactivate" : "Activate";
 
         IosAlertDialog.IsDark = _isDarkMode;
         bool confirm = IosAlertDialog.Show(
@@ -11729,9 +13241,9 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
                 MDetailStatus.Foreground      = HexBrush(m.StatusColor);
                 MDetailStatusBadge.Background = HexBrush(m.StatusBg);
                 MDetailToggleBtn.Content    = m.ToggleStatusLabel;
-                MDetailToggleBtn.Background = m.Status == 1
-                    ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(217, 119,  6))
-                    : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb( 59, 130, 246));
+                MDetailToggleBtn.Background = m.IsLive
+                    ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(220,  38,  38))  // red = Deactivate
+                    : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb( 22, 163,  74)); // green = Activate
             }
 
             OnPropertyChanged(nameof(DashActiveMerchants));
@@ -18755,4 +20267,42 @@ ORDER BY c.Name, c.ID";
             SetActionBadge(ActionResultBadge, ActionResultText, false, $"✗  {ex.Message}");
         }
     }
+
+} // end MainWindow
+
+// ── Verify Merchant — health-check row model ──────────────────────────────
+public class HealthCheckRow : System.ComponentModel.INotifyPropertyChanged
+{
+    private string _icon = ""; private string _label = ""; private string _detail = ""; private string _color = "#6B7280";
+    public string Icon        { get => _icon;  set { _icon  = value; PC(); } }
+    public string Label       { get => _label; set { _label = value; PC(); } }
+    public string Detail      { get => _detail; set { _detail = value; PC(); } }
+    public string DetailColor { get => _color; set { _color  = value; PC(); } }
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+    private void PC([System.Runtime.CompilerServices.CallerMemberName] string? n = null)
+        => PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(n));
+}
+
+// ── Verify Merchant — member detail row model ─────────────────────────────
+public class MemberDetailRow
+{
+    public string MemberId    { get; set; } = "";
+    public string First       { get; set; } = "";
+    public string Last        { get; set; } = "";
+    public string FullName    { get; set; } = "";
+    public string Email       { get; set; } = "";
+    public string Phone       { get; set; } = "";
+    public string Title       { get; set; } = "";
+    public string Ownership   { get; set; } = "";
+    public string Address     { get; set; } = "";
+    public string City        { get; set; } = "";
+    public string State       { get; set; } = "";
+    public string Zip         { get; set; } = "";
+    public string Country     { get; set; } = "";
+    public string Dob         { get; set; } = "";
+    public string Type        { get; set; } = "";
+    public string Created     { get; set; } = "";
+    public string StatusLabel { get; set; } = "";
+    public string StatusColor { get; set; } = "#6B7280";
+    public bool   HasGaps     { get; set; }
 }

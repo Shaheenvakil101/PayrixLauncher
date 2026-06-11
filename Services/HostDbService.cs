@@ -624,6 +624,7 @@ ORDER BY c.Name";
     }
 
     public static string SanitizeConnectionStringPublic(string cs) => SanitizeConnectionString(cs);
+    public static string ReplaceInitialCatalogPublic(string connStr, string catalog) => ReplaceInitialCatalog(connStr, catalog);
     private static string SanitizeConnectionString(string cs)
     {
         cs = cs.Trim().Trim('"').Trim('\'');

@@ -53,6 +53,7 @@ public class AppSettings
     // BQE Core account sign-in (JWT for API calls)
     public string BqeCoreBaseUrl    { get; set; } = "";   // e.g. https://local.bqecore.com:8443
     public string BqeLoginEmail     { get; set; } = "";
+    public string BqeLoginPassword  { get; set; } = "";   // stored so user doesn't retype each session
     public string BqeJwtToken       { get; set; } = "";   // stored after successful sign-in
     public string BqeLoggedInUser   { get; set; } = "";   // display name
 
@@ -85,6 +86,10 @@ public class AppSettings
     public bool   DisbSectionPinned       { get; set; } = false;
     public bool   IsDarkMode           { get; set; } = false;
     public bool   IsRestrictedMode     { get; set; } = true;   // true = webhook-only (for shared users)
+
+    // Tab visibility — list of nav-button Tag numbers that are hidden (empty = all visible)
+    // Overview (0) and Settings (8) are always visible regardless of this list.
+    public List<int> HiddenTabs        { get; set; } = [];
     public double WindowWidth          { get; set; } = 1250;
     public double WindowHeight         { get; set; } = 960;
     public double WindowLeft           { get; set; } = double.NaN;

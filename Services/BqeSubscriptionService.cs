@@ -171,13 +171,14 @@ public static class BqeSubscriptionService
     /// Places an order for a new subscription.
     /// Uses NoCreditCard / admin path (PaymentOption = 2).
     /// </summary>
-    public static async Task<(bool success, string? error)>
+    public static async Task<(bool success, string? error, string rawLog)>
         PlaceOrderAsync(string baseUrl, string token,
                         Guid companyId, Guid packageId, Guid planId,
                         int licenses, DateTime startsOn, bool autoRenew,
                         Guid? regionId = null)
     {
         using var client = MakeClient(baseUrl, token);
+        var log = new System.Text.StringBuilder();
 
         // Mirrors BQECoreAdminPortal NoCreditCard/AdminPortal path.
         // RequestSource: Core=0, AdminPortal=1 — must be AdminPortal so noCardSource check passes
@@ -216,54 +217,63 @@ public static class BqeSubscriptionService
             }
         };
 
-        var orderJson = System.Text.Json.JsonSerializer.Serialize(order);
+        var orderJson = System.Text.Json.JsonSerializer.Serialize(order,
+            new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        log.AppendLine($"=== PlaceOrder Request ===");
+        log.AppendLine($"URL: {HostRoot(baseUrl)}/BQECoreAdminPortalAPI/API/CoreHost/PlaceOrder");
+        log.AppendLine($"Body:\n{orderJson}");
+        log.AppendLine();
+
         try
         {
-            var content = new StringContent(orderJson, System.Text.Encoding.UTF8, "application/json");
             client.DefaultRequestHeaders.Accept.Clear();
             client.DefaultRequestHeaders.Accept.Add(
                 new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
 
-            // Try BQECoreHostApi first (AdminPortalLander) — direct path, no feature-flag check
-            // Then fall back to BQECoreAdminPortalAPI if needed
-            // Business Token only works with BQECoreAdminPortalAPI — Host API needs its own token
             string[] endpoints =
             [
-                "/BQECoreAdminPortalAPI/API/CoreHost/PlaceOrder",        // ← try this first
+                "/BQECoreAdminPortalAPI/API/CoreHost/PlaceOrder",
             ];
 
             foreach (var ep in endpoints)
             {
+                log.AppendLine($"→ POST {HostRoot(baseUrl)}{ep}");
                 var resp = await client.PostAsync(ep, new StringContent(orderJson, System.Text.Encoding.UTF8, "application/json"))
                     .ConfigureAwait(false);
                 var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+                log.AppendLine($"  HTTP {(int)resp.StatusCode}");
+                log.AppendLine($"  Response: {body[..Math.Min(body.Length, 1000)]}");
 
                 if (resp.IsSuccessStatusCode)
                 {
                     // HTTP 200 with error body still counts as failure
                     if (!string.IsNullOrWhiteSpace(body) && body != "null" && body.Length > 4 &&
                         (body.Contains("\"ExceptionMessage\"") || body.Contains("not allowed") ||
-                         body.Contains("BQEException") || body.Contains("\"error\"")))
-                        return (false, $"HTTP 200 but error [{ep}]:\n{StripHtml(body, 500)}");
-                    // Return body for verification — caller can check if subscription was actually saved
-                    return (true, string.IsNullOrWhiteSpace(body) || body == "null"
-                        ? null
-                        : $"Note: {body[..Math.Min(body.Length, 200)]}");
+                         body.Contains("BQEException") || body.Contains("\"error\"") ||
+                         body.Contains("\"IsSuccess\":false") || body.Contains("\"Success\":false") ||
+                         body.Contains("\"status\":0") || body.Contains("\"Status\":0")))
+                    {
+                        log.AppendLine("  → Detected error in HTTP 200 body.");
+                        return (false, $"HTTP 200 but error [{ep}]:\n{StripHtml(body, 600)}", log.ToString());
+                    }
+                    log.AppendLine("  → Success.");
+                    return (true, null, log.ToString());
                 }
 
                 // 404 = endpoint doesn't exist → try next
-                if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) continue;
+                if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) { log.AppendLine("  → 404, trying next."); continue; }
 
-                // Show full body for diagnosis — strip HTML tags so the message is readable
                 var bodyPreview = StripHtml(body, 600);
-                return (false, $"HTTP {(int)resp.StatusCode} [{ep}]:\n{bodyPreview}");
+                return (false, $"HTTP {(int)resp.StatusCode} [{ep}]:\n{bodyPreview}", log.ToString());
             }
 
-            return (false, "All PlaceOrder endpoints returned 404 — check BQECoreHostApi is running");
+            return (false, "All PlaceOrder endpoints returned 404 — check BQECoreAdminPortalAPI is running", log.ToString());
         }
         catch (Exception ex)
         {
-            return (false, $"{ex.Message}\nRequest: {orderJson}");
+            log.AppendLine($"Exception: {ex.Message}");
+            return (false, $"{ex.Message}\nRequest: {orderJson}", log.ToString());
         }
     }
 

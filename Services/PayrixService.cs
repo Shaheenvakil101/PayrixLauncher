@@ -1549,9 +1549,282 @@ public class PayrixService
         return (all, lastError);
     }
 
+    // ── Single-call full merchant signup via POST /logins ────────────────────
+    // This is the same flow BQE Core uses: one atomic call that creates login + entity +
+    // merchant + member + bank account together.  Payrix auto-boards the merchant
+    // (sets status=2 / autoBoarded=1) immediately for sandbox because all required
+    // KYC data arrives at once.  Separate /entities→/merchants→/members calls leave
+    // the merchant at status=0 because Payrix never receives the member data atomically.
+
+    /// <summary>
+    /// Replicates BQE Core's Payrix merchant signup: POST /logins with a fully-nested
+    /// entity + merchant + member + bank-account payload.
+    ///
+    /// On success, Payrix auto-boards the merchant (status=2, autoBoarded=1).
+    /// Returns the new entity ID (to look up the merchant via GET /merchants?entity=...).
+    ///
+    /// Response does not include the merchant ID directly — caller must call
+    /// GetMerchantByEntityAsync after a brief delay to retrieve it.
+    /// </summary>
+    public async Task<(string? entityId, string? loginId, string rawJson, string? error)>
+        SignUpViaLoginsAsync(
+            // Login credentials (Payrix portal login for the merchant)
+            string loginEmail,
+            string loginPassword    = "BqeTest@2024!",  // default sandbox password
+            string loginFirst       = "Owner",
+            string loginLast        = "Admin",
+            // Entity (company) details
+            string companyName      = "BQE Merchant",
+            string companyCustom    = "",   // REQUIRED: "accountId,companyId" — used for webhook routing
+            string companyEmail     = "",
+            string companyPhone     = "2132000000",
+            string companyAddress1  = "123 Main St",
+            string companyCity      = "Los Angeles",
+            string companyState     = "CA",
+            string companyZip       = "90001",
+            string companyEin       = "897978978",
+            string companyWebsite   = "https://www.bqe.com",
+            // Merchant details
+            string dba              = "",
+            string mcc              = "8931",
+            // Owner/member details
+            string ownerFirst       = "Owner",
+            string ownerLast        = "Member",
+            string ownerEmail       = "",
+            string ownerPhone       = "",
+            string ownerAddress1    = "",
+            string ownerCity        = "",
+            string ownerState       = "CA",
+            string ownerZip         = "",
+            string ownerDob         = "19841031",   // YYYYMMDD
+            string ownerSsn         = "767567272",  // 9-digit test SSN
+            int    ownerOwnership   = 100,
+            string ownerTitle       = "President",
+            // Bank / settlement account (ACH checking)
+            string routingNumber    = "021000021",   // Chase test routing
+            string accountNumber    = "123456789012")
+    {
+        var json = "{}";
+        try
+        {
+            static string R(string? v, string fb) => string.IsNullOrWhiteSpace(v) ? fb : v.Trim();
+            var ssnDigits = System.Text.RegularExpressions.Regex.Replace(ownerSsn ?? "", @"\D", "");
+            if (ssnDigits.Length != 9) ssnDigits = "767567272";
+
+            var body = new System.Collections.Generic.Dictionary<string, object>
+            {
+                ["roles"]        = 1,
+                ["username"]     = System.Text.RegularExpressions.Regex.Replace(
+                                     R(loginEmail, "merchant@bqe.com").Split('@')[0],
+                                     @"[^a-zA-Z0-9]", "")
+                                 + DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                ["password"]     = loginPassword,
+                ["first"]        = R(loginFirst,  "Owner"),
+                ["last"]         = R(loginLast,   "Admin"),
+                ["email"]        = R(loginEmail,  "merchant@bqe.com"),
+                ["portalAccess"] = 1,
+                ["entities"]     = new[]
+                {
+                    new System.Collections.Generic.Dictionary<string, object>
+                    {
+                        ["type"]      = 2,   // 2 = LLC (Sole Proprietor/type=0 rejected by Payrix even with 100% ownership)
+                        ["name"]      = R(companyName, "BQE Merchant"),
+                        ["ein"]       = R(companyEin,  "897978978"),
+                        ["website"]   = R(companyWebsite, "https://www.bqe.com"),
+                        ["tcVersion"] = "1.0",
+                        ["currency"]  = "USD",
+                        ["custom"]    = R(companyCustom, ""),  // "accountId,companyId" — critical for webhook routing
+                        ["email"]     = R(companyEmail,  R(loginEmail, "merchant@bqe.com")),
+                        ["phone"]     = R(companyPhone,  "2132000000"),
+                        ["address1"]  = R(companyAddress1, "123 Main St"),
+                        ["city"]      = R(companyCity,     "Los Angeles"),
+                        ["state"]     = R(companyState,    "CA"),
+                        ["zip"]       = R(companyZip,      "90001"),
+                        ["country"]   = "USA",
+                        ["accounts"]  = new[]
+                        {
+                            new System.Collections.Generic.Dictionary<string, object>
+                            {
+                                ["primary"]  = 1,
+                                ["currency"] = "USD",
+                                ["account"]  = new System.Collections.Generic.Dictionary<string, object>
+                                {
+                                    ["method"]  = 8,             // 8 = CheckingAccount (PayrixMethod enum)
+                                    ["number"]  = R(accountNumber, "123456789012"),
+                                    ["routing"] = R(routingNumber, "021000021"),
+                                }
+                            }
+                        },
+                        ["merchant"]  = new System.Collections.Generic.Dictionary<string, object>
+                        {
+                            ["dba"]     = R(string.IsNullOrEmpty(dba) ? companyName : dba, "BQE MERCHANT").ToUpperInvariant(),
+                            ["new"]     = 1,
+                            ["mcc"]     = R(mcc, "8931"),
+                            ["status"]  = 0,  // Payrix sets status=2 internally on boarding approval
+                            ["members"] = new[]
+                            {
+                                new System.Collections.Generic.Dictionary<string, object>
+                                {
+                                    ["first"]     = R(ownerFirst,    "Owner"),
+                                    ["last"]      = R(ownerLast,     "Member"),
+                                    ["email"]     = R(ownerEmail,    R(loginEmail, "merchant@bqe.com")),
+                                    ["phone"]     = R(ownerPhone,    R(companyPhone, "2132000000")),
+                                    ["address1"]  = R(ownerAddress1, R(companyAddress1, "123 Main St")),
+                                    ["city"]      = R(ownerCity,     R(companyCity, "Los Angeles")),
+                                    ["state"]     = R(ownerState,    "CA"),
+                                    ["zip"]       = R(ownerZip,      R(companyZip, "90001")),
+                                    ["country"]   = "USA",
+                                    ["title"]     = R(ownerTitle,    "President"),
+                                        ["primary"]   = 1,       // integer, not string — required for portal to show member details
+                                    ["ownership"] = ownerOwnership,
+                                    ["ssn"]       = long.Parse(ssnDigits),                          // integer, not string
+                                    ["dob"]       = int.Parse(R(ownerDob, "19841031")),              // integer YYYYMMDD, not string
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            var payload = JsonSerializer.Serialize(body, JsonOptions);
+            var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+            var resp    = await _client.PostAsync("/logins", content).ConfigureAwait(false);
+            json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            if (!resp.IsSuccessStatusCode)
+                return (null, null, $"REQUEST:\n{payload}\n\nRESPONSE:\n{json}",
+                    ExtractPayrixError(json) ?? $"HTTP {(int)resp.StatusCode}");
+
+            // Parse entity ID and merchant ID from the /logins response.
+            //
+            // When auto-boarding fires, Payrix returns a MERCHANT object in data[0]:
+            //   response.data[0].id     → merchant ID  (t1_mer_...)
+            //   response.data[0].entity → entity ID    (t1_ent_...)
+            //
+            // Fallback: older/non-boarding flow returns a LOGIN object:
+            //   response.data[0].entities[0].id              → entity ID
+            //   response.data[0].entities[0].merchant.id     → merchant ID
+            //
+            // Also check response.alert.merchantId as a last resort.
+            string? entityId = null, loginId = null, merchantId = null;
+            try
+            {
+                var doc      = System.Text.Json.JsonDocument.Parse(json);
+                var response = doc.RootElement.GetProperty("response");
+                var data     = response.GetProperty("data");
+
+                if (data.ValueKind == System.Text.Json.JsonValueKind.Array && data.GetArrayLength() > 0)
+                {
+                    var first = data[0];
+
+                    // Detect which format.
+                    // A merchant object has an "entity" string field AND its own "id" starts with "_mer_".
+                    // A login object also has an "entity" string field but its "id" starts with "_log_".
+                    // Check the id prefix to disambiguate.
+                    var rawId = first.TryGetProperty("id", out var rawIdEl) ? rawIdEl.GetString() : null;
+                    bool looksLikeMerchant = rawId != null &&
+                        (rawId.Contains("_mer_", StringComparison.OrdinalIgnoreCase));
+
+                    if (looksLikeMerchant &&
+                        first.TryGetProperty("entity", out var entField) &&
+                        entField.ValueKind == System.Text.Json.JsonValueKind.String)
+                    {
+                        // Auto-boarded path — data[0] IS the merchant object
+                        merchantId = rawId;
+                        entityId   = entField.GetString();
+                    }
+                    else
+                    {
+                        // Login-object path — data[0] is the login with nested entities
+                        loginId = rawId;
+
+                        if (first.TryGetProperty("entities", out var ents) &&
+                            ents.ValueKind == System.Text.Json.JsonValueKind.Array &&
+                            ents.GetArrayLength() > 0)
+                        {
+                            var ent0 = ents[0];
+                            entityId = ent0.TryGetProperty("id", out var eid) ? eid.GetString() : null;
+
+                            if (ent0.TryGetProperty("merchant", out var mer) &&
+                                mer.ValueKind == System.Text.Json.JsonValueKind.Object)
+                                merchantId = mer.TryGetProperty("id", out var mrid) ? mrid.GetString() : null;
+                        }
+
+                        // Also check login's entity string field for entityId fallback
+                        if (entityId == null &&
+                            first.TryGetProperty("entity", out var loginEnt) &&
+                            loginEnt.ValueKind == System.Text.Json.JsonValueKind.String)
+                            entityId = loginEnt.GetString();
+                    }
+                }
+
+                // Last resort: pull from response.alert
+                if (merchantId == null &&
+                    response.TryGetProperty("alert", out var alert) &&
+                    alert.ValueKind == System.Text.Json.JsonValueKind.Object)
+                {
+                    merchantId ??= alert.TryGetProperty("merchantId", out var amid) ? amid.GetString() : null;
+                }
+            }
+            catch { /* IDs will be retrieved via GET /entities?custom lookup fallback */ }
+
+            // Return "entityId|merchantId" so the caller can skip the FindEntityByCustomAsync lookup
+            var combinedId = merchantId != null ? $"{entityId}|{merchantId}" : entityId;
+            return (combinedId, loginId, $"REQUEST:\n{payload}\n\nRESPONSE:\n{json}", null);
+        }
+        catch (Exception ex)
+        {
+            return (null, null, json, $"SignUpViaLogins error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Searches Payrix entities by the custom field (format: "accountId,companyId").
+    /// Uses a LIKE search on the companyId portion — same as BQE Core's LinkPayrixMerchant.
+    /// Returns the first matching entity.
+    /// </summary>
+    public async Task<(string? entityId, string? entityName, string rawJson, string? error)>
+        FindEntityByCustomAsync(string accountId, string companyId)
+    {
+        var json = "{}";
+        try
+        {
+            // Payrix LIKE search: custom contains the companyId
+            var search = Uri.EscapeDataString($"%{companyId}%");
+            var resp   = await _client.GetAsync(
+                $"/entities?search[custom][like]={search}&page[limit]=10").ConfigureAwait(false);
+            json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            if (!resp.IsSuccessStatusCode)
+                return (null, null, json, ExtractPayrixError(json) ?? $"HTTP {(int)resp.StatusCode}");
+
+            var doc  = System.Text.Json.JsonDocument.Parse(json);
+            var data = doc.RootElement.GetProperty("response").GetProperty("data");
+            if (data.ValueKind == System.Text.Json.JsonValueKind.Array && data.GetArrayLength() > 0)
+            {
+                // Pick the entity whose custom contains both accountId AND companyId
+                foreach (var ent in data.EnumerateArray())
+                {
+                    var customVal = ent.TryGetProperty("custom", out var cv) ? cv.GetString() ?? "" : "";
+                    if (customVal.Contains(companyId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var eid   = ent.TryGetProperty("id",   out var eid2)   ? eid2.GetString()  : null;
+                        var ename = ent.TryGetProperty("name", out var ename2) ? ename2.GetString() : null;
+                        if (!string.IsNullOrEmpty(eid))
+                            return (eid, ename, json, null);
+                    }
+                }
+            }
+            return (null, null, json, $"No entity found with custom containing companyId={companyId}");
+        }
+        catch (Exception ex) { return (null, null, json, $"FindEntity error: {ex.Message}"); }
+    }
+
     /// <summary>
     /// Creates a Payrix merchant record for an existing entity.
-    /// In sandbox, sets autoBoarded=1 and status=2 (Boarded) so it activates immediately.
+    /// Sets all fields required for a merchant to accept transactions.
+    /// Note: autoBoarded and status=2 are Payrix-internal fields that cannot be set via API;
+    /// the merchant may still require Payrix boarding approval before processing live transactions.
     /// </summary>
     public async Task<(string? merchantId, string rawJson, string? error)>
         CreateMerchantAsync(
@@ -1565,17 +1838,21 @@ public class PayrixService
         var json = "{}";
         try
         {
-            // status="1" (string) = Board Immediately per Payrix docs
             // dba is REQUIRED — merchant won't create without it
             // "new": 0 = existing business with prior processing history
+            // All volume/ticket/environment fields set to maximise auto-boarding chance
             var body = new System.Collections.Generic.Dictionary<string, object>
             {
-                ["entity"]      = entityId,
-                ["dba"]         = string.IsNullOrEmpty(dba) ? "BQE MERCHANT" : dba.ToUpperInvariant(),
-                ["mcc"]         = mcc,
-                ["status"]      = "1",        // string "1" = Board Immediately
-                ["environment"] = environment,
-                ["new"]         = 0,
+                ["entity"]        = entityId,
+                ["dba"]           = string.IsNullOrEmpty(dba) ? "BQE MERCHANT" : dba.ToUpperInvariant(),
+                ["mcc"]           = mcc,
+                ["environment"]   = environment,
+                ["new"]           = 0,
+                ["annualCCSales"] = 100000,
+                ["avgTicket"]     = 150,
+                ["established"]   = "20200101",
+                ["percentKeyed"]  = 100,
+                ["percentEcomm"]  = 100,
                 ["chargebackNotificationEmail"] = string.IsNullOrEmpty(email) ? "merchant@bqe.com" : email
             };
 
@@ -1626,6 +1903,91 @@ public class PayrixService
                 : null);
         }
         catch (Exception ex) { return (null, json, $"CreateMerchant error: {ex.Message}\nResponse: {json[..Math.Min(200,json.Length)]}"); }
+    }
+
+    /// <summary>
+    /// Post-creation merchant configuration steps:
+    /// 1. PUT extended fields (annualCCSales, avgTicket, established, environment, percentKeyed)
+    /// 2. POST /accounts to add a settlement bank account (Payrix internal structure)
+    /// 3. Attempt PUT status=1 so Payrix internal system can pick it up for boarding
+    ///
+    /// Note: status=2 (Boarded) and autoBoarded=1 are Payrix-internal and cannot be set via API.
+    /// Returns a multi-step log string and any error.
+    /// </summary>
+    public async Task<(string log, string? error)> ConfigureMerchantAsync(
+        string merchantId,
+        string entityId,
+        string email          = "merchant@bqe.com",
+        string routingNumber  = "021000021",   // Chase test routing number (ACH)
+        string accountNumber  = "123456789012") // ACH checking account number
+    {
+        var log = new System.Text.StringBuilder();
+        string? lastError = null;
+
+        // ── Step 1: PUT extended merchant fields + status=1 ───────────────────
+        // Setting status=1 signals Payrix to pick up the merchant for boarding review.
+        // status=2 (Boarded) and autoBoarded=1 are set internally by Payrix; they cannot
+        // be forced via API, but having status=1 + member + bank account triggers auto-boarding
+        // in the Payrix sandbox.
+        try
+        {
+            var body = new System.Collections.Generic.Dictionary<string, object>
+            {
+                ["annualCCSales"] = 100000,
+                ["avgTicket"]     = 150,
+                ["established"]   = "20200101",
+                ["environment"]   = "ecommerce",
+                ["percentKeyed"]  = 100,
+                ["percentEcomm"]  = 100,
+                ["status"]        = 1,
+            };
+            var payload = System.Text.Json.JsonSerializer.Serialize(body, JsonOptions);
+            var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+            var resp    = await _client.PutAsync($"/merchants/{Uri.EscapeDataString(merchantId)}", content).ConfigureAwait(false);
+            var raw     = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var err     = ExtractPayrixError(raw);
+            log.AppendLine($"[1] PUT /merchants/{merchantId} → HTTP {(int)resp.StatusCode} {(err != null ? $"WARN: {err}" : "OK")}");
+        }
+        catch (Exception ex) { log.AppendLine($"[1] PUT /merchants error: {ex.Message}"); }
+
+        // ── Step 2: POST /accounts — ACH settlement bank account ─────────────
+        // Payrix /accounts nested account object:
+        //   method=8  → ACH checking (proven working; method=1/2/3 are credit/debit types)
+        //   routing   → string routing number (e.g. "021000021" for Chase)
+        //   number    → bank account number string (numeric, any length)
+        // The entity field links the account to the merchant's entity for payout routing.
+        try
+        {
+            var acctBody = new System.Collections.Generic.Dictionary<string, object>
+            {
+                ["entity"]   = entityId,
+                ["primary"]  = 1,
+                ["type"]     = "all",
+                ["currency"] = "USD",
+                ["account"]  = new System.Collections.Generic.Dictionary<string, object>
+                {
+                    ["method"]  = 8,             // ACH checking
+                    ["routing"] = routingNumber, // "021000021" (Chase) — must be string, not int enum
+                    ["number"]  = accountNumber, // bank account number
+                }
+            };
+            var payload = System.Text.Json.JsonSerializer.Serialize(acctBody, JsonOptions);
+            var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+            var resp    = await _client.PostAsync("/accounts", content).ConfigureAwait(false);
+            var raw     = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var acctId  = "";
+            try
+            {
+                var doc = System.Text.Json.JsonDocument.Parse(raw);
+                acctId = doc.RootElement.GetProperty("response").GetProperty("data")[0].GetProperty("id").GetString() ?? "";
+            }
+            catch { }
+            var err = string.IsNullOrEmpty(acctId) ? (ExtractPayrixError(raw) ?? "no ID in response") : null;
+            log.AppendLine($"[2] POST /accounts → HTTP {(int)resp.StatusCode} {(err != null ? $"WARN: {err}" : $"account={acctId}")}");
+        }
+        catch (Exception ex) { log.AppendLine($"[2] POST /accounts error: {ex.Message}"); }
+
+        return (log.ToString(), lastError);
     }
 
     /// <summary>
@@ -1785,6 +2147,25 @@ public class PayrixService
         }
     }
 
+    /// <summary>Raw GET helper — returns the response body string.</summary>
+    public async Task<string> GetRawAsync(string path)
+    {
+        _client.DefaultRequestHeaders.Accept.Clear();
+        _client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        var resp = await _client.GetAsync(path).ConfigureAwait(false);
+        return await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>Raw PUT helper — sends JSON body and returns the response body string.</summary>
+    public async Task<string> PutRawAsync(string path, string jsonBody)
+    {
+        var content = new System.Net.Http.StringContent(jsonBody, System.Text.Encoding.UTF8, "application/json");
+        _client.DefaultRequestHeaders.Accept.Clear();
+        _client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        var resp = await _client.PutAsync(path, content).ConfigureAwait(false);
+        return await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Finds the merchant record whose entity field matches <paramref name="entityId"/>.
     /// Tries API filter first; falls back to page-walk (up to 200 merchants).
@@ -1795,39 +2176,39 @@ public class PayrixService
         var json = "{}";
         try
         {
-            // Strategy 1: API filter
-            var filterResp = await _client.GetAsync(
-                $"/merchants?search[entity][eq]={Uri.EscapeDataString(entityId)}&page[limit]=50&page[number]=1")
-                .ConfigureAwait(false);
-            var filterJson = await filterResp.Content.ReadAsStringAsync().ConfigureAwait(false);
-            if (filterResp.IsSuccessStatusCode)
+            // Strategy 1: direct entity filter — parse raw JSON and match on "entity" field
+            // Do NOT use a fallback that returns any random merchant if the filter finds no match.
+            var filterJson = await GetRawAsync(
+                $"/merchants?search[entity][eq]={Uri.EscapeDataString(entityId)}&page[limit]=50");
+            json = filterJson;
+            var fd  = JsonDocument.Parse(filterJson);
+            var arr = fd.RootElement.GetProperty("response").GetProperty("data");
+            foreach (var el in arr.EnumerateArray())
             {
-                var fp  = JsonSerializer.Deserialize<PayrixMerchantResponse>(filterJson, JsonOptions);
-                var hit = fp?.Response?.Data?.FirstOrDefault(m =>
-                    string.Equals(m.Entity, entityId, StringComparison.OrdinalIgnoreCase));
-                if (hit is not null) return (hit, filterJson, null);
-
-                // API may not support filter — check if any result and try page-walk
-                if (fp?.Response?.Data?.Count > 0)
+                var elEntity = el.TryGetProperty("entity", out var ev) ? ev.GetString() : null;
+                if (string.Equals(elEntity, entityId, StringComparison.OrdinalIgnoreCase))
                 {
-                    var any = fp.Response.Data.FirstOrDefault();
-                    if (any is not null) return (any, filterJson, null);
+                    var m = JsonSerializer.Deserialize<Merchant>(el.GetRawText(), JsonOptions);
+                    if (m is not null) return (m, filterJson, null);
                 }
             }
 
-            // Strategy 2: page-walk up to 4 pages (200 merchants)
-            for (int page = 1; page <= 4; page++)
+            // Strategy 2: page-walk — match strictly on entity field, never return wrong merchant
+            for (int page = 1; page <= 5; page++)
             {
-                var pr = await _client.GetAsync(
-                    $"/merchants?page[limit]=50&page[number]={page}").ConfigureAwait(false);
-                var pj = await pr.Content.ReadAsStringAsync().ConfigureAwait(false);
-                if (!pr.IsSuccessStatusCode) break;
-                var pp   = JsonSerializer.Deserialize<PayrixMerchantResponse>(pj, JsonOptions);
-                var data = pp?.Response?.Data;
-                if (data is null || data.Count == 0) break;
-                var match = data.FirstOrDefault(m =>
-                    string.Equals(m.Entity, entityId, StringComparison.OrdinalIgnoreCase));
-                if (match is not null) return (match, pj, null);
+                var pj = await GetRawAsync($"/merchants?page[limit]=50&page[number]={page}");
+                var pd = JsonDocument.Parse(pj);
+                var pa = pd.RootElement.GetProperty("response").GetProperty("data");
+                if (pa.GetArrayLength() == 0) break;
+                foreach (var el in pa.EnumerateArray())
+                {
+                    var elEntity = el.TryGetProperty("entity", out var ev) ? ev.GetString() : null;
+                    if (string.Equals(elEntity, entityId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var m = JsonSerializer.Deserialize<Merchant>(el.GetRawText(), JsonOptions);
+                        if (m is not null) return (m, pj, null);
+                    }
+                }
             }
 
             return (null, json, $"No merchant found for entity {entityId}");
@@ -1929,10 +2310,456 @@ public class PayrixService
     }
 
     /// <summary>
+    /// GET /members?merchant={merchantId} — returns all members on the merchant.
+    /// Used by the health check to confirm at least one owner/principal exists.
+    /// </summary>
+    public async Task<(int count, string? firstMemberId, string rawJson, string? error)>
+        GetMembersForMerchantAsync(string merchantId)
+    {
+        var (members, rawJson, err) = await GetMembersDetailAsync(merchantId);
+        var first = members.Count > 0 && members[0].TryGetValue("id", out var id) ? id : null;
+        return (members.Count, first, rawJson, err);
+    }
+
+    /// <summary>
+    /// PUT /members/{id} — updates an existing member record with new details.
+    /// Pass only the fields to change; omitted fields are left as-is by Payrix.
+    /// </summary>
+    public async Task<(string rawJson, string? error)> UpdateMemberAsync(
+        string memberId,
+        string first, string last, string email, string phone,
+        string address1, string city, string state, string zip, string country,
+        string dob, string ssn, int ownership, string title)
+    {
+        var json = "{}";
+        try
+        {
+            var ssnDigits = System.Text.RegularExpressions.Regex.Replace(ssn ?? "", @"\D", "");
+            var body = new System.Collections.Generic.Dictionary<string, object>();
+
+            void Add(string key, string? val) { if (!string.IsNullOrWhiteSpace(val)) body[key] = val; }
+            Add("first",    first);
+            Add("last",     last);
+            Add("email",    email);
+            Add("phone",    phone);
+            Add("address1", address1);
+            Add("city",     city);
+            Add("state",    state);
+            Add("zip",      zip);
+            Add("country",  string.IsNullOrWhiteSpace(country) ? "USA" : country);
+            Add("dob",      dob);
+            Add("title",    title);
+            if (ssnDigits.Length == 9) body["ssn"] = ssnDigits;
+            if (ownership > 0) body["ownership"] = ownership;
+
+            var payload = JsonSerializer.Serialize(body, JsonOptions);
+            var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+
+            // Try PUT first, fall back to PATCH
+            HttpResponseMessage resp;
+            string respBody;
+            resp = await _client.PutAsync($"/members/{Uri.EscapeDataString(memberId)}", content).ConfigureAwait(false);
+            respBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            if (resp.StatusCode == System.Net.HttpStatusCode.MethodNotAllowed)
+            {
+                content  = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+                var req  = new HttpRequestMessage(new HttpMethod("PATCH"), $"/members/{Uri.EscapeDataString(memberId)}") { Content = content };
+                resp     = await _client.SendAsync(req).ConfigureAwait(false);
+                respBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            }
+
+            json = $"REQ:\n{payload}\n\nHTTP {(int)resp.StatusCode}\nRESP:\n{respBody}";
+            if (!resp.IsSuccessStatusCode)
+                return (json, ExtractPayrixError(respBody) ?? $"HTTP {(int)resp.StatusCode}");
+
+            if (respBody.Contains("\"errors\"") && !respBody.Contains("\"errors\":[]"))
+                return (json, ExtractPayrixError(respBody) ?? "Update returned errors");
+
+            return (json, null);
+        }
+        catch (Exception ex) { return (json, ex.Message); }
+    }
+
+    /// <summary>
+    /// GET /members?merchant={merchantId} — returns full member details (name, email, type, ownership, title, status).
+    /// </summary>
+    public async Task<(List<System.Collections.Generic.Dictionary<string,string>> members, string rawJson, string? error)>
+        GetMembersDetailAsync(string merchantId)
+    {
+        var json = "{}";
+        var result = new System.Collections.Generic.List<System.Collections.Generic.Dictionary<string,string>>();
+        try
+        {
+            var resp = await _client.GetAsync(
+                $"/members?merchant={Uri.EscapeDataString(merchantId)}&limit=20").ConfigureAwait(false);
+            json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+                return (result, json, $"HTTP {(int)resp.StatusCode}");
+
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("response", out var r) ||
+                !r.TryGetProperty("data", out var data) ||
+                data.ValueKind != JsonValueKind.Array)
+                return (result, json, null);
+
+            string S(JsonElement el, string key) =>
+                el.TryGetProperty(key, out var v) && v.ValueKind != JsonValueKind.Null
+                    ? v.ToString() : "";
+
+            foreach (var m in data.EnumerateArray())
+            {
+                var d = new System.Collections.Generic.Dictionary<string, string>
+                {
+                    ["id"]        = S(m, "id"),
+                    ["first"]     = S(m, "first"),
+                    ["last"]      = S(m, "last"),
+                    ["email"]     = S(m, "email"),
+                    ["phone"]     = S(m, "phone"),
+                    ["title"]     = S(m, "title"),
+                    ["ownership"] = S(m, "ownership"),
+                    ["type"]      = S(m, "type"),
+                    ["status"]    = S(m, "status"),
+                    ["created"]   = S(m, "created"),
+                    ["address1"]  = S(m, "address1"),
+                    ["city"]      = S(m, "city"),
+                    ["state"]     = S(m, "state"),
+                    ["zip"]       = S(m, "zip"),
+                    ["country"]   = S(m, "country"),
+                };
+                result.Add(d);
+            }
+            return (result, json, null);
+        }
+        catch (Exception ex) { return (result, json, ex.Message); }
+    }
+
+    /// <summary>
+    /// POST /tokens — creates a test token with a Visa test card number.
+    /// Returns (tokenId, rawJson, error).
+    /// Success means the merchant is correctly boarded and accepting tokens.
+    /// </summary>
+    public async Task<(string? tokenId, string rawJson, string? error)>
+        TestTokenAsync(string merchantId)
+    {
+        var json = "{}";
+        try
+        {
+            var body = new
+            {
+                merchant  = merchantId,
+                number    = "4111111111111111",   // Visa test card
+                cvv       = "999",
+                expiration = "1230",               // MM/YY → December 2030
+                type      = 1,                     // 1 = credit card
+                mode      = "token"
+            };
+            var content = new System.Net.Http.StringContent(
+                JsonSerializer.Serialize(body, JsonOptions),
+                System.Text.Encoding.UTF8, "application/json");
+            var resp = await _client.PostAsync("/tokens", content).ConfigureAwait(false);
+            json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            if (!resp.IsSuccessStatusCode)
+                return (null, json, ExtractPayrixError(json) ?? $"HTTP {(int)resp.StatusCode}");
+
+            using var doc = JsonDocument.Parse(json);
+            string? tokenId = null;
+            if (doc.RootElement.TryGetProperty("response", out var r) &&
+                r.TryGetProperty("data", out var d) &&
+                d.ValueKind == JsonValueKind.Array && d.GetArrayLength() > 0)
+                tokenId = d[0].TryGetProperty("id", out var tp) ? tp.GetString() : null;
+
+            return (tokenId, json, string.IsNullOrEmpty(tokenId)
+                ? (ExtractPayrixError(json) ?? "Token created but ID not found in response")
+                : null);
+        }
+        catch (Exception ex) { return (null, json, ex.Message); }
+    }
+
+    /// <summary>
     /// Pulls ALL error messages out of a Payrix response body, including the field name.
     /// Returns a formatted string like "[token] The referenced resource does not exist (code 5)"
     /// or null if no errors found / JSON is unparseable.
     /// </summary>
+    // ── Real payment test: tokenize + charge ─────────────────────────────────
+
+    /// <summary>
+    /// Step 1 of a real payment test: tokenize a card number for the given merchant.
+    /// Returns (tokenId, maskedNumber, rawJson, error).
+    /// Uses Visa test card 4111111111111111 by default.
+    /// </summary>
+    public async Task<(string? tokenId, string? maskedNumber, string rawJson, string? error)>
+        TokenizeCardAsync(
+            string merchantId,
+            string cardNumber  = "4111111111111111",
+            string expiration  = "1230",
+            string cvv         = "999",
+            string first       = "Test",
+            string last        = "User",
+            string address1    = "123 Main St",
+            string city        = "Los Angeles",
+            string state       = "CA",
+            string zip         = "90001",
+            string email       = "test@bqe.com")
+    {
+        var json = "{}";
+        try
+        {
+            // Only send the card fields — including customer-detail fields (first/last/email/address)
+            // causes Payrix to attempt a customer record lookup that fails with code 15 if the
+            // customer doesn't already exist in the system.
+            var body = new
+            {
+                merchant   = merchantId,
+                number     = cardNumber.Replace(" ", "").Replace("-", ""),
+                cvv        = cvv,
+                expiration = expiration,   // MMYY
+                type       = 1,            // 1 = credit card
+                mode       = "token",
+            };
+            var content = new System.Net.Http.StringContent(
+                JsonSerializer.Serialize(body, JsonOptions),
+                System.Text.Encoding.UTF8, "application/json");
+            var resp = await _client.PostAsync("/tokens", content).ConfigureAwait(false);
+            json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            if (!resp.IsSuccessStatusCode)
+                return (null, null, json, ExtractPayrixError(json) ?? $"HTTP {(int)resp.StatusCode}");
+
+            using var doc = JsonDocument.Parse(json);
+            string? tokenId = null, masked = null;
+            if (doc.RootElement.TryGetProperty("response", out var r) &&
+                r.TryGetProperty("data", out var d) &&
+                d.ValueKind == JsonValueKind.Array && d.GetArrayLength() > 0)
+            {
+                var t = d[0];
+                tokenId = t.TryGetProperty("id",      out var idP) ? idP.GetString() : null;
+                masked  = t.TryGetProperty("number",  out var nP)  ? nP.GetString()  : null;
+            }
+            if (string.IsNullOrEmpty(tokenId))
+                return (null, null, json, ExtractPayrixError(json) ?? "Token ID not found in response");
+
+            return (tokenId, masked, json, null);
+        }
+        catch (Exception ex) { return (null, null, json, ex.Message); }
+    }
+
+    /// <summary>
+    /// Step 2 of a real payment test: charge using a pre-created token.
+    /// type: 1=Sale, 2=Auth-only
+    /// amount is in cents (e.g. 100 = $1.00).
+    /// origin: 2=ECOMMERCE (required by Payrix; omitting causes "required_field" error).
+    /// currency: "USD" string — Payrix rejects ISO numeric "840".
+    /// Returns (txnId, status, rawJson, error).
+    /// </summary>
+    public async Task<(string? txnId, string? status, string rawJson, string? error)>
+        ChargeSaleAsync(
+            string merchantId,
+            string tokenId,
+            int    amountCents = 100,
+            int    type        = 1,
+            string currency    = "USD")   // "USD" string — NOT "840" (ISO numeric rejected by Payrix)
+    {
+        var json = "{}";
+        try
+        {
+            var body = new
+            {
+                merchant = merchantId,
+                token    = tokenId,
+                total    = amountCents,
+                type     = type,          // 1 = Sale
+                currency = currency,      // "USD" — Payrix requires string, not ISO-4217 numeric
+                origin   = 2,            // 2 = ECOMMERCE — required; omitting → "required_field" error
+            };
+            var content = new System.Net.Http.StringContent(
+                JsonSerializer.Serialize(body, JsonOptions),
+                System.Text.Encoding.UTF8, "application/json");
+            var resp = await _client.PostAsync("/txns", content).ConfigureAwait(false);
+            json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            if (!resp.IsSuccessStatusCode)
+                return (null, null, json, ExtractPayrixError(json) ?? $"HTTP {(int)resp.StatusCode}");
+
+            using var doc = JsonDocument.Parse(json);
+            string? txnId = null, status = null;
+            if (doc.RootElement.TryGetProperty("response", out var r) &&
+                r.TryGetProperty("data", out var d) &&
+                d.ValueKind == JsonValueKind.Array && d.GetArrayLength() > 0)
+            {
+                var t = d[0];
+                txnId  = t.TryGetProperty("id",     out var idP) ? idP.GetString()  : null;
+                status = t.TryGetProperty("status", out var stP) ? stP.GetRawText() : null;
+            }
+            if (string.IsNullOrEmpty(txnId))
+                return (null, null, json, ExtractPayrixError(json) ?? "Transaction ID not found in response");
+
+            return (txnId, status, json, null);
+        }
+        catch (Exception ex) { return (null, null, json, ex.Message); }
+    }
+
+    /// <summary>
+    /// Charges a card inline (no pre-created token) — POST /txns with nested payment object.
+    /// This is the most reliable path: avoids "token: no_such_record" caused by pending-token
+    /// state and skips the separate POST /tokens round-trip entirely.
+    /// origin=2 (ECOMMERCE) and currency="USD" are required Payrix fields.
+    /// Returns (txnId, status, rawJson, error).
+    /// </summary>
+    public async Task<(string? txnId, string? status, string rawJson, string? error)>
+        ChargeInlineAsync(
+            string merchantId,
+            string cardNumber  = "4111111111111111",
+            string expiration  = "1230",
+            string cvv         = "999",
+            string name        = "Test User",
+            int    amountCents = 100,
+            int    type        = 1,
+            string currency    = "USD")
+    {
+        var json = "{}";
+        try
+        {
+            var body = new System.Collections.Generic.Dictionary<string, object>
+            {
+                ["merchant"] = merchantId,
+                ["total"]    = amountCents,
+                ["type"]     = type,      // 1 = Sale
+                ["currency"] = currency,  // "USD"
+                ["origin"]   = 2,         // 2 = ECOMMERCE
+                ["payment"]  = new
+                {
+                    number     = cardNumber.Replace(" ", "").Replace("-", ""),
+                    cvv        = cvv,
+                    expiration = expiration,  // MMYY
+                    name       = name,
+                }
+            };
+            var content = new System.Net.Http.StringContent(
+                JsonSerializer.Serialize(body, JsonOptions),
+                System.Text.Encoding.UTF8, "application/json");
+            var resp = await _client.PostAsync("/txns", content).ConfigureAwait(false);
+            json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            if (!resp.IsSuccessStatusCode)
+                return (null, null, json, ExtractPayrixError(json) ?? $"HTTP {(int)resp.StatusCode}");
+
+            using var doc = JsonDocument.Parse(json);
+            string? txnId = null, status = null;
+            if (doc.RootElement.TryGetProperty("response", out var r) &&
+                r.TryGetProperty("data", out var d) &&
+                d.ValueKind == JsonValueKind.Array && d.GetArrayLength() > 0)
+            {
+                var t = d[0];
+                txnId  = t.TryGetProperty("id",       out var idP) ? idP.GetString()  : null;
+                status = t.TryGetProperty("status",   out var stP) ? stP.GetRawText() : null;
+            }
+            if (string.IsNullOrEmpty(txnId))
+                return (null, null, json, ExtractPayrixError(json) ?? "Transaction ID not found in response");
+
+            return (txnId, status, json, null);
+        }
+        catch (Exception ex) { return (null, null, json, ex.Message); }
+    }
+
+    /// <summary>
+    /// Runs a full real-payment test: charge $1.00 inline → void/cancel the charge.
+    ///
+    /// Uses inline payment (card details in the txn body) as the primary path — this avoids
+    /// the "token: no_such_record" error that occurs when a newly created token stays in
+    /// "pending" status and cannot be referenced immediately.
+    ///
+    /// Falls back to tokenize → charge if the merchant explicitly requires pre-tokenization.
+    /// Returns a detailed step-by-step result.
+    /// </summary>
+    public async Task<PaymentTestResult> RunPaymentTestAsync(
+        string merchantId,
+        string cardNumber  = "4111111111111111",
+        string expiration  = "1230",
+        string cvv         = "999",
+        int    amountCents = 100)
+    {
+        var result = new PaymentTestResult { MerchantId = merchantId, AmountCents = amountCents };
+
+        // ── Primary path: inline payment (no pre-created token) ──────────────
+        // Proved reliable in sandbox: avoids "pending" token no_such_record errors.
+        var (txnId, status, txnJson, txnErr) = await ChargeInlineAsync(
+            merchantId, cardNumber, expiration, cvv,
+            name: "Test User", amountCents: amountCents);
+        result.TxnJson = txnJson;
+
+        if (txnErr != null || string.IsNullOrEmpty(txnId))
+        {
+            // ── Fallback: tokenize first, then charge ─────────────────────────
+            // Some production merchants require a stored token for PCI compliance.
+            result.TokenJson = txnJson;  // preserve inline error in TokenJson for diagnosis
+            var (tokenId, masked, tokJson, tokErr) = await TokenizeCardAsync(
+                merchantId, cardNumber, expiration, cvv);
+            result.TokenJson = tokJson;
+
+            if (tokErr != null || string.IsNullOrEmpty(tokenId))
+            {
+                var hint = tokErr?.Contains("no_such_record", StringComparison.OrdinalIgnoreCase) == true
+                    ? "\n\nHint: If this is from BQE Core's UI (not PayrixTools), the app server has a\n" +
+                      "cached merchant ID. Run 'iisreset /restart' as Administrator to reload settings."
+                    : "";
+                result.Error = $"Inline charge failed: {txnErr}\nTokenize also failed: {tokErr}{hint}";
+                result.Stage = "tokenize";
+                return result;
+            }
+            result.TokenId    = tokenId;
+            result.MaskedCard = masked ?? cardNumber[..4] + "XXXXXXXX" + cardNumber[^4..];
+
+            (txnId, status, txnJson, txnErr) = await ChargeSaleAsync(merchantId, tokenId, amountCents);
+            result.TxnJson = txnJson;
+            if (txnErr != null || string.IsNullOrEmpty(txnId))
+            {
+                result.Error = $"Charge failed: {txnErr}";
+                result.Stage = "charge";
+                return result;
+            }
+        }
+
+        result.TxnId     = txnId;
+        result.TxnStatus = status;
+        result.MaskedCard ??= cardNumber[..4] + "XXXXXXXX" + cardNumber[^4..];
+
+        // ── Void: cancel immediately so no charge settles ─────────────────────
+        var (_, _, voidJson, voidErr) = await VoidTransactionAsync(txnId!);
+        result.VoidJson  = voidJson;
+        result.VoidError = voidErr;
+
+        result.Success = true;
+        return result;
+    }
+
+    /// <summary>
+    /// Voids/cancels a transaction by setting inactive=1 via PUT.
+    /// Payrix does not support a standalone void transaction type via POST /txns for
+    /// uncaptured auths; setting inactive=1 on the existing txn is the reliable cancel path.
+    /// </summary>
+    public async Task<(string? txnId, string? status, string rawJson, string? error)>
+        VoidTransactionAsync(string txnId)
+    {
+        var json = "{}";
+        try
+        {
+            // PUT inactive=1 — cancels an uncaptured/unsettled transaction.
+            // (POST /txns with type=3 returns "mismatched_txns" for unsettled auths.)
+            var body    = new { inactive = 1 };
+            var content = new System.Net.Http.StringContent(
+                JsonSerializer.Serialize(body, JsonOptions),
+                System.Text.Encoding.UTF8, "application/json");
+            var resp = await _client.PutAsync($"/txns/{Uri.EscapeDataString(txnId)}", content).ConfigureAwait(false);
+            json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+                return (null, null, json, ExtractPayrixError(json) ?? $"HTTP {(int)resp.StatusCode}");
+            return (txnId, "cancelled", json, null);
+        }
+        catch (Exception ex) { return (null, null, json, ex.Message); }
+    }
+
     private static string? ExtractPayrixError(string json)
     {
         try
@@ -1986,4 +2813,24 @@ public class PayrixService
             return base.SendAsync(request, ct);
         }
     }
+}
+
+// ── Payment test result ───────────────────────────────────────────────────────
+
+public class PaymentTestResult
+{
+    public string  MerchantId  { get; set; } = "";
+    public int     AmountCents { get; set; }
+    public bool    Success     { get; set; }
+    public string? Stage       { get; set; }   // "tokenize" | "charge" | "void"
+    public string? Error       { get; set; }
+    public string? TokenId     { get; set; }
+    public string? MaskedCard  { get; set; }
+    public string? TxnId       { get; set; }
+    public string? TxnStatus   { get; set; }
+    public string? VoidError   { get; set; }
+    public string? TokenJson   { get; set; }
+    public string? TxnJson     { get; set; }
+    public string? VoidJson    { get; set; }
+    public string  AmountLabel => $"${AmountCents / 100m:F2}";
 }

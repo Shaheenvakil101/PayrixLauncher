@@ -89,6 +89,23 @@ public static class BqeAuthService
             // 404/405 = wrong path, try next
             if (statusCode == 404 || statusCode == 405) { log.AppendLine("  (not found, trying next)"); continue; }
 
+            // 5xx = server-side error on a route that EXISTS — don't mask with "try next".
+            // "Parser Error" means IIS/ASP.NET found the app but its web.config has a syntax or
+            // handler-registration error.  Surface it immediately so the user can fix it.
+            if (statusCode >= 500)
+            {
+                var serverMsg = StripHtml(json, 300);
+                var hint = serverMsg.Contains("Parser Error", StringComparison.OrdinalIgnoreCase)
+                    ? "\n\nThis is an IIS/ASP.NET configuration error in BQECoreAdminPortalAPI.\n" +
+                      "Check the web.config for that application in IIS Manager, or look in the\n" +
+                      "Windows Event Log (Application) for the full parser error detail."
+                    : "";
+                log.AppendLine($"  ✗ Server error: {serverMsg}");
+                return BqeLoginResult.Fail(
+                    $"HTTP {statusCode} — BQECoreAdminPortalAPI returned a server error:{hint}\n\n{serverMsg}",
+                    log.ToString());
+            }
+
             // 409 = endpoint found but BQE threw an exception (e.g. wrong password, account issue)
             // Stop trying — this IS the right endpoint, don't mask the real error
             if (statusCode == 409 || statusCode == 401 || statusCode == 403)
@@ -268,6 +285,23 @@ public static class BqeAuthService
                 "DetailMessage");
         }
         catch { return null; }
+    }
+
+    /// <summary>Strips HTML tags and collapses whitespace for human-readable server error messages.</summary>
+    private static string StripHtml(string? html, int maxLen)
+    {
+        if (string.IsNullOrWhiteSpace(html)) return html ?? "";
+        if (!html.TrimStart().StartsWith("<")) return html[..Math.Min(html.Length, maxLen)];
+
+        var titleMatch = System.Text.RegularExpressions.Regex.Match(
+            html, @"<title[^>]*>(.*?)</title>",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
+        var title = titleMatch.Success ? titleMatch.Groups[1].Value.Trim() : "";
+
+        var text = System.Text.RegularExpressions.Regex.Replace(html, "<[^>]+>", " ");
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\s{2,}", " ").Trim();
+        var summary = string.IsNullOrEmpty(title) ? text : $"[{title}] {text}";
+        return summary[..Math.Min(summary.Length, maxLen)];
     }
 
     private static string NormalizeBaseUrl(string url)

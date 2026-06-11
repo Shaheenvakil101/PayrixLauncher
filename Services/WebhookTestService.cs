@@ -1916,7 +1916,7 @@ public static class WebhookTestService
                 ServerCertificateCustomValidationCallback =
                     System.Net.Http.HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
             };
-            using var client  = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
+            using var client  = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(60) };
             using var content = new StringContent(test.Payload, Encoding.UTF8, "application/json");
 
             var response = await client.PostAsync(endpointUrl, content, ct);
