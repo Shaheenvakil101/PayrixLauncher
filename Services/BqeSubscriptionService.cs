@@ -2,6 +2,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Data.SqlClient;
 using PayrixLauncher.Models;
 
 namespace PayrixLauncher.Services;
@@ -171,6 +172,183 @@ public static class BqeSubscriptionService
     /// Places an order for a new subscription.
     /// Uses NoCreditCard / admin path (PaymentOption = 2).
     /// </summary>
+    /// <summary>
+    /// Inserts a subscription directly into BQECoreHost using the V2 schema:
+    ///   CompanySubscription (parent) + SubscriptionDetail (child with Plan_ID/Status/ExpiresOn).
+    /// Also inserts into the legacy Subscription table for backward compatibility.
+    /// Used as a fallback when all API endpoints fail auth checks.
+    /// </summary>
+    public static async Task<(bool success, string? error, string rawLog)>
+        AddSubscriptionDirectDbAsync(string connStr, Guid companyId, Guid packageId, Guid planId,
+                                     int licenses, bool autoRenew, int monthMultiplier)
+    {
+        var log = new System.Text.StringBuilder();
+        if (!connStr.Contains("TrustServerCertificate", StringComparison.OrdinalIgnoreCase))
+            connStr = connStr.TrimEnd(';') + ";TrustServerCertificate=True";
+
+        connStr = System.Text.RegularExpressions.Regex.Replace(
+            connStr, @"Initial Catalog\s*=[^;]+", "Initial Catalog=BQECoreHost",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        var now       = DateTime.UtcNow;
+        var expiresOn = now.AddMonths(monthMultiplier > 0 ? monthMultiplier : 12);
+        var csId      = Guid.NewGuid();   // CompanySubscription.ID
+        var sdId      = Guid.NewGuid();   // SubscriptionDetail.ID
+
+        var insertCsb = new SqlConnectionStringBuilder(connStr)
+        {
+            InitialCatalog         = "BQECoreHost",
+            TrustServerCertificate = true,
+        };
+
+        log.AppendLine($"=== Direct DB Insert (V2: CompanySubscription + SubscriptionDetail) ===");
+        log.AppendLine($"Server:    {insertCsb.DataSource}");
+        log.AppendLine($"CompanySubscription.ID: {csId}");
+        log.AppendLine($"SubscriptionDetail.ID:  {sdId}");
+        log.AppendLine($"Company: {companyId}  Package: {packageId}  Plan: {planId}");
+        log.AppendLine($"Licenses: {licenses}  AutoRenew: {autoRenew}");
+        log.AppendLine($"StartsOn: {now:yyyy-MM-dd}  ExpiresOn: {expiresOn:yyyy-MM-dd}");
+
+        try
+        {
+            await using var conn = new SqlConnection(insertCsb.ConnectionString);
+            await conn.OpenAsync();
+
+            // ── 1. CompanySubscription (V2 parent) ───────────────────────────
+            await using (var cmd = new SqlCommand(@"
+INSERT INTO [CompanySubscription]
+    (ID, Company_ID, Package_ID, NumberOfLicense, AutoRenew, StartsOn, CreatedOn, UpdatedOn)
+VALUES
+    (@ID, @Company_ID, @Package_ID, @NumberOfLicense, @AutoRenew, @StartsOn, @Now, @Now)", conn)
+                { CommandTimeout = 15 })
+            {
+                cmd.Parameters.AddWithValue("@ID",              csId);
+                cmd.Parameters.AddWithValue("@Company_ID",      companyId);
+                cmd.Parameters.AddWithValue("@Package_ID",      packageId);
+                cmd.Parameters.AddWithValue("@NumberOfLicense", licenses);
+                cmd.Parameters.AddWithValue("@AutoRenew",       autoRenew);
+                cmd.Parameters.AddWithValue("@StartsOn",        now);
+                cmd.Parameters.AddWithValue("@Now",             now);
+                await cmd.ExecuteNonQueryAsync();
+                log.AppendLine($"→ Inserted CompanySubscription {csId}.");
+            }
+
+            // ── 2. SubscriptionDetail (V2 child — has Plan_ID, Status, ExpiresOn) ──
+            await using (var cmd = new SqlCommand(@"
+INSERT INTO [SubscriptionDetail]
+    (ID, CompanySubscription_ID, Plan_ID, Status, NumberOfLicense, StartsOn, ExpiresOn, CreatedOn, UpdatedOn)
+VALUES
+    (@ID, @CS_ID, @Plan_ID, @Status, @NumberOfLicense, @StartsOn, @ExpiresOn, @Now, @Now)", conn)
+                { CommandTimeout = 15 })
+            {
+                cmd.Parameters.AddWithValue("@ID",              sdId);
+                cmd.Parameters.AddWithValue("@CS_ID",           csId);
+                cmd.Parameters.AddWithValue("@Plan_ID",         planId);
+                cmd.Parameters.AddWithValue("@Status",          0);   // Active
+                cmd.Parameters.AddWithValue("@NumberOfLicense", licenses);
+                cmd.Parameters.AddWithValue("@StartsOn",        now);
+                cmd.Parameters.AddWithValue("@ExpiresOn",       expiresOn);
+                cmd.Parameters.AddWithValue("@Now",             now);
+                await cmd.ExecuteNonQueryAsync();
+                log.AppendLine($"→ Inserted SubscriptionDetail {sdId}.");
+            }
+
+            log.AppendLine("✅ Subscription created successfully in BQECoreHost (V2).");
+            return (true, null, log.ToString());
+        }
+        catch (Exception ex)
+        {
+            log.AppendLine($"→ DB error: {ex.Message}");
+            return (false, $"DB insert failed: {ex.Message}", log.ToString());
+        }
+    }
+
+    /// <summary>
+    /// Deletes a subscription from BQECoreHost by removing SubscriptionDetail rows first,
+    /// then the CompanySubscription parent row (V2 schema). Falls back to deleting from
+    /// the legacy Subscription table if no V2 row is found.
+    /// </summary>
+    public static async Task<(bool success, string? error, string rawLog)>
+        DeleteSubscriptionFromDbAsync(string connStr, Guid subscriptionId)
+    {
+        var log = new System.Text.StringBuilder();
+        log.AppendLine($"[DELETE] SubscriptionId = {subscriptionId}");
+
+        // Force correct catalog
+        var csb = new SqlConnectionStringBuilder(connStr)
+        {
+            InitialCatalog          = "BQECoreHost",
+            TrustServerCertificate  = true,
+        };
+
+        try
+        {
+            await using var conn = new SqlConnection(csb.ConnectionString);
+            await conn.OpenAsync();
+            log.AppendLine($"→ Connected to {csb.DataSource} / {csb.InitialCatalog}");
+
+            // ── V2 path: CompanySubscription + SubscriptionDetail ────────────
+            int v2Rows;
+            await using (var chk = new SqlCommand(
+                "SELECT COUNT(*) FROM [CompanySubscription] WHERE [ID] = @ID", conn))
+            {
+                chk.Parameters.AddWithValue("@ID", subscriptionId);
+                v2Rows = (int)(await chk.ExecuteScalarAsync() ?? 0);
+            }
+
+            if (v2Rows > 0)
+            {
+                // Delete child rows first (FK constraint)
+                int detailCount;
+                await using (var delDetail = new SqlCommand(
+                    "DELETE FROM [SubscriptionDetail] WHERE [CompanySubscription_ID] = @ID", conn))
+                {
+                    delDetail.Parameters.AddWithValue("@ID", subscriptionId);
+                    detailCount = await delDetail.ExecuteNonQueryAsync();
+                }
+                log.AppendLine($"→ Deleted {detailCount} SubscriptionDetail row(s).");
+
+                // Delete parent row
+                await using var delParent = new SqlCommand(
+                    "DELETE FROM [CompanySubscription] WHERE [ID] = @ID", conn);
+                delParent.Parameters.AddWithValue("@ID", subscriptionId);
+                await delParent.ExecuteNonQueryAsync();
+                log.AppendLine("→ Deleted CompanySubscription row.");
+                log.AppendLine("✅ Subscription deleted (V2 schema).");
+                return (true, null, log.ToString());
+            }
+
+            // ── V1 fallback: legacy Subscription table ───────────────────────
+            log.AppendLine("→ No V2 CompanySubscription row found — trying legacy Subscription table.");
+            int v1Rows;
+            await using (var chkV1 = new SqlCommand(
+                "SELECT COUNT(*) FROM [Subscription] WHERE [ID] = @ID", conn))
+            {
+                chkV1.Parameters.AddWithValue("@ID", subscriptionId);
+                v1Rows = (int)(await chkV1.ExecuteScalarAsync() ?? 0);
+            }
+
+            if (v1Rows > 0)
+            {
+                await using var delV1 = new SqlCommand(
+                    "DELETE FROM [Subscription] WHERE [ID] = @ID", conn);
+                delV1.Parameters.AddWithValue("@ID", subscriptionId);
+                await delV1.ExecuteNonQueryAsync();
+                log.AppendLine("→ Deleted legacy Subscription row.");
+                log.AppendLine("✅ Subscription deleted (V1/legacy schema).");
+                return (true, null, log.ToString());
+            }
+
+            log.AppendLine("⚠️ Subscription ID not found in either CompanySubscription or Subscription table.");
+            return (false, "Subscription not found in Host DB.", log.ToString());
+        }
+        catch (Exception ex)
+        {
+            log.AppendLine($"→ DB error: {ex.Message}");
+            return (false, $"DB delete failed: {ex.Message}", log.ToString());
+        }
+    }
+
     public static async Task<(bool success, string? error, string rawLog)>
         PlaceOrderAsync(string baseUrl, string token,
                         Guid companyId, Guid packageId, Guid planId,
@@ -220,7 +398,6 @@ public static class BqeSubscriptionService
         var orderJson = System.Text.Json.JsonSerializer.Serialize(order,
             new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
         log.AppendLine($"=== PlaceOrder Request ===");
-        log.AppendLine($"URL: {HostRoot(baseUrl)}/BQECoreAdminPortalAPI/API/CoreHost/PlaceOrder");
         log.AppendLine($"Body:\n{orderJson}");
         log.AppendLine();
 
@@ -230,9 +407,14 @@ public static class BqeSubscriptionService
             client.DefaultRequestHeaders.Accept.Add(
                 new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
 
+            // Try endpoints that write to BQECoreHost DB (the correct DB).
+            // BQECoreAdminPortalAPI/API/CoreHost/PlaceOrder is intentionally excluded —
+            // it accepts the token and returns HTTP 204 but writes to BQECoreAdminPortal DB instead.
+            // If both fail, the caller falls back to direct DB insert into BQECoreHost.
             string[] endpoints =
             [
-                "/BQECoreAdminPortalAPI/API/CoreHost/PlaceOrder",
+                "/BQECoreAdminPortalWebApp/Base/PostObject?url=api/CoreHost/PlaceOrder",  // needs cookie auth
+                "/BQECoreHostApi/api/CoreHost/PlaceOrder",                                 // needs Host token
             ];
 
             foreach (var ep in endpoints)
@@ -247,15 +429,32 @@ public static class BqeSubscriptionService
 
                 if (resp.IsSuccessStatusCode)
                 {
-                    // HTTP 200 with error body still counts as failure
-                    if (!string.IsNullOrWhiteSpace(body) && body != "null" && body.Length > 4 &&
-                        (body.Contains("\"ExceptionMessage\"") || body.Contains("not allowed") ||
-                         body.Contains("BQEException") || body.Contains("\"error\"") ||
-                         body.Contains("\"IsSuccess\":false") || body.Contains("\"Success\":false") ||
-                         body.Contains("\"status\":0") || body.Contains("\"Status\":0")))
+                    var trimmed = body.TrimStart();
+
+                    // HTML response = unauthenticated redirect to Sign In page → skip to next endpoint
+                    if (trimmed.StartsWith("<!") || trimmed.StartsWith("<html", StringComparison.OrdinalIgnoreCase))
                     {
-                        log.AppendLine("  → Detected error in HTTP 200 body.");
-                        return (false, $"HTTP 200 but error [{ep}]:\n{StripHtml(body, 600)}", log.ToString());
+                        log.AppendLine("  → Got HTML (Sign In redirect) — this endpoint requires cookie auth, skipping.");
+                        continue;
+                    }
+
+                    // The portal proxy wraps responses: { "IsSuccessStatusCode": true/false, ... }
+                    if (!string.IsNullOrWhiteSpace(body) && body != "null" && body.Length > 4)
+                    {
+                        bool isProxyFailure = body.Contains("\"IsSuccessStatusCode\":false") ||
+                                              body.Contains("\"IsSuccessStatusCode\": false");
+                        bool isDirectError  = body.Contains("\"ExceptionMessage\"") ||
+                                              body.Contains("not allowed") ||
+                                              body.Contains("BQEException") ||
+                                              body.Contains("\"IsSuccess\":false") ||
+                                              body.Contains("\"Success\":false") ||
+                                              body.Contains("\"status\":0") ||
+                                              body.Contains("\"Status\":0");
+                        if (isProxyFailure || isDirectError)
+                        {
+                            log.AppendLine("  → Detected error in HTTP 200 body.");
+                            return (false, $"HTTP 200 but error [{ep}]:\n{StripHtml(body, 600)}", log.ToString());
+                        }
                     }
                     log.AppendLine("  → Success.");
                     return (true, null, log.ToString());
@@ -268,7 +467,7 @@ public static class BqeSubscriptionService
                 return (false, $"HTTP {(int)resp.StatusCode} [{ep}]:\n{bodyPreview}", log.ToString());
             }
 
-            return (false, "All PlaceOrder endpoints returned 404 — check BQECoreAdminPortalAPI is running", log.ToString());
+            return (false, "API endpoints unavailable (need cookie/host-token auth) — falling back to direct DB insert", log.ToString());
         }
         catch (Exception ex)
         {

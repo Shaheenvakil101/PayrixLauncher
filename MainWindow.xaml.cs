@@ -2289,7 +2289,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             try
             {
-                var testSql = $"SELECT TOP 1 ID FROM [{tbl}] WHERE Company_ID = '{companyId}'";
+                // Check table exists (query without Company_ID filter to avoid false negatives)
+                var testSql = $"SELECT TOP 1 ID FROM [{tbl}]";
                 await using var tc = new SqlCommand(testSql, conn) { CommandTimeout = 5 };
                 await tc.ExecuteScalarAsync();
                 workingTable = tbl;
@@ -2300,7 +2301,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         if (workingTable == null)
         {
-            // Show what tables are available to help diagnose
             var tables = new System.Text.StringBuilder();
             try
             {
@@ -2313,6 +2313,61 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             catch { }
             return ([], $"Neither Subscription nor CompanySubscription table found in DB '{conn.Database}'.\nAvailable tables: {tables}");
         }
+
+        // ── V2 path: CompanySubscription + SubscriptionDetail ────────────────
+        // BQE Core V2 uses a two-table schema. Try this first.
+        try
+        {
+            await using var vc = new SqlCommand(
+                $"SELECT COUNT(*) FROM [CompanySubscription] WHERE Company_ID = '{companyId}'", conn)
+                { CommandTimeout = 5 };
+            var v2Count = (int)(await vc.ExecuteScalarAsync() ?? 0);
+            if (v2Count > 0)
+            {
+                var v2Sql = $@"
+SELECT
+    cs.ID                                           AS ID,
+    cs.Package_ID                                   AS Package_ID,
+    pkg.Name                                        AS PackageName,
+    CAST(pkg.PackageEnum AS NVARCHAR(50))           AS PackageEnum,
+    CAST(pkg.PackageType AS INT)                    AS PackageType,
+    cs.NumberOfLicense                              AS NumberOfLicense,
+    0                                               AS LicenseUsed,
+    CONVERT(INT, cs.AutoRenew)                      AS AutoRenew,
+    ISNULL(sd.Status, 0)                            AS Status,
+    cs.StartsOn                                     AS StartsOn,
+    sd.ExpiresOn                                    AS ExpiresOn,
+    pi.Name                                         AS PlanName
+FROM [CompanySubscription] cs
+INNER JOIN Package  pkg ON pkg.ID = cs.Package_ID
+LEFT  JOIN [SubscriptionDetail] sd ON sd.CompanySubscription_ID = cs.ID
+LEFT  JOIN PlanInfo pi  ON pi.ID  = sd.Plan_ID
+WHERE cs.Company_ID = '{companyId}'
+ORDER BY sd.ExpiresOn DESC";
+                await using var v2Cmd = new SqlCommand(v2Sql, conn) { CommandTimeout = 30 };
+                await using var v2Rdr = await v2Cmd.ExecuteReaderAsync();
+                var v2List = new List<Models.UserSubscribePackage>();
+                while (await v2Rdr.ReadAsync())
+                {
+                    string? S(string col) { var o = v2Rdr.GetOrdinal(col); return v2Rdr.IsDBNull(o) ? null : v2Rdr.GetString(o); }
+                    T? V<T>(string col) where T : struct { var o = v2Rdr.GetOrdinal(col); return v2Rdr.IsDBNull(o) ? null : (T?)Convert.ChangeType(v2Rdr.GetValue(o), typeof(T)); }
+                    v2List.Add(new Models.UserSubscribePackage
+                    {
+                        Id          = V<Guid>("ID") ?? Guid.Empty,
+                        PackageId   = V<Guid>("Package_ID"),
+                        PackageName = S("PackageName"),
+                        PlanName    = S("PlanName"),
+                        NumberOfLicense = V<int>("NumberOfLicense") ?? 0,
+                        AutoRenew   = V<int>("AutoRenew") == 1,
+                        Status      = V<int>("Status") ?? 0,
+                        StartsOn    = V<DateTime>("StartsOn")?.ToString("o"),
+                        ExpiresOn   = V<DateTime>("ExpiresOn")?.ToString("o"),
+                    });
+                }
+                if (v2List.Count > 0) return (v2List, null);
+            }
+        }
+        catch { /* V2 tables don't exist — fall through to legacy path */ }
 
         var sql = $@"
 SELECT
@@ -2740,6 +2795,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
     {
         var pkg = SubscriptionsGrid.SelectedItem as Models.UserSubscribePackage;
         SubChangeExpiryBtn.IsEnabled = pkg != null;
+        SubDeleteBtn.IsEnabled       = pkg != null;
 
         if (pkg != null)
         {
@@ -2754,6 +2810,65 @@ ORDER BY MAX(s.ExpiresOn) DESC";
     {
         SubChangeExpiryCard.Visibility = Visibility.Visible;
         SubChangeExpiryStatus.Text     = "";
+    }
+
+    private async void SubDeleteBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var pkg = SubscriptionsGrid.SelectedItem as Models.UserSubscribePackage;
+        if (pkg == null) return;
+
+        var label = $"{pkg.PackageName ?? "subscription"}" +
+                    (string.IsNullOrWhiteSpace(pkg.PlanName) ? "" : $" / {pkg.PlanName}");
+
+        var confirm = System.Windows.MessageBox.Show(
+            $"Delete '{label}' from Host DB?\n\nThis removes the CompanySubscription row and all its SubscriptionDetail rows. This cannot be undone.",
+            "Confirm Delete", System.Windows.MessageBoxButton.YesNo,
+            System.Windows.MessageBoxImage.Warning);
+
+        if (confirm != System.Windows.MessageBoxResult.Yes) return;
+
+        var settings = Services.SettingsService.Load();
+        var connStr  = !string.IsNullOrWhiteSpace(settings.LocalMainDbConnectionString)
+                       ? settings.LocalMainDbConnectionString
+                       : settings.HostDbConnectionString;
+
+        if (string.IsNullOrWhiteSpace(connStr))
+        {
+            SubStatusText.Text       = "❌  No Host DB connection string configured.";
+            SubStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
+
+        SubDeleteBtn.IsEnabled = false;
+        SubStatusText.Text       = $"⏳  Deleting '{label}'…";
+        SubStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
+
+        try
+        {
+            var (ok, err, log) = await Services.BqeSubscriptionService
+                .DeleteSubscriptionFromDbAsync(connStr, pkg.Id);
+
+            SubRawLogBox.Text        = log;
+            SubRawLogCard.Visibility = Visibility.Visible;
+
+            if (!ok)
+            {
+                SubStatusText.Text       = $"❌  {err}";
+                SubStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+                return;
+            }
+
+            // Remove from ObservableCollection — grid updates automatically
+            _subscriptions.Remove(pkg);
+
+            SubStatusText.Text       = $"✅  '{label}' deleted from Host DB.";
+            SubStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
+            SubCountText.Text        = $"{_subscriptions.Count} subscription(s)";
+        }
+        finally
+        {
+            SubDeleteBtn.IsEnabled = SubscriptionsGrid.SelectedItem != null;
+        }
     }
 
     private async void SubSaveExpiryBtn_Click(object sender, RoutedEventArgs e)
@@ -2942,7 +3057,49 @@ ORDER BY MAX(s.ExpiresOn) DESC";
                 companyId, packageId, planId,
                 licenses, startDate, autoRenew);
 
-            // Always show the raw PlaceOrder log so we can debug what the server returned
+            // If all API endpoints failed, fall back to direct DB insert into BQECoreHost
+            if (!ok)
+            {
+                SubAddStatus.Text = "⏳  API endpoints unavailable — trying direct DB insert…";
+                var connStr = !string.IsNullOrWhiteSpace(settings.LocalMainDbConnectionString)
+                    ? settings.LocalMainDbConnectionString : settings.HostDbConnectionString;
+
+                if (!string.IsNullOrWhiteSpace(connStr))
+                {
+                    // Get MonthMultiplier from the selected plan so ExpiresOn is correct
+                    var pkg  = _availablePackages.FirstOrDefault(p => p.Id == packageId);
+                    var plan = pkg?.Plans?.FirstOrDefault(pl => pl.Id == planId);
+
+                    // If the API didn't return MonthMultiplier, infer it from the plan name
+                    int months;
+                    if (plan?.MonthMultiplier is int mm && mm > 0)
+                    {
+                        months = mm;
+                    }
+                    else
+                    {
+                        var planName = plan?.Name ?? "";
+                        months = planName.Contains("three", StringComparison.OrdinalIgnoreCase) ||
+                                 planName.Contains("3 year", StringComparison.OrdinalIgnoreCase) ||
+                                 planName.Contains("3year",  StringComparison.OrdinalIgnoreCase)  ? 36
+                               : planName.Contains("two",   StringComparison.OrdinalIgnoreCase) ||
+                                 planName.Contains("2 year", StringComparison.OrdinalIgnoreCase) ||
+                                 planName.Contains("2year",  StringComparison.OrdinalIgnoreCase)  ? 24
+                               : planName.Contains("month", StringComparison.OrdinalIgnoreCase)   ? 1
+                               : 12; // default: 1 year
+                    }
+                    placeLog += $"\n[DB-INSERT] Plan='{plan?.Name}' MonthMultiplier={plan?.MonthMultiplier?.ToString() ?? "null(API)"} → using {months} months";
+
+                    var (dbOk, dbErr, dbLog) = await Services.BqeSubscriptionService
+                        .AddSubscriptionDirectDbAsync(connStr, companyId, packageId, planId,
+                                                      licenses, autoRenew, months);
+                    placeLog += "\n\n" + dbLog;
+                    ok  = dbOk;
+                    err = dbErr;
+                }
+            }
+
+            // Always show the log
             if (!string.IsNullOrWhiteSpace(placeLog))
             {
                 SubRawLogBox.Text        = placeLog;
@@ -2960,10 +3117,8 @@ ORDER BY MAX(s.ExpiresOn) DESC";
 
             Services.WebhookLogger.LogSuccess("Add Subscription", $"Company={companyId} Package={packageId}");
             SubAddStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
-            SubAddStatus.Text       = "✅  Order sent — check the debug log below for server response, then click Fetch to reload.";
+            SubAddStatus.Text       = "✅  Subscription added — click Fetch from DB to verify.";
             SubAddCard.Visibility   = Visibility.Collapsed;
-            // Do NOT auto-fetch — that would wipe the PlaceOrder debug log immediately.
-            // User should read the log first, then click Fetch / Fetch from DB to verify.
         }
         finally
         {
