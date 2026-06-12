@@ -349,6 +349,71 @@ VALUES
         }
     }
 
+    // ── Update company status Trial → Active ────────────────────────────────
+
+    /// <summary>
+    /// Sets Company.CompanyStatus = 0 (Active) for the given company if it is currently
+    /// in Trial status (CompanyStatus = 2). No-op (returns success) if already Active.
+    /// Operates against the BQECoreHost main DB (not the payment-service DB).
+    /// </summary>
+    public static async Task<(bool success, string? error, string rawLog)>
+        UpdateCompanyStatusToActiveAsync(string connStr, Guid companyId)
+    {
+        var log = new System.Text.StringBuilder();
+        log.AppendLine($"[UpdateCompanyStatus] CompanyId = {companyId}");
+
+        var csb = new SqlConnectionStringBuilder(connStr)
+        {
+            InitialCatalog         = "BQECoreHost",
+            TrustServerCertificate = true,
+        };
+
+        try
+        {
+            await using var conn = new SqlConnection(csb.ConnectionString);
+            await conn.OpenAsync();
+            log.AppendLine($"→ Connected to {csb.DataSource} / {csb.InitialCatalog}");
+
+            // Check current status
+            int? current = null;
+            await using (var chk = new SqlCommand(
+                "SELECT CompanyStatus FROM [Company] WHERE [ID] = @ID", conn))
+            {
+                chk.Parameters.AddWithValue("@ID", companyId);
+                var val = await chk.ExecuteScalarAsync();
+                if (val is not null and not DBNull) current = Convert.ToInt32(val);
+            }
+
+            log.AppendLine($"→ Current CompanyStatus = {current?.ToString() ?? "NULL"}");
+
+            if (current == 0)
+            {
+                log.AppendLine("→ Already Active — no update needed.");
+                return (true, null, log.ToString());
+            }
+
+            // Update to Active (0)
+            int rows;
+            await using (var upd = new SqlCommand(
+                "UPDATE [Company] SET CompanyStatus = 0, UpdatedOn = @Now WHERE [ID] = @ID", conn))
+            {
+                upd.Parameters.AddWithValue("@ID",  companyId);
+                upd.Parameters.AddWithValue("@Now", DateTime.UtcNow);
+                rows = await upd.ExecuteNonQueryAsync();
+            }
+
+            log.AppendLine($"→ Updated {rows} row(s). CompanyStatus set to 0 (Active).");
+            return rows > 0
+                ? (true, null, log.ToString())
+                : (false, "Company row not found or not updated.", log.ToString());
+        }
+        catch (Exception ex)
+        {
+            log.AppendLine($"→ DB error: {ex.Message}");
+            return (false, $"Status update failed: {ex.Message}", log.ToString());
+        }
+    }
+
     // ── Assign users to subscription ─────────────────────────────────────────
 
     /// <summary>

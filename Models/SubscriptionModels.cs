@@ -130,6 +130,59 @@ public class UserSubscribePackage
             return d < DateTime.Now;
         }
     }
+
+    // ── Icon helpers ──────────────────────────────────────────────────────────
+
+    [JsonIgnore]
+    public string PackageInitials =>
+        string.IsNullOrWhiteSpace(PackageName) ? "?" : PackageName.Trim()[0].ToString().ToUpper();
+
+    // Background and foreground colours for the icon pill, cycled by first letter
+    [JsonIgnore]
+    public string PackageIconBg => (PackageName?.ToUpperInvariant().FirstOrDefault() ?? 'Z') switch
+    {
+        'A' or 'B'                   => "#EFF6FF",
+        'C' or 'D'                   => "#F0FDF4",
+        'E' or 'F'                   => "#FFF7ED",
+        'G' or 'H'                   => "#F5F3FF",
+        'I' or 'J' or 'K' or 'L'    => "#F0FDFA",
+        'M' or 'N' or 'O' or 'P'    => "#FFFBEB",
+        'Q' or 'R' or 'S' or 'T'    => "#FEF2F2",
+        _                            => "#F1F5F9"
+    };
+
+    [JsonIgnore]
+    public string PackageIconFg => (PackageName?.ToUpperInvariant().FirstOrDefault() ?? 'Z') switch
+    {
+        'A' or 'B'                   => "#2563EB",
+        'C' or 'D'                   => "#16A34A",
+        'E' or 'F'                   => "#EA580C",
+        'G' or 'H'                   => "#7C3AED",
+        'I' or 'J' or 'K' or 'L'    => "#0D9488",
+        'M' or 'N' or 'O' or 'P'    => "#D97706",
+        'Q' or 'R' or 'S' or 'T'    => "#DC2626",
+        _                            => "#64748B"
+    };
+
+    // ── Status badge — light background + coloured text ───────────────────────
+
+    [JsonIgnore]
+    public string StatusBgColor => Status switch
+    {
+        0 or 5 => "#F0FDF4",
+        2      => "#FFFBEB",
+        1 or 6 => "#F8FAFC",
+        7      => "#EFF6FF",
+        3 or 4 or 8 or 9 => "#FEF2F2",
+        _      => "#F8FAFC"
+    };
+
+    // StatusColor (already defined above) is reused as the text colour.
+
+    // ── Short ID for display ──────────────────────────────────────────────────
+
+    [JsonIgnore]
+    public string IdShort => Id.ToString().Length >= 4 ? Id.ToString()[..4] + "…" : Id.ToString();
 }
 
 // ── Add Subscription models ───────────────────────────────────────────────────

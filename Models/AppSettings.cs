@@ -50,12 +50,16 @@ public class AppSettings
     public string ProxyUrl         { get; set; } = "http://localhost:8888";
     public bool   ProxyBypassLocal { get; set; } = false;
 
-    // BQE Core account sign-in (JWT for API calls)
+    // BQE Core account sign-in (JWT for API calls) — legacy flat fields (active env mirrored here)
     public string BqeCoreBaseUrl    { get; set; } = "";   // e.g. https://local.bqecore.com:8443
     public string BqeLoginEmail     { get; set; } = "";
     public string BqeLoginPassword  { get; set; } = "";   // stored so user doesn't retype each session
     public string BqeJwtToken       { get; set; } = "";   // stored after successful sign-in
     public string BqeLoggedInUser   { get; set; } = "";   // display name
+
+    // Per-environment profiles — keyed by env name ("Local", "Staging", "Sprint", "Custom")
+    public string ActiveBqeEnv      { get; set; } = "";
+    public Dictionary<string, BqeEnvProfile> BqeEnvProfiles { get; set; } = new();
 
     // OAuth client IDs (register apps at console.cloud.google.com / portal.azure.com)
     public string GoogleClientId     { get; set; } = "";
@@ -80,7 +84,7 @@ public class AppSettings
     public bool   TxnSectionCollapsed     { get; set; } = false;
     public bool   DisbSectionCollapsed    { get; set; } = true;   // Disb collapsed by default
     public bool   SearchPanelCollapsed    { get; set; } = false;
-    public bool   WebhookConfigExpanded   { get; set; } = false;
+    public bool   WebhookConfigExpanded   { get; set; } = true;
     public bool   EmailSectionPinned      { get; set; } = false;
     public bool   TxnSectionPinned        { get; set; } = false;
     public bool   DisbSectionPinned       { get; set; } = false;
@@ -94,4 +98,14 @@ public class AppSettings
     public double WindowHeight         { get; set; } = 960;
     public double WindowLeft           { get; set; } = double.NaN;
     public double WindowTop            { get; set; } = double.NaN;
+}
+
+/// <summary>Per-environment BQE Core credentials stored independently per Quick button.</summary>
+public class BqeEnvProfile
+{
+    public string Url          { get; set; } = "";
+    public string Email        { get; set; } = "";
+    public string Password     { get; set; } = "";
+    public string JwtToken     { get; set; } = "";
+    public string LoggedInUser { get; set; } = "";
 }

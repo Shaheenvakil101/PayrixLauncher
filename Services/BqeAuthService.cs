@@ -1,6 +1,7 @@
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 
 namespace PayrixLauncher.Services;
@@ -12,6 +13,14 @@ namespace PayrixLauncher.Services;
 /// </summary>
 public static class BqeAuthService
 {
+    // Match browser JSON.stringify behaviour — do NOT escape <, >, &, + as \uXXXX.
+    // System.Text.Json escapes these by default; if the password contains them the
+    // server receives a different string than what was typed, causing auth failure.
+    private static readonly JsonSerializerOptions JsonOpts = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
     // ResponseType constants from BQECoreSharedLib.ResponseType
     private const int RT_OK                 = 0;
     private const int RT_INVALID_CREDS      = 1;
@@ -23,15 +32,29 @@ public static class BqeAuthService
     private const int RT_2FA_REQUIRED       = 12;
 
     // All known endpoint paths — tried in order until one returns a parseable response
-    private static readonly string[] Endpoints =
+    // (path, useFormEncoded)
+    // useFormEncoded=true → send application/x-www-form-urlencoded instead of JSON.
+    // Needed for MVC actions that have ASP.NET request validation enabled (ValidateSignIn).
+    private static readonly (string Path, bool FormEncoded)[] Endpoints =
     [
-        "/BQECoreAdminPortalAPI/API/Account/ValidateUser",
-        "/BQECoreAdminPortalApi/API/Account/ValidateUser",
-        "/coreapi/api/Account/ValidateUser",
-        "/api/Account/ValidateUser",
-        "/API/Account/ValidateUser",
-        "/coreapi/api/Account/Login",
-        "/api/auth/login",
+        // Local IIS — full virtual path names
+        ("/BQECoreAdminPortalAPI/API/Account/ValidateUser",    false),
+        ("/BQECoreAdminPortalApi/API/Account/ValidateUser",    false),
+        ("/BQECoreAdminPortalapi/API/Account/ValidateUser",    false),
+        ("/BQECoreAdminPortalapi/api/Account/ValidateUser",    false),
+        // Cloud — direct API (no request-validation issue)
+        ("/adminapi/api/Account/ValidateUser",                 false),
+        ("/adminapi/API/Account/ValidateUser",                 false),
+        // Cloud — web app MVC action.  Browser sends JSON { Email, Password } with no Company_ID;
+        // MVC5 JsonValueProviderFactory defaults missing Guid to Guid.Empty (no 422).
+        // Note: /webapp/Account/ValidateSSOUser is an email probe only — no token returned.
+        ("/webapp/Account/ValidateSignIn",                     false),
+        // Bare /api root
+        ("/coreapi/api/Account/ValidateUser",                  false),
+        ("/api/Account/ValidateUser",                          false),
+        ("/API/Account/ValidateUser",                          false),
+        ("/coreapi/api/Account/Login",                         false),
+        ("/api/auth/login",                                    false),
     ];
 
     // ── Public API ────────────────────────────────────────────────────────
@@ -54,33 +77,44 @@ public static class BqeAuthService
             return BqeLoginResult.Fail("BQE Core URL is required.", "");
 
         using var client = MakeClient(baseUrl);
+        // X-Requested-With mimics browser AJAX — some server pipelines skip validation for XHR
+        client.DefaultRequestHeaders.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
 
+        // Browser sends only { Email, Password } as JSON — no Company_ID.
+        // When companyId is specified (multi-company selection), include it.
         object body = companyId != null
             ? (object)new { Email = email, Password = password, Company_ID = Guid.Parse(companyId) }
             : new { Email = email, Password = password };
 
         var log = new System.Text.StringBuilder();
         log.AppendLine($"Base URL (normalised): {baseUrl}");
-        log.AppendLine($"Body: {{ Email={email}, Password=*** }}");
+        // Show exact JSON that will be sent (password redacted for display only)
+        var bodyJson = JsonSerializer.Serialize(body, JsonOpts);
+        var redacted  = System.Text.RegularExpressions.Regex.Replace(
+            bodyJson, @"""Password""\s*:\s*""[^""]*""", @"""Password"":""***""");
+        log.AppendLine($"Body JSON: {redacted}");
         log.AppendLine();
 
-        foreach (var path in Endpoints)
+        bool firstAttempt = true;
+        foreach (var (path, formEncoded) in Endpoints)
         {
             var fullUrl = baseUrl.TrimEnd('/') + path;
-            log.AppendLine($"→ POST {fullUrl}");
-            var (statusCode, json, connErr) = await PostRawAsync(client, path, body);
+            log.AppendLine($"→ POST {fullUrl}{(formEncoded ? " [form]" : "")}");
+            var (statusCode, json, connErr) = await PostRawAsync(client, path, body, formEncoded);
 
             if (connErr != null)
             {
                 log.AppendLine($"  ✗ {connErr}");
                 // Any network failure on first attempt = server unreachable, abort
-                if (path == Endpoints[0])
+                if (firstAttempt)
                 {
                     log.AppendLine("  (aborting — server unreachable on first attempt)");
                     return BqeLoginResult.Fail(connErr, log.ToString());
                 }
+                firstAttempt = false;
                 continue;
             }
+            firstAttempt = false;
 
             log.AppendLine($"  HTTP {statusCode}");
             if (json != null)
@@ -88,6 +122,23 @@ public static class BqeAuthService
 
             // 404/405 = wrong path, try next
             if (statusCode == 404 || statusCode == 405) { log.AppendLine("  (not found, trying next)"); continue; }
+
+            // Any non-404/405 failure on a form-encoded endpoint — retry with JSON.
+            // Form binding of non-nullable Guid (Company_ID) fails with 422 when the field
+            // is absent; JSON binding handles missing fields gracefully.
+            if (formEncoded && statusCode != 404 && statusCode != 405 && !(statusCode >= 200 && statusCode < 300))
+            {
+                log.AppendLine($"  ✗ {statusCode} on form-encoded — retrying with JSON");
+                var (statusCode2, json2, connErr2) = await PostRawAsync(client, path, body, false);
+                log.AppendLine($"  HTTP {statusCode2} (JSON retry)");
+                if (statusCode2 >= 200 && statusCode2 < 300)
+                {
+                    statusCode = statusCode2; json = json2;
+                    goto parseit;
+                }
+                if (statusCode2 != 404 && statusCode2 != 405)
+                    log.AppendLine("  (JSON retry also failed, trying next endpoint)");
+            }
 
             // 5xx = server-side error on a route that EXISTS — don't mask with "try next".
             // "Parser Error" means IIS/ASP.NET found the app but its web.config has a syntax or
@@ -102,7 +153,7 @@ public static class BqeAuthService
                     : "";
                 log.AppendLine($"  ✗ Server error: {serverMsg}");
                 return BqeLoginResult.Fail(
-                    $"HTTP {statusCode} — BQECoreAdminPortalAPI returned a server error:{hint}\n\n{serverMsg}",
+                    $"HTTP {statusCode} — server error at {path}:{hint}\n\n{serverMsg}",
                     log.ToString());
             }
 
@@ -116,6 +167,7 @@ public static class BqeAuthService
             }
 
             // Got a 2xx/3xx response — try to parse it
+            parseit:
             var result = ParseLoginResponse(json, email);
             result.RawLog = log.ToString();
 
@@ -132,8 +184,13 @@ public static class BqeAuthService
         }
 
         return BqeLoginResult.Fail(
-            "Login failed — no endpoint responded correctly.\n" +
-            "Check the URL and ensure BQECoreAdminPortalAPI is running.",
+            "Login failed — no endpoint responded correctly.\n\n" +
+            "All known endpoint paths returned 404. The staging/cloud server may use a\n" +
+            "different virtual path. Check the Raw Response log for details, or open\n" +
+            $"  {baseUrl.TrimEnd('/')}/api/Account/ValidateUser\n" +
+            "in a browser (expect a 405 Method Not Allowed if the route exists, 404 if not).\n\n" +
+            "If the admin API is at a different sub-path, enter just the host URL and\n" +
+            "contact a dev to add the correct path to the endpoint list.",
             log.ToString());
     }
 
@@ -148,6 +205,25 @@ public static class BqeAuthService
         {
             var doc  = JsonDocument.Parse(json!);
             var root = doc.RootElement;
+
+            // Unwrap the MVC-layer envelope: { IsSuccessStatusCode, Response: {...}, Error: {...} }
+            // Used by /webapp/Account/ValidateSignIn
+            if (root.TryGetProperty("Response", out var innerResp) &&
+                innerResp.ValueKind == JsonValueKind.Object)
+            {
+                if (root.TryGetProperty("IsSuccessStatusCode", out var ok) &&
+                    ok.ValueKind == JsonValueKind.False)
+                {
+                    var errMsg = "";
+                    if (root.TryGetProperty("Error", out var errObj) &&
+                        errObj.ValueKind == JsonValueKind.Object)
+                        errMsg = GetStr(errObj, "Message", "message") ?? "";
+                    return BqeLoginResult.Fail(
+                        string.IsNullOrEmpty(errMsg) ? "Sign-in failed." : errMsg, "");
+                }
+                // Re-parse using the inner Response object
+                root = innerResp;
+            }
 
             // Read ResponseType (defaults to 1=invalid if missing)
             int rt = 1;
@@ -204,15 +280,30 @@ public static class BqeAuthService
     // ── Helpers ───────────────────────────────────────────────────────────
 
     private static async Task<(int statusCode, string? json, string? connError)>
-        PostRawAsync(HttpClient client, string path, object body)
+        PostRawAsync(HttpClient client, string path, object body, bool formEncoded = false)
     {
         try
         {
-            var content = new StringContent(
-                JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
             client.DefaultRequestHeaders.Accept.Clear();
             client.DefaultRequestHeaders.Accept.Add(
                 new MediaTypeWithQualityHeaderValue("application/json"));
+
+            HttpContent content;
+            if (formEncoded)
+            {
+                // Form-encoded avoids ASP.NET JsonValueProviderFactory request validation,
+                // which rejects JSON bodies containing null values (serialised as "<null>").
+                var props = body.GetType().GetProperties()
+                    .Select(p => new KeyValuePair<string, string>(
+                        p.Name, p.GetValue(body)?.ToString() ?? ""))
+                    .ToList();
+                content = new FormUrlEncodedContent(props);
+            }
+            else
+            {
+                content = new StringContent(
+                    JsonSerializer.Serialize(body, JsonOpts), Encoding.UTF8, "application/json");
+            }
 
             var resp = await client.PostAsync(path, content).ConfigureAwait(false);
             var json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -315,12 +406,18 @@ public static class BqeAuthService
             "/BQECoreAdminPortalAPI/API/Account",
             "/BQECoreAdminPortalAPI/API",
             "/BQECoreAdminPortalAPI",
+            "/BQECoreAdminPortalapi/API",
+            "/BQECoreAdminPortalapi",
             "/BQECoreAdminPortalWebApp",
             "/BQECoreWebApp",           // ← user entered web-app URL, strip it
+            "/webapp",                  // ← cloud deployment web app virtual path
+            "/adminapi/api",            // ← cloud deployment API virtual path + route prefix
+            "/adminapi",                // ← cloud deployment API virtual path
             "/coreapi/api/Account/ValidateUser",
             "/coreapi/api/Account",
             "/coreapi/api",
             "/coreapi",
+            "/api",                     // ← user may paste URL with /api suffix (e.g. staging-admin.bqecore-np.com/api)
         })
         {
             if (url.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))

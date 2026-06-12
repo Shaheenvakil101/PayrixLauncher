@@ -166,68 +166,92 @@ public class PayrixService
 
     public async Task<(Transaction? transaction, string rawJson, string? error)> GetTransactionAsync(string txnId)
     {
-        var json = "";
+        var lastJson = "";
         try
         {
-            // ── Strategy 1: exact-ID path (works on both envs for standard Payrix API) ──
-            var directResponse = await _client.GetAsync($"/txns/{Uri.EscapeDataString(txnId)}?expand[items][]").ConfigureAwait(false);
-            json = await directResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
+            // ── Run all 3 strategies in parallel — take the first that returns an exact ID match ──
+            // Strategy 1: exact-ID path   (standard Payrix API)
+            // Strategy 2: query-string search  (sandbox search param in URL)
+            // Strategy 3: header-based search  (Production BQECore proxy)
 
-            if (directResponse.IsSuccessStatusCode)
+            var cts = new System.Threading.CancellationTokenSource();
+
+            async Task<(Transaction? txn, string json, int strategy)> TryStrategy1()
             {
-                var directParsed = JsonSerializer.Deserialize<PayrixResponse>(json, JsonOptions);
-                // Must verify the returned ID exactly matches — the API can return a different record
-                var directTxn = directParsed?.Response?.Data?.FirstOrDefault(t => t.Id == txnId);
-                if (directTxn?.Id != null)
-                    return (directTxn, json, null);
+                var resp = await _client.GetAsync(
+                    $"/txns/{Uri.EscapeDataString(txnId)}?expand[items][]",
+                    cts.Token).ConfigureAwait(false);
+                var j = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode) return (null, j, 1);
+                var parsed = JsonSerializer.Deserialize<PayrixResponse>(j, JsonOptions);
+                var txn    = parsed?.Response?.Data?.FirstOrDefault(t => t.Id == txnId);
+                return (txn?.Id != null ? txn : null, j, 1);
             }
 
-            // ── Strategy 2: query-string exact search (sandbox: search param in URL) ──
-            var qsResponse = await _client.GetAsync(
-                $"/txns?search[id][eq]={Uri.EscapeDataString(txnId)}&page[limit]=1&page[number]=1&expand[items][]").ConfigureAwait(false);
-            var qsJson = await qsResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
-
-            if (qsResponse.IsSuccessStatusCode)
+            async Task<(Transaction? txn, string json, int strategy)> TryStrategy2()
             {
-                var qsParsed = JsonSerializer.Deserialize<PayrixResponse>(qsJson, JsonOptions);
-                if (qsParsed?.Response?.Errors is not { Count: > 0 })
+                var resp = await _client.GetAsync(
+                    $"/txns?search[id][eq]={Uri.EscapeDataString(txnId)}&page[limit]=1&page[number]=1&expand[items][]",
+                    cts.Token).ConfigureAwait(false);
+                var j = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode) return (null, j, 2);
+                var parsed = JsonSerializer.Deserialize<PayrixResponse>(j, JsonOptions);
+                if (parsed?.Response?.Errors is { Count: > 0 }) return (null, j, 2);
+                var txn = parsed?.Response?.Data?.FirstOrDefault(t => t.Id == txnId);
+                return (txn?.Id != null ? txn : null, j, 2);
+            }
+
+            async Task<(Transaction? txn, string json, int strategy)> TryStrategy3()
+            {
+                var req = new HttpRequestMessage(
+                    HttpMethod.Get, "/txns?page[limit]=1&page[number]=1&expand[items][]");
+                req.Headers.Add("search", $"id[eq]={txnId}");
+                var resp = await _client.SendAsync(req, cts.Token).ConfigureAwait(false);
+                var j    = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode) return (null, j, 3);
+                var parsed = JsonSerializer.Deserialize<PayrixResponse>(j, JsonOptions);
+                if (parsed?.Response?.Errors is { Count: > 0 }) return (null, j, 3);
+                var txn = parsed?.Response?.Data?.FirstOrDefault(t => t.Id == txnId);
+                return (txn?.Id != null ? txn : null, j, 3);
+            }
+
+            var tasks = new[]
+            {
+                TryStrategy1().ContinueWith(t => t.Exception == null ? t.Result : (null, "", 1)),
+                TryStrategy2().ContinueWith(t => t.Exception == null ? t.Result : (null, "", 2)),
+                TryStrategy3().ContinueWith(t => t.Exception == null ? t.Result : (null, "", 3)),
+            };
+
+            // Wait for the first successful hit; cancel remaining once found
+            (Transaction? txn, string json, int strategy) winner = (null, "", 0);
+            var remaining = tasks.ToList();
+            while (remaining.Count > 0)
+            {
+                var done = await Task.WhenAny(remaining).ConfigureAwait(false);
+                remaining.Remove(done);
+                var result = await done.ConfigureAwait(false);
+                lastJson = result.json.Length > lastJson.Length ? result.json : lastJson;
+                if (result.txn != null)
                 {
-                    // Only accept an exact ID match — never silently return a different transaction
-                    var qsTxn = qsParsed?.Response?.Data?.FirstOrDefault(t => t.Id == txnId);
-                    if (qsTxn?.Id != null)
-                        return (qsTxn, qsJson, null);
+                    winner = result;
+                    cts.Cancel(); // signal remaining strategies to abort
+                    break;
                 }
             }
 
-            // ── Strategy 3: header-based exact search (Production BQECore proxy) ──
-            var hdrRequest = new HttpRequestMessage(
-                HttpMethod.Get, "/txns?page[limit]=1&page[number]=1&expand[items][]");
-            hdrRequest.Headers.Add("search", $"id[eq]={txnId}");
-            var hdrResponse = await _client.SendAsync(hdrRequest).ConfigureAwait(false);
-            var hdrJson     = await hdrResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
+            if (winner.txn != null)
+                return (winner.txn, winner.json, null);
 
-            if (hdrResponse.IsSuccessStatusCode)
-            {
-                var hdrParsed = JsonSerializer.Deserialize<PayrixResponse>(hdrJson, JsonOptions);
-                if (hdrParsed?.Response?.Errors is not { Count: > 0 })
-                {
-                    // Only accept an exact ID match — never silently return a different transaction
-                    var hdrTxn = hdrParsed?.Response?.Data?.FirstOrDefault(t => t.Id == txnId);
-                    if (hdrTxn?.Id != null)
-                        return (hdrTxn, hdrJson, null);
-                }
-            }
-
-            // Nothing found — return last raw response for diagnostics
-            var errors = JsonSerializer.Deserialize<PayrixResponse>(json, JsonOptions)?.Response?.Errors;
+            // Nothing found — surface best diagnostic from last response
+            var errors = JsonSerializer.Deserialize<PayrixResponse>(lastJson, JsonOptions)?.Response?.Errors;
             var errMsg = errors is { Count: > 0 }
                 ? string.Join("  |  ", errors.Select(e => e.Summary))
                 : $"Transaction '{txnId}' not found (tried path, query-string and header search).";
-            return (null, json, errMsg);
+            return (null, lastJson, errMsg);
         }
         catch (Exception ex)
         {
-            return (null, json, $"Fetch error: {ex.Message}");
+            return (null, lastJson, $"Fetch error: {ex.Message}");
         }
     }
 
@@ -355,7 +379,6 @@ public class PayrixService
             _              => true
         };
 
-        var fetchLimit = Math.Max(limit * 5, 100);
         bool hasEmail   = !string.IsNullOrWhiteSpace(email);
 
         string json = "{}";
@@ -377,23 +400,34 @@ public class PayrixService
         {
             if (_environment == PayrixEnvironment.Production)
             {
-                // ── Production: header-based search ──────────────────────────────
-                // When searchHeader is null/empty, no search header is added (broad fetch).
+                // ── Production: header-based search with pagination ───────────────
                 async Task<List<Transaction>> ProdFetch(string? searchHeader = null)
                 {
                     var parts = new List<string>();
                     if (!string.IsNullOrEmpty(searchHeader)) parts.Add(searchHeader);
                     if (!string.IsNullOrEmpty(dateHdr))      parts.Add(dateHdr);
-                    var req = new HttpRequestMessage(HttpMethod.Get,
-                        $"/txns?page[limit]={fetchLimit}&page[number]=1&expand[items][]");
-                    if (parts.Count > 0)
-                        req.Headers.Add("search", string.Join(",", parts));
-                    var resp = await _client.SendAsync(req).ConfigureAwait(false);
-                    if (!resp.IsSuccessStatusCode) return [];
-                    json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    var p = JsonSerializer.Deserialize<PayrixResponse>(json, JsonOptions);
-                    if (p?.Response?.Errors is { Count: > 0 }) return [];
-                    return p?.Response?.Data ?? [];
+                    var collected = new List<Transaction>();
+                    int pg = 1;
+                    int srvTotal = int.MaxValue;
+                    while (collected.Count < limit && collected.Count < srvTotal)
+                    {
+                        var req = new HttpRequestMessage(HttpMethod.Get,
+                            $"/txns?page[limit]={PayrixPageSize}&page[number]={pg}&expand[items][]");
+                        if (parts.Count > 0)
+                            req.Headers.Add("search", string.Join(",", parts));
+                        var resp = await _client.SendAsync(req).ConfigureAwait(false);
+                        if (!resp.IsSuccessStatusCode) break;
+                        json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        var p = JsonSerializer.Deserialize<PayrixResponse>(json, JsonOptions);
+                        if (p?.Response?.Errors is { Count: > 0 }) break;
+                        var data = p?.Response?.Data ?? [];
+                        if (data.Count == 0) break;
+                        if (pg == 1 && p?.Response?.Total is int pt && pt > 0) srvTotal = pt;
+                        collected.AddRange(data);
+                        if (srvTotal < int.MaxValue && collected.Count >= srvTotal) break;
+                        pg++;
+                    }
+                    return collected;
                 }
 
                 if (hasEmail)
@@ -436,15 +470,29 @@ public class PayrixService
             }
             else
             {
-                // ── Sandbox: query-string based search ───────────────────────────
+                // ── Sandbox: query-string based search with pagination ───────────
                 async Task<List<Transaction>> SboxFetch(string qs)
                 {
-                    var sep  = string.IsNullOrEmpty(qs) || string.IsNullOrEmpty(dateQs) ? "" : "&";
-                    var resp = await _client.GetAsync(
-                        $"/txns?{dateQs}{sep}{qs}&page[limit]={fetchLimit}&page[number]=1&expand[items][]").ConfigureAwait(false);
-                    if (!resp.IsSuccessStatusCode) return [];
-                    json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    return JsonSerializer.Deserialize<PayrixResponse>(json, JsonOptions)?.Response?.Data ?? [];
+                    var sep = string.IsNullOrEmpty(qs) || string.IsNullOrEmpty(dateQs) ? "" : "&";
+                    var collected = new List<Transaction>();
+                    int pg = 1;
+                    int srvTotal = int.MaxValue;
+                    while (collected.Count < limit && collected.Count < srvTotal)
+                    {
+                        var resp = await _client.GetAsync(
+                            $"/txns?{dateQs}{sep}{qs}&page[limit]={PayrixPageSize}&page[number]={pg}&expand[items][]")
+                            .ConfigureAwait(false);
+                        if (!resp.IsSuccessStatusCode) break;
+                        json = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        var p = JsonSerializer.Deserialize<PayrixResponse>(json, JsonOptions);
+                        var data = p?.Response?.Data ?? [];
+                        if (data.Count == 0) break;
+                        if (pg == 1 && p?.Response?.Total is int st && st > 0) srvTotal = st;
+                        collected.AddRange(data);
+                        if (srvTotal < int.MaxValue && collected.Count >= srvTotal) break;
+                        pg++;
+                    }
+                    return collected;
                 }
 
                 // Build the per-category type+status qualifier (e.g. achreturn adds status=5)
@@ -628,91 +676,131 @@ public class PayrixService
 
     // ── Search full transactions (optionally filtered by email) ───────────────
 
+    // Payrix hard-caps page[limit] at 100.  We paginate internally to honour larger limits.
+    private const int PayrixPageSize = 100;
+
     public async Task<(List<Transaction> transactions, string rawJson, string? error)> SearchByEmailAsync(string? email, int limit = 20)
     {
         bool hasEmail = !string.IsNullOrWhiteSpace(email);
 
-        // ── No email supplied: just fetch the latest N transactions ────────────
+        // ── No email supplied: paginate to collect up to `limit` latest transactions ──
         if (!hasEmail)
         {
-            var endpoint = $"/txns?page[limit]={limit}&page[number]=1&expand[items][]";
-            var resp = await _client.GetAsync(endpoint).ConfigureAwait(false);
-            var j    = resp.IsSuccessStatusCode ? await resp.Content.ReadAsStringAsync().ConfigureAwait(false) : "{}";
-            var p    = JsonSerializer.Deserialize<PayrixResponse>(j, JsonOptions);
+            var all = new List<Transaction>();
+            var lastJson = "{}";
+            int page = 1;
+            try
+            {
+                int serverTotal = int.MaxValue;
+                while (all.Count < limit && all.Count < serverTotal)
+                {
+                    var endpoint = $"/txns?page[limit]={PayrixPageSize}&page[number]={page}&expand[items][]";
+                    var resp = await _client.GetAsync(endpoint).ConfigureAwait(false);
+                    lastJson = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
 
-            if (!resp.IsSuccessStatusCode)
-                return ([], j, $"HTTP {(int)resp.StatusCode}");
+                    if (!resp.IsSuccessStatusCode)
+                        return (all.Count > 0 ? all : [], lastJson, $"HTTP {(int)resp.StatusCode}");
 
-            var errors = p?.Response?.Errors;
-            if (errors is { Count: > 0 })
-                return ([], j, string.Join("  |  ", errors.Select(e => e.Summary)));
+                    var p = JsonSerializer.Deserialize<PayrixResponse>(lastJson, JsonOptions);
+                    if (p?.Response?.Errors is { Count: > 0 })
+                        return (all.Count > 0 ? all : [], lastJson,
+                            string.Join("  |  ", p.Response.Errors.Select(e => e.Summary)));
 
-            var txns = (p?.Response?.Data ?? [])
-                .OrderByDescending(t => t.Created)
-                .Take(limit)
-                .ToList();
-            return (txns, j, null);
+                    var data = p?.Response?.Data ?? [];
+                    if (data.Count == 0) break;
+                    // Use server-reported total on first page so we know how many pages exist
+                    if (page == 1 && p?.Response?.Total is int t && t > 0) serverTotal = t;
+                    all.AddRange(data);
+
+                    if (serverTotal < int.MaxValue && all.Count >= serverTotal) break;
+                    page++;
+                }
+            }
+            catch (Exception ex) { return (all.Count > 0 ? all : [], lastJson, $"Fetch error: {ex.Message}"); }
+
+            return (all.OrderByDescending(t => t.Created).Take(limit).ToList(), lastJson, null);
         }
 
-        // ── Email supplied: filter by email ────────────────────────────────────
+        // ── Email supplied — Production: header-based search with pagination ───
         if (_environment == PayrixEnvironment.Production)
         {
             var formats = new[] { $"email[eq]={email}", $"email[equals]={email}", $"email[EQUALS]={email}" };
             foreach (var searchVal in formats)
             {
-                var req = new HttpRequestMessage(HttpMethod.Get, $"/txns?page[limit]={limit}&page[number]=1&expand[items][]");
-                req.Headers.Add("search", searchVal);
-                var resp = await _client.SendAsync(req).ConfigureAwait(false);
-                if (!resp.IsSuccessStatusCode) continue;
-
-                var j = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                var p = JsonSerializer.Deserialize<PayrixResponse>(j, JsonOptions);
-                if (p?.Response?.Errors is { Count: > 0 }) continue;
-                var data = p?.Response?.Data ?? [];
-                if (data.Count > 0)
+                var all = new List<Transaction>();
+                var lastJson = "{}";
+                int page = 1;
+                bool hadError = false;
+                int serverTotal2 = int.MaxValue;
+                while (all.Count < limit && all.Count < serverTotal2)
                 {
-                    // Strict: only return transactions that actually match the email
-                    var filtered = data
-                        .Where(t => string.Equals(t.Email, email, StringComparison.OrdinalIgnoreCase))
-                        .OrderByDescending(t => t.Created)
-                        .Take(limit)
-                        .ToList();
-                    return (filtered, j, filtered.Count == 0
-                        ? $"No transactions found for {email}."
-                        : null);
+                    var req = new HttpRequestMessage(HttpMethod.Get,
+                        $"/txns?page[limit]={PayrixPageSize}&page[number]={page}&expand[items][]");
+                    req.Headers.Add("search", searchVal);
+                    var resp = await _client.SendAsync(req).ConfigureAwait(false);
+                    if (!resp.IsSuccessStatusCode) { hadError = true; break; }
+                    lastJson = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    var p = JsonSerializer.Deserialize<PayrixResponse>(lastJson, JsonOptions);
+                    if (p?.Response?.Errors is { Count: > 0 }) { hadError = true; break; }
+                    var data = p?.Response?.Data ?? [];
+                    if (data.Count == 0) break;
+                    if (page == 1 && p?.Response?.Total is int t2 && t2 > 0) serverTotal2 = t2;
+                    all.AddRange(data);
+                    if (serverTotal2 < int.MaxValue && all.Count >= serverTotal2) break;
+                    page++;
                 }
+                if (hadError || all.Count == 0) continue;
+                var filtered = all
+                    .Where(t => string.Equals(t.Email, email, StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(t => t.Created)
+                    .Take(limit)
+                    .ToList();
+                if (filtered.Count > 0)
+                    return (filtered, lastJson, null);
             }
-            // All formats returned 0 — return the last response so Raw JSON tab shows it
-            var lastReq = new HttpRequestMessage(HttpMethod.Get, $"/txns?page[limit]={limit}&page[number]=1&expand[items][]");
-            lastReq.Headers.Add("search", $"email[eq]={email}");
-            var lastResp = await _client.SendAsync(lastReq).ConfigureAwait(false);
-            var lastJson = await lastResp.Content.ReadAsStringAsync().ConfigureAwait(false);
-            return ([], lastJson, $"No transactions found for {email}.");
+            // All formats empty — return empty with diagnostic JSON
+            var diagReq = new HttpRequestMessage(HttpMethod.Get,
+                $"/txns?page[limit]={PayrixPageSize}&page[number]=1&expand[items][]");
+            diagReq.Headers.Add("search", $"email[eq]={email}");
+            var diagResp = await _client.SendAsync(diagReq).ConfigureAwait(false);
+            var diagJson = await diagResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            return ([], diagJson, $"No transactions found for {email}.");
         }
 
-        // Sandbox: fetch with email filter then apply strict client-side match
+        // ── Sandbox: query-string email filter with pagination ─────────────────
         {
-            var endpoint = $"/txns?search[email][EQUALS]={Uri.EscapeDataString(email!)}&page[limit]=100&page[number]=1&expand[items][]";
-            var resp = await _client.GetAsync(endpoint).ConfigureAwait(false);
-            var j = resp.IsSuccessStatusCode ? await resp.Content.ReadAsStringAsync().ConfigureAwait(false) : "{}";
+            var all = new List<Transaction>();
+            var lastJson = "{}";
+            int page = 1;
+            try
+            {
+                int serverTotal3 = int.MaxValue;
+                while (all.Count < limit && all.Count < serverTotal3)
+                {
+                    var endpoint = $"/txns?search[email][EQUALS]={Uri.EscapeDataString(email!)}" +
+                                   $"&page[limit]={PayrixPageSize}&page[number]={page}&expand[items][]";
+                    var resp = await _client.GetAsync(endpoint).ConfigureAwait(false);
+                    lastJson = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (!resp.IsSuccessStatusCode) break;
+                    var p = JsonSerializer.Deserialize<PayrixResponse>(lastJson, JsonOptions);
+                    if (p?.Response?.Errors is { Count: > 0 }) break;
+                    var data = p?.Response?.Data ?? [];
+                    if (data.Count == 0) break;
+                    if (page == 1 && p?.Response?.Total is int t3 && t3 > 0) serverTotal3 = t3;
+                    all.AddRange(data);
+                    if (serverTotal3 < int.MaxValue && all.Count >= serverTotal3) break;
+                    page++;
+                }
+            }
+            catch { /* fall through */ }
 
-            if (!resp.IsSuccessStatusCode)
-                return ([], j, $"HTTP {(int)resp.StatusCode}: {j}");
-
-            var p = JsonSerializer.Deserialize<PayrixResponse>(j, JsonOptions);
-
-            var errors2 = p?.Response?.Errors;
-            if (errors2 is { Count: > 0 })
-                return ([], j, string.Join("  |  ", errors2.Select(e => e.Summary)));
-
-            // Strict: only return transactions that actually match the email
-            var filtered = (p?.Response?.Data ?? [])
+            var filtered = all
                 .Where(t => string.Equals(t.Email, email, StringComparison.OrdinalIgnoreCase))
                 .OrderByDescending(t => t.Created)
                 .Take(limit)
                 .ToList();
 
-            return (filtered, j, filtered.Count == 0
+            return (filtered, lastJson, filtered.Count == 0
                 ? $"No transactions found for {email}."
                 : null);
         }

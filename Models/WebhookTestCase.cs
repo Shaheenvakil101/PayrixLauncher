@@ -5,9 +5,26 @@ namespace PayrixLauncher.Models;
 
 public class WebhookTestCase : INotifyPropertyChanged
 {
-    public string Name { get; init; } = "";
+    public string Name        { get; init; } = "";
     public string Description { get; init; } = "";
-    public string Payload { get; set; } = "";
+    public string Tag         { get; init; } = "";
+    public string Payload     { get; set;  } = "";
+
+    // Tag badge colours
+    public string TagBg => Tag switch
+    {
+        "Entities" => "#EDE9FE",
+        "Merchant" => "#DCFCE7",
+        "Payment"  => "#DBEAFE",
+        _          => "#F1F5F9"
+    };
+    public string TagFg => Tag switch
+    {
+        "Entities" => "#6D28D9",
+        "Merchant" => "#15803D",
+        "Payment"  => "#1D4ED8",
+        _          => "#64748B"
+    };
 
     private TestStatus _status = TestStatus.Pending;
     public TestStatus Status

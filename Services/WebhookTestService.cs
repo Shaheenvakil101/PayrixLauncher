@@ -1729,19 +1729,22 @@ public static class WebhookTestService
             new()
             {
                 Name        = "Entities Created",
-                Description = "Entities created successfully — triggers merchant sign-up flow",
+                Tag         = "Entities",
+                Description = "Entities created successfully — triggers merchant creation.",
                 Payload     = BuildOnboardingPayload("Entities created successfully.", "t1_ent_onboard_001", custom)
             },
             new()
             {
                 Name        = "Merchant Boarded",
-                Description = "Merchant has been boarded — triggers merchant approval flow",
+                Tag         = "Merchant",
+                Description = "Merchant has been boarded — triggers merchant update.",
                 Payload     = BuildMerchantBoardedPayload(custom: custom)
             },
             new()
             {
                 Name        = "ACH eCheck Funded",
-                Description = "paymentType=Checking, txnStatus=Settled → records invoice payment for ACH/eCheck  ⚠ Local: use Fetch Real Txn",
+                Tag         = "Payment",
+                Description = "paymentType=Checking, txnStatus=Settled → triggers payout.",
                 Payload     = BuildAchFundedPayload(
                                   txnId:     "t1_txn_69f47e89b6fa7b757b18869",
                                   txnAmount: "898.00",
@@ -1750,7 +1753,8 @@ public static class WebhookTestService
             new()
             {
                 Name        = "ACH eCheck Return",
-                Description = "type=7, status=5, subject=returned, returnDescription present → records ACH return  ⚠ Local: use Fetch Real Txn",
+                Tag         = "Payment",
+                Description = "type=7, status=5 → records ACH return  ⚠ Local: use Fetch Real Txn",
                 Payload     = BuildECheckReturnPayload(
                                   txnId:     "t1_txn_67dd026badc4395bd51b215",
                                   txnAmount: "67.87",
@@ -1759,6 +1763,7 @@ public static class WebhookTestService
             new()
             {
                 Name        = "CC Refund",
+                Tag         = "Payment",
                 Description = "type=5, status=1, subject=captured → records CC refund/credit  ⚠ Local: use Fetch Real Txn",
                 Payload     = BuildCcRefundPayload(
                                   txnId:     "t1_txn_cc_refund_001",
@@ -1769,7 +1774,8 @@ public static class WebhookTestService
             new()
             {
                 Name        = "CC Return",
-                Description = "type=4, status=1, returned=1, subject=returned → records CC return  ⚠ Local: use Fetch Real Txn",
+                Tag         = "Payment",
+                Description = "type=4, returned=1 → records CC return  ⚠ Local: use Fetch Real Txn",
                 Payload     = BuildCcReturnPayload(
                                   txnId:     "t1_txn_cc_return_001",
                                   fortxnId:  "t1_txn_cc_return_001",
@@ -1779,7 +1785,8 @@ public static class WebhookTestService
             new()
             {
                 Name        = "Disbursement",
-                Description = "type=6 (Credit), status=4, subject=disbursement funded → records outbound disbursement  ⚠ Local: set PayrixLocalEntityCustom in Host DB settings",
+                Tag         = "Payment",
+                Description = "type=6, status=4 → records outbound disbursement  ⚠ Local: set PayrixLocalEntityCustom",
                 Payload     = BuildDisbursementPayload(
                                   txnId:     "t1_txn_disbursement_001",
                                   txnAmount: "250.00",
@@ -1788,7 +1795,8 @@ public static class WebhookTestService
             new()
             {
                 Name        = "ACH Refund",
-                Description = "type=8, status=3, full payload — ACH/eCheck refund with all standard fields  ⚠ Local: use Fetch Real Txn",
+                Tag         = "Payment",
+                Description = "type=8, status=3 — ACH/eCheck refund with all standard fields  ⚠ Local: use Fetch Real Txn",
                 Payload     = BuildAchRefundPayload(
                                   txnId:     "t1_txn_69660a911b36bf11fc0707d",
                                   fortxnId:  "t1_txn_69660a911b36bf11fc0707d",
@@ -1798,7 +1806,8 @@ public static class WebhookTestService
             new()
             {
                 Name        = "Withdrawal",
-                Description = "p1_dbm_ disbursement record, subject=withdrawal report → records payout/withdrawal  ⚠ Local: set PayrixLocalEntityCustom in Host DB settings",
+                Tag         = "Payment",
+                Description = "p1_dbm_ record, subject=withdrawal report → records payout  ⚠ Local: set PayrixLocalEntityCustom",
                 Payload     = BuildWithdrawalPayload(
                                   disbId:   "p1_dbm_671821bc0135617068e9e22",
                                   amount:   "6131.24",
@@ -1807,7 +1816,8 @@ public static class WebhookTestService
             new()
             {
                 Name        = "Withdrawal Processed",
-                Description = "p1_dbm_ disbursement record, subject=Your withdrawal was processed → funds deposited",
+                Tag         = "Payment",
+                Description = "p1_dbm_ record, subject=Your withdrawal was processed → funds deposited",
                 Payload     = BuildWithdrawalProcessedPayload(
                                   disbId:   "p1_dbm_6a10d2f0bcef792b69e2f0d",
                                   amount:   "5248.50",

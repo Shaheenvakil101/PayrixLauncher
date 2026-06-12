@@ -605,6 +605,11 @@ public class PayrixResponseBody
 
     [JsonPropertyName("errors")]
     public List<PayrixError> Errors { get; set; } = [];
+
+    /// <summary>Server-reported total record count — use this to drive pagination instead of
+    /// relying solely on page size to detect the last page.</summary>
+    [JsonPropertyName("total")]
+    public int? Total { get; set; }
 }
 
 public class PayrixError

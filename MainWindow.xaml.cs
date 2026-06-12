@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using Microsoft.Data.SqlClient;
 using System.IO;
@@ -61,6 +61,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public MainWindow(string? userName = null, string? userEmail = null)
     {
         InitializeComponent();
+        _appInstance = this;
         DataContext = this;
         if (!string.IsNullOrEmpty(userName))
         {
@@ -390,6 +391,24 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public string OverviewAvgAmount     => _transactions.Count == 0 ? "$0.00"
                                           : (_transactions.Sum(t => t.Approved ?? 0) / _transactions.Count).ToString("C2", _usd);
     public int    OverviewDisbursedCount=> _transactions.Count(t => !string.IsNullOrEmpty(t.DisbursementId));
+    public string OverviewAchPct        => _transactions.Count == 0 ? "0.0" : $"{OverviewAchCount * 100.0 / _transactions.Count:F1}";
+    public string OverviewCardPct       => _transactions.Count == 0 ? "0.0" : $"{OverviewCardCount * 100.0 / _transactions.Count:F1}";
+
+    // ── Stat-card percentage labels & progress-bar values ────────────────────
+    private string PctOfTotal(int count)
+    {
+        var t = _transactions.Count;
+        return t == 0 ? "0.0% of total" : $"{count * 100.0 / t:F1}% of total";
+    }
+    public string OverviewSettledPctLabel  => PctOfTotal(OverviewSettledCount);
+    public string OverviewCapturedPctLabel => PctOfTotal(OverviewCapturedCount);
+    public string OverviewPendingPctLabel  => PctOfTotal(OverviewPendingCount);
+    public double OverviewSettledPctDouble  => _transactions.Count == 0 ? 0 : Math.Min(100, OverviewSettledCount  * 100.0 / _transactions.Count);
+    public double OverviewCapturedPctDouble => _transactions.Count == 0 ? 0 : Math.Min(100, OverviewCapturedCount * 100.0 / _transactions.Count);
+    public double OverviewPendingPctDouble  => _transactions.Count == 0 ? 0 : Math.Min(100, OverviewPendingCount  * 100.0 / _transactions.Count);
+
+    // Donut chart geometry helpers (130×130 Canvas, stroke centre radius = (130-22)/2 = 54 px)
+    private const double _donutCx = 65, _donutCy = 65, _donutR = 54;
 
     // ── Dashboard KPIs ────────────────────────────────────────────────────────
     public string DashTotalVolume     => _transactions.Sum(t => t.ApprovedDollars).ToString("C2", _usd);
@@ -397,13 +416,24 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         get
         {
-            var total    = _transactions.Count;
-            if (total == 0) return "—";
-            var settled  = _transactions.Count(t => t.Status == 3 || t.Status == 4);
+            var total = _transactions.Count;
+            if (total == 0) return "0.0%";
+            var settled = _transactions.Count(t => t.Status == 3 || t.Status == 4);
             return $"{settled * 100.0 / total:F1}%";
         }
     }
+    public double DashSettlementRateDouble
+    {
+        get
+        {
+            var total = _transactions.Count;
+            if (total == 0) return 0;
+            var settled = _transactions.Count(t => t.Status == 3 || t.Status == 4);
+            return settled * 100.0 / total;
+        }
+    }
     public int    DashActiveMerchants  => _merchants.Count(m => m.Status == 1);
+    public int    DashTotalCount       => _transactions.Count;
     public int    DashApprovedCount    => _transactions.Count(t => t.Status == 1);
     public int    DashCapturedCount    => _transactions.Count(t => t.Status == 3);
     public int    DashDeclinedCount    => _transactions.Count(t => t.Status == 2);
@@ -412,6 +442,63 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public int    DashReturnedCount    => _transactions.Count(t => t.Status == 5 &&  t.IsAch);
     public string DashApprovedAmount   => _transactions.Where(t => t.Status == 1).Sum(t => t.ApprovedDollars).ToString("C2", _usd);
     public string DashAvgAmount        => OverviewAvgAmount;
+
+    // Percentage helpers for status breakdown
+    private string Pct(int count) { var t = _transactions.Count; return t == 0 ? "0.0%" : $"({count * 100.0 / t:F1}%)"; }
+    public string DashApprovedPct  => Pct(DashApprovedCount);
+    public string DashCapturedPct  => Pct(DashCapturedCount);
+    public string DashPendingPct   => Pct(OverviewPendingCount);
+    public string DashDeclinedPct  => Pct(DashDeclinedCount);
+    public string DashErrorPct     => Pct(DashErrorCount);
+    public string DashAchPct       => Pct(DashSettledAchCount + DashReturnedCount);
+
+    // Bottom 6-card row
+    public int    DashVoidCount        => _transactions.Count(t => t.Status == 6);
+    public string DashVoidPct          => Pct(DashVoidCount);
+    public string DashPendingPct2      => Pct(OverviewPendingCount);
+    public string DashFailedPct        => Pct(OverviewFailedCount);
+    public string DashRefundedAmount   => _transactions.Where(t => t.Status == 7).Sum(t => t.ApprovedDollars).ToString("C2", _usd);
+    public string DashSettledPct       => Pct(OverviewSettledCount);
+    public string DashSettledVolumePct
+    {
+        get
+        {
+            var total = _transactions.Sum(t => t.ApprovedDollars);
+            if (total == 0) return "0.0%";
+            var settled = _transactions.Where(t => t.Status == 3 || t.Status == 4).Sum(t => t.ApprovedDollars);
+            return $"({settled * 100.0m / total:F1}% of total volume)";
+        }
+    }
+
+    // Settlement sub-line counts
+    public int DashInProgressCount  => _transactions.Count(t => t.Status == 1 || t.Status == 3);
+
+    // Last updated
+    public string DashLastUpdated   => $"Last updated: {DateTime.Now:MMM d, yyyy h:mm tt}";
+
+    // Recent transactions (top 5, most recent first)
+    public IEnumerable<Models.Transaction> DashRecentTransactions
+        => _transactions.OrderByDescending(t => t.Created).Take(5);
+
+    // Top merchants by approved volume (top 5)
+    public IEnumerable<(string Name, string Volume, int Count)> DashTopMerchants
+        => _transactions
+           .GroupBy(t => t.Merchant ?? "Unknown")
+           .OrderByDescending(g => g.Sum(t => t.ApprovedDollars))
+           .Take(5)
+           .Select(g => (
+               Name: g.FirstOrDefault()?.MerchantDisplayName ?? g.Key,
+               Volume: g.Sum(t => t.ApprovedDollars).ToString("C2", new System.Globalization.CultureInfo("en-US")),
+               Count: g.Count()
+           ));
+
+    // Additional helpers
+    public int    DashTotalMerchants   => _merchants.Count;
+    public int    DashBankCount        => _transactions.Count(t => !t.IsAch && t.Type == 3);
+    private string PctByCount(int count) { var t = _transactions.Count; return t == 0 ? "(0.0%)" : $"({count * 100.0 / t:F1}%)"; }
+    public string DashCardPct          => PctByCount(OverviewCardCount);
+    public string DashAchMethodPct     => PctByCount(OverviewAchCount);
+    public string DashBankPct          => PctByCount(DashBankCount);
 
     // ── API Tools KPIs (live from collections + request log) ─────────────────
     public int    OverviewApiCount        => _collections.Sum(c => c.Requests.Count);
@@ -440,6 +527,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         OnPropertyChanged(nameof(OverviewCapturedCount));
         OnPropertyChanged(nameof(OverviewAvgAmount));
         OnPropertyChanged(nameof(OverviewDisbursedCount));
+        OnPropertyChanged(nameof(OverviewAchPct));
+        OnPropertyChanged(nameof(OverviewCardPct));
         // Dashboard KPIs
         OnPropertyChanged(nameof(DashTotalVolume));
         OnPropertyChanged(nameof(DashSettlementRate));
@@ -452,6 +541,159 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         OnPropertyChanged(nameof(DashReturnedCount));
         OnPropertyChanged(nameof(DashApprovedAmount));
         OnPropertyChanged(nameof(DashAvgAmount));
+        OnPropertyChanged(nameof(DashSettlementRateDouble));
+        OnPropertyChanged(nameof(DashApprovedPct));
+        OnPropertyChanged(nameof(DashCapturedPct));
+        OnPropertyChanged(nameof(DashPendingPct));
+        OnPropertyChanged(nameof(DashDeclinedPct));
+        OnPropertyChanged(nameof(DashErrorPct));
+        OnPropertyChanged(nameof(DashAchPct));
+        OnPropertyChanged(nameof(DashVoidCount));
+        OnPropertyChanged(nameof(DashVoidPct));
+        OnPropertyChanged(nameof(DashPendingPct2));
+        OnPropertyChanged(nameof(DashFailedPct));
+        OnPropertyChanged(nameof(DashRefundedAmount));
+        OnPropertyChanged(nameof(DashSettledPct));
+        OnPropertyChanged(nameof(DashSettledVolumePct));
+        OnPropertyChanged(nameof(DashInProgressCount));
+        OnPropertyChanged(nameof(DashLastUpdated));
+        OnPropertyChanged(nameof(DashTotalMerchants));
+        OnPropertyChanged(nameof(DashBankCount));
+        OnPropertyChanged(nameof(DashCardPct));
+        OnPropertyChanged(nameof(DashAchMethodPct));
+        OnPropertyChanged(nameof(DashBankPct));
+        OnPropertyChanged(nameof(DashRecentTransactions));
+        OnPropertyChanged(nameof(DashTopMerchants));
+        // Stat-card percentages
+        OnPropertyChanged(nameof(OverviewSettledPctLabel));
+        OnPropertyChanged(nameof(OverviewCapturedPctLabel));
+        OnPropertyChanged(nameof(OverviewPendingPctLabel));
+        OnPropertyChanged(nameof(OverviewSettledPctDouble));
+        OnPropertyChanged(nameof(OverviewCapturedPctDouble));
+        OnPropertyChanged(nameof(OverviewPendingPctDouble));
+        OnPropertyChanged(nameof(DashTotalCount));
+        // Donut charts — set directly to avoid DoubleCollection binding/freeze issues
+        UpdateDonutChart();
+        UpdateDashboardDonut();
+    }
+
+    private void DonutChart_Loaded(object sender, RoutedEventArgs e) => UpdateDonutChart();
+
+    private void UpdateDonutChart()
+    {
+        if (DonutGreenArc == null) return;
+        if (!Dispatcher.CheckAccess()) { Dispatcher.Invoke(UpdateDonutChart); return; }
+
+        double total = _transactions.Count;
+        if (total == 0)
+        {
+            // Show faint placeholder segments so the chart is visually present
+            DonutGreenArc.Opacity  = 0.18; DonutGreenArc.Data  = MakeDonutArc(0.00, 0.40);
+            DonutBlueArc.Opacity   = 0.18; DonutBlueArc.Data   = MakeDonutArc(0.40, 0.68);
+            DonutAmberArc.Opacity  = 0.18; DonutAmberArc.Data  = MakeDonutArc(0.68, 0.84);
+            DonutRedArc.Opacity    = 0.18; DonutRedArc.Data    = MakeDonutArc(0.84, 1.00);
+            return;
+        }
+
+        DonutGreenArc.Opacity = DonutBlueArc.Opacity = DonutAmberArc.Opacity = DonutRedArc.Opacity = 1.0;
+
+        // Approved/Pending (status 1)
+        int green = _transactions.Count(t => t.Status == 1);
+        // Captured + all Settled ACH (status 3 and 4)
+        int blue  = _transactions.Count(t => t.Status == 3 || t.Status == 4);
+        // Declined (status 2)
+        int amber = _transactions.Count(t => t.Status == 2);
+        // Returned, Void, Refunded, and everything else
+        int red   = (int)total - green - blue - amber;
+
+        double start = 0;
+        DonutGreenArc.Data = MakeDonutArc(start, start += green / total);
+        DonutBlueArc.Data  = MakeDonutArc(start, start += blue  / total);
+        DonutAmberArc.Data = MakeDonutArc(start, start += amber / total);
+        DonutRedArc.Data   = red > 0 ? MakeDonutArc(start, Math.Min(1.0, start + red / total)) : null;
+    }
+
+    private void DashDonutChart_Loaded(object sender, RoutedEventArgs e) => UpdateDashboardDonut();
+
+    private void UpdateDashboardDonut()
+    {
+        if (DashDonutGreenArc == null) return;
+        if (!Dispatcher.CheckAccess()) { Dispatcher.Invoke(UpdateDashboardDonut); return; }
+
+        double total = _transactions.Count;
+        OnPropertyChanged(nameof(DashTotalCount));
+
+        if (total == 0)
+        {
+            DashDonutGreenArc.Opacity  = 0.18; DashDonutGreenArc.Data  = MakeDonutArc(0.00, 0.30);
+            DashDonutBlueArc.Opacity   = 0.18; DashDonutBlueArc.Data   = MakeDonutArc(0.30, 0.50);
+            DashDonutAmberArc.Opacity  = 0.18; DashDonutAmberArc.Data  = MakeDonutArc(0.50, 0.65);
+            DashDonutRedArc.Opacity    = 0.18; DashDonutRedArc.Data    = MakeDonutArc(0.65, 0.75);
+            DashDonutOrangeArc.Opacity = 0.18; DashDonutOrangeArc.Data = MakeDonutArc(0.75, 0.87);
+            DashDonutPurpleArc.Opacity = 0.18; DashDonutPurpleArc.Data = MakeDonutArc(0.87, 1.00);
+            if (DashDonutCenterLabel != null) DashDonutCenterLabel.Text = "No data";
+            return;
+        }
+
+        DashDonutGreenArc.Opacity = DashDonutBlueArc.Opacity = DashDonutAmberArc.Opacity =
+            DashDonutRedArc.Opacity = DashDonutOrangeArc.Opacity = DashDonutPurpleArc.Opacity = 1.0;
+        if (DashDonutCenterLabel != null) DashDonutCenterLabel.Text = ((int)total).ToString();
+
+        int green  = _transactions.Count(t => t.Status == 1);                        // Approved
+        int blue   = _transactions.Count(t => t.Status == 3);                        // Captured
+        int amber  = _transactions.Count(t => t.Status == 2);                        // Pending/Declined
+        int red    = _transactions.Count(t => t.Status == 2 && !t.IsAch);            // Declined (non-ACH)
+        int orange = _transactions.Count(t => t.Status == 4 && !t.IsAch);            // Error/Failed
+        int purple = _transactions.Count(t => (t.Status == 4 || t.Status == 5) && t.IsAch); // ACH
+
+        // Recalculate amber as pure pending (status 2 non-declined overlap handled)
+        amber  = _transactions.Count(t => t.Status == 2);
+        red    = DashDeclinedCount;
+        orange = DashErrorCount;
+        purple = DashSettledAchCount + DashReturnedCount;
+
+        double start = 0;
+        DashDonutGreenArc.Data  = green  > 0 ? MakeDonutArc(start, start += green  / total) : null;
+        DashDonutBlueArc.Data   = blue   > 0 ? MakeDonutArc(start, start += blue   / total) : null;
+        DashDonutAmberArc.Data  = amber  > 0 ? MakeDonutArc(start, start += amber  / total) : null;
+        DashDonutRedArc.Data    = red    > 0 ? MakeDonutArc(start, start += red    / total) : null;
+        DashDonutOrangeArc.Data = orange > 0 ? MakeDonutArc(start, start += orange / total) : null;
+        DashDonutPurpleArc.Data = purple > 0 ? MakeDonutArc(start, Math.Min(1.0, start + purple / total)) : null;
+    }
+
+    // Returns an open arc Path for the donut chart.
+    // startFrac and endFrac are fractions of the full circle (0.0 – 1.0), starting at 12 o'clock.
+    private static System.Windows.Media.PathGeometry MakeDonutArc(double startFrac, double endFrac)
+    {
+        const double cx = _donutCx, cy = _donutCy, r = _donutR;
+        const double tau = 2 * Math.PI;
+
+        double span = endFrac - startFrac;
+        if (span <= 0) return new System.Windows.Media.PathGeometry();
+
+        // Clamp tiny arcs so they don't render as full circles
+        if (span >= 1.0) span = 0.9999;
+
+        double a0 = startFrac * tau - Math.PI / 2;   // 12 o'clock = -π/2
+        double a1 = (startFrac + span) * tau - Math.PI / 2;
+
+        var p0 = new System.Windows.Point(cx + r * Math.Cos(a0), cy + r * Math.Sin(a0));
+        var p1 = new System.Windows.Point(cx + r * Math.Cos(a1), cy + r * Math.Sin(a1));
+
+        var arc = new System.Windows.Media.ArcSegment(
+            p1,
+            new System.Windows.Size(r, r),
+            /*rotationAngle*/ 0,
+            /*isLargeArc*/ span > 0.5,
+            System.Windows.Media.SweepDirection.Clockwise,
+            /*isStroked*/ true);
+
+        var fig = new System.Windows.Media.PathFigure { StartPoint = p0, IsClosed = false };
+        fig.Segments.Add(arc);
+
+        var geo = new System.Windows.Media.PathGeometry();
+        geo.Figures.Add(fig);
+        return geo;
     }
 
     private void RefreshOverviewApiKpis()
@@ -536,15 +778,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ApplyTabVisibility(s.HiddenTabs ?? []);
 
         // Webhook config panel (date filter / entity custom / DB strings)
-        if (s.WebhookConfigExpanded)
-        {
-            WebhookDateFilterPanel.Visibility   = Visibility.Visible;
-            WebhookEntityCustomPanel.Visibility = Visibility.Visible;
-            WebhookDbConfigPanel.Visibility     = Visibility.Visible;
-            WebhookConfigToggleText.Text        = "⚙ Config ▲";
-            if (WebhookConfigToggleText2 is not null)
-                WebhookConfigToggleText2.Text   = "⚙ Config ▲";
-        }
+        // Default is expanded; only collapse if explicitly saved as collapsed
+        var webhookExpanded = s.WebhookConfigExpanded;
+        WebhookDateFilterPanel.Visibility   = webhookExpanded ? Visibility.Visible : Visibility.Collapsed;
+        WebhookEntityCustomPanel.Visibility = webhookExpanded ? Visibility.Visible : Visibility.Collapsed;
+        WebhookDbConfigPanel.Visibility     = webhookExpanded ? Visibility.Visible : Visibility.Collapsed;
+        WebhookConfigToggleText.Text        = webhookExpanded ? "⚙ Config ▲" : "⚙ Config ▼";
+        if (WebhookConfigToggleText2 is not null)
+            WebhookConfigToggleText2.Text   = webhookExpanded ? "⚙ Config ▲" : "⚙ Config ▼";
 
         // Theme — always apply explicitly so the UI, toggle state and _isDarkMode flag
         // are guaranteed to be in sync regardless of what App.xaml pre-loaded.
@@ -877,6 +1118,23 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         PersistAndApplyBqeToken(url, email, result.UserName ?? email, result.Token!);
     }
 
+    private void BqeCoreUrlBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        // auto-save URL to active profile when focus leaves the URL box
+        if (!string.IsNullOrWhiteSpace(BqeCoreUrlBox.Text))
+        {
+            var s = Services.SettingsService.Load();
+            s.BqeCoreBaseUrl = GetHostRoot(BqeCoreUrlBox.Text.Trim());
+            Services.SettingsService.Save(s);
+        }
+    }
+
+    private void BqePasswordBox_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.Enter)
+            BqeSignInBtn_Click(sender, e);
+    }
+
     private void PersistAndApplyBqeToken(string url, string email, string userName, string token)
     {
         var s = Services.SettingsService.Load();
@@ -1011,6 +1269,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void FetchBtn_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
         var envLabel = IsSandbox ? "Sandbox" : "Production";
 
@@ -1045,6 +1304,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         SetExportEnabled(false);
         SetStatus($"[{envLabel}] Fetching {ids.Length} transaction(s)...");
         SetConnectionStatus(false);
+        SetBusyCount(ids.Length);
 
         _transactions.Clear();
         _items.Clear();
@@ -1060,11 +1320,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
             var service = new PayrixService(apiKey, environment);
             int success = 0, failed = 0;
-            var _fetchLock  = new object();
-            var _sem        = new SemaphoreSlim(5, 5);
-            // Collect results outside ObservableCollection; bulk-add after WhenAll to fire
-            // CollectionChanged (→ RefreshOverviewKpis) only once instead of per-item.
-            var collected   = new List<(Transaction txn, string rawJson)>();
+            var _fetchLock = new object();
+            var _sem       = new SemaphoreSlim(5, 5);
 
             SetStatus($"[{envLabel}] Fetching {ids.Length} transaction(s) in parallel…");
             await Task.WhenAll(ids.Select(async id =>
@@ -1079,16 +1336,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                         return;
                     }
                     await EnrichTransactionAsync(service, txn, envLabel, bulkMode: true);
-                    lock (_fetchLock) { collected.Add((txn, rawJson)); success++; }
+                    // Add to grid immediately so it appears as soon as it's ready
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        _suppressKpiRefresh = true;
+                        _transactions.Add(txn);
+                        _rawJsons.Add(rawJson);
+                        _suppressKpiRefresh = false;
+                    });
+                    lock (_fetchLock) success++;
                 }
                 catch { lock (_fetchLock) { failed++; } }
-                finally { _sem.Release(); }
+                finally { _sem.Release(); IncrementBusyProgress(); }
             }));
 
-            // Batch-add to ObservableCollection — fires KPI refresh only once
-            _suppressKpiRefresh = true;
-            try   { foreach (var (t, r) in collected) { _transactions.Add(t); _rawJsons.Add(r); } }
-            finally { _suppressKpiRefresh = false; RefreshOverviewKpis(); }
+            RefreshOverviewKpis();
 
             if (_rawJsons.Count > 0)
             {
@@ -1108,6 +1370,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     : $"[{envLabel}] Fetched {success} OK, {failed} failed.",
                 error: failed > 0 && success == 0);
 
+            if (success > 0)
+                ShowToast($"All {success} transaction(s) fetched — enjoy! 🎉");
+
             SetExportEnabled(_transactions.Count > 0);
 
             if (_transactions.Count > 0)
@@ -1123,6 +1388,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
         finally
         {
+            SetBusy(false);
             FetchBtn.IsEnabled = true;
             FetchLatestBtn.IsEnabled = true;
         }
@@ -1132,6 +1398,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void SearchEmailBtn_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
         var envLabel = IsSandbox ? "Sandbox" : "Production";
 
@@ -1153,6 +1420,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             ? $"[{envLabel}] Searching transactions for {email}…"
             : $"[{envLabel}] Fetching latest {limit} transactions…");
         SetConnectionStatus(false);
+        // Don't set count yet — let timer simulation run during the API call.
+        // SetBusyCount is called below once the merged list is known.
 
         _transactions.Clear();
         _items.Clear();
@@ -1168,9 +1437,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
             var service = new PayrixService(apiKey, environment);
 
-            // Fetch regular + ACH in parallel, merge by ID
-            // Pass null email when box is empty so service fetches without email filter
-            var fetchAll = service.SearchByEmailAsync(hasEmail ? email : null, limit * 5);
+            // ── Phase 1: fetch from Payrix API (pagination, unknown count) ───────
+            SetBusyText("🌐  Fetching from Payrix API…");
+            var fetchAll = service.SearchByEmailAsync(hasEmail ? email : null, limit);
             var fetchAch = service.SearchByPaymentCategoryAsync(hasEmail ? email : null, "ach", limit);
             await Task.WhenAll(fetchAll, fetchAch);
 
@@ -1204,12 +1473,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 return;
             }
 
-            // Enrich all transactions in parallel (items + payment + DB per txn concurrently)
-            SetStatus($"[{envLabel}] Loading line items for {merged.Count} transaction(s)…");
-            await Task.WhenAll(merged.Select(txn => EnrichTransactionAsync(service, txn, envLabel, bulkMode: true)));
-            _suppressKpiRefresh = true;
-            try   { foreach (var txn in merged) _transactions.Add(txn); }
-            finally { _suppressKpiRefresh = false; RefreshOverviewKpis(); }
+            // ── Phase 2: enrich in parallel — counter visible the whole time ────
+            SetStatus($"[{envLabel}] Loading details for {merged.Count} transaction(s)…");
+            SetBusyCount(merged.Count);
+            await Task.WhenAll(merged.Select(async txn =>
+            {
+                await EnrichTransactionAsync(service, txn, envLabel, bulkMode: true);
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    _suppressKpiRefresh = true;
+                    _transactions.Add(txn);
+                    _suppressKpiRefresh = false;
+                });
+                IncrementBusyProgress();
+            }));
+            RefreshOverviewKpis();
 
             UpdateSummary();
             SetConnectionStatus(true);
@@ -1219,6 +1497,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 ? $"[{envLabel}] Found {merged.Count} transaction(s) for {email}"
                 : $"[{envLabel}] Fetched {merged.Count} latest transaction(s)";
             SetStatus(foundMsg + (achCount > 0 ? $" (including {achCount} ACH)." : "."));
+
+            ShowToast($"All {merged.Count} transaction(s) fetched — enjoy! 🎉");
 
             SetExportEnabled(true);
 
@@ -1235,6 +1515,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
         finally
         {
+            SetBusy(false);
             SearchEmailBtn.IsEnabled = true;
             FetchBtn.IsEnabled = true;
             FetchLatestBtn.IsEnabled = true;
@@ -1243,6 +1524,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void FetchLatestBtn_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
         var envLabel = IsSandbox ? "Sandbox" : "Production";
 
@@ -1281,10 +1563,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
             var service = new PayrixService(apiKey, environment);
 
-            // Fetch regular transactions AND ACH in parallel, then merge
-            // Pass null email when box is empty — service fetches latest without filter
+            // ── Phase 1: fetch from Payrix API ───────────────────────────────────
+            SetBusyText("🌐  Fetching from Payrix API…");
             var emailArg = hasEmail ? email : null;
-            var fetchAll = service.SearchByEmailAsync(emailArg, count * 5);
+            var fetchAll = service.SearchByEmailAsync(emailArg, count);
             var fetchAch = service.SearchByPaymentCategoryAsync(emailArg, "ach", count);
             await Task.WhenAll(fetchAll, fetchAch);
 
@@ -1315,11 +1597,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 return;
             }
 
-            foreach (var txn in merged)
+            // ── Phase 2: enrich in parallel with live counter ────────────────────
+            SetStatus($"[{envLabel}] Loading details for {merged.Count} transaction(s)…");
+            SetBusyCount(merged.Count);
+            await Task.WhenAll(merged.Select(async txn =>
             {
                 await EnrichTransactionAsync(service, txn, envLabel, bulkMode: true);
-                _transactions.Add(txn);
-            }
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    _suppressKpiRefresh = true;
+                    _transactions.Add(txn);
+                    _suppressKpiRefresh = false;
+                });
+                IncrementBusyProgress();
+            }));
+            RefreshOverviewKpis();
 
             TxnIdsBox.Text = string.Join(", ", merged.Select(t => t.Id).Where(id => id is not null));
 
@@ -1334,6 +1626,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 ? $"[{envLabel}] Loaded {merged.Count} transaction(s) for {email}"
                 : $"[{envLabel}] Loaded latest {merged.Count} transaction(s)";
             SetStatus(okMsg + (achCount > 0 ? $" (including {achCount} ACH)." : "."));
+
+            ShowToast($"All {merged.Count} transaction(s) fetched — enjoy! 🎉");
 
             SetExportEnabled(true);
 
@@ -1350,6 +1644,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
         finally
         {
+            SetBusy(false);
             FetchLatestBtn.IsEnabled = true;
             FetchBtn.IsEnabled = true;
             SearchEmailBtn.IsEnabled = true;
@@ -1376,11 +1671,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         var email = UserEmailBox.Text.Trim();
-        // Use the same count dropdown as Fetch Latest so the user controls quantity in one place
         var countText = (LatestCountBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "20";
         var limit = int.TryParse(countText, out var l) && l > 0 ? l : 20;
         var label = category == "ach" ? "ACH/eCheck" : "Credit Card";
 
+        SetBusy(true);
         FetchAchBtn.IsEnabled  = false;
         FetchCardBtn.IsEnabled = false;
         FetchBtn.IsEnabled     = false;
@@ -1403,6 +1698,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
             var service = new PayrixService(apiKey, environment);
 
+            // ── Phase 1: fetch from Payrix API ───────────────────────────────────
+            SetBusyText("🌐  Fetching from Payrix API…");
             var (txns, rawJson, error) = await service.SearchByPaymentCategoryAsync(
                 string.IsNullOrEmpty(email) ? null : email, category, limit);
 
@@ -1415,13 +1712,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 return;
             }
 
-            SetStatus($"[{envLabel}] Loading line items for {txns.Count} transaction(s)…");
-            await Task.WhenAll(txns.Select(txn => EnrichTransactionAsync(service, txn, envLabel, bulkMode: true)));
-            _suppressKpiRefresh = true;
-            try   { foreach (var txn in txns) _transactions.Add(txn); }
-            finally { _suppressKpiRefresh = false; RefreshOverviewKpis(); }
+            // ── Phase 2: enrich in parallel with live counter ────────────────────
+            SetStatus($"[{envLabel}] Loading details for {txns.Count} {label} transaction(s)…");
+            SetBusyCount(txns.Count);
+            await Task.WhenAll(txns.Select(async txn =>
+            {
+                await EnrichTransactionAsync(service, txn, envLabel, bulkMode: true);
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    _suppressKpiRefresh = true;
+                    _transactions.Add(txn);
+                    _suppressKpiRefresh = false;
+                });
+                IncrementBusyProgress();
+            }));
+            RefreshOverviewKpis();
 
-            // Show fetched IDs in the TxnIdsBox
             TxnIdsBox.Text = string.Join(", ", txns.Select(t => t.Id).Where(id => id is not null));
 
             UpdateSummary();
@@ -1429,12 +1735,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             SetStatus($"[{envLabel}] Loaded {txns.Count} {label} transaction(s)." +
                       (error is not null ? $"  ⚠ {error}" : ""));
 
+            if (txns.Count > 0)
+                ShowToast($"All {txns.Count} {label} transaction(s) fetched — enjoy! 🎉");
+
             SetExportEnabled(_transactions.Count > 0);
 
             if (_transactions.Count > 0)
-            {
                 LoadAllItems();
-            }
         }
         catch (Exception ex)
         {
@@ -1444,6 +1751,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
         finally
         {
+            SetBusy(false);
             FetchAchBtn.IsEnabled    = true;
             FetchCardBtn.IsEnabled   = true;
             FetchBtn.IsEnabled       = true;
@@ -1579,7 +1887,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     // Limits concurrent Payrix API enrichment calls to avoid saturating HttpClient's connection pool.
-    private static readonly SemaphoreSlim _enrichSemaphore = new(6, 6);
+    private static readonly SemaphoreSlim _enrichSemaphore = new(12, 12);
 
     /// <param name="bulkMode">
     /// When true (batch fetch): only fetch missing items — skip payment details and DB company
@@ -1809,8 +2117,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     // ── Export ────────────────────────────────────────────────────────────────
 
+    private void ExportDashboardJson_Click(object sender, RoutedEventArgs e)
+        => ExportJsonBtn_Click(sender, e);
+
+    private void ExportDashboardCsv_Click(object sender, RoutedEventArgs e)
+        => ExportCsvBtn_Click(sender, e);
+
+    private void NavToTransactions_Click(object sender, RoutedEventArgs e)
+        => NavTxn.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+
     private async void ExportJsonBtn_Click(object sender, RoutedEventArgs e)
     {
+        // overlay not shown for quick operation
         try
         {
             var dlg = new System.Windows.Forms.FolderBrowserDialog { Description = "Select export folder" };
@@ -1827,6 +2145,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void ExportCsvBtn_Click(object sender, RoutedEventArgs e)
     {
+        // overlay not shown for quick operation
         try
         {
             var dlg = new System.Windows.Forms.FolderBrowserDialog { Description = "Select export folder" };
@@ -2200,9 +2519,59 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly System.Collections.ObjectModel.ObservableCollection<Models.UserSubscribePackage>
         _subscriptions = [];
 
+    // Paged view bound to the DataGrid
+    private readonly System.Collections.ObjectModel.ObservableCollection<Models.UserSubscribePackage>
+        _pagedSubs = [];
+
+    private int _subPage     = 1;
+    private int _subPageSize = 25;
+
     private void InitSubscriptions()
     {
-        SubscriptionsGrid.ItemsSource = _subscriptions;
+        SubscriptionsGrid.ItemsSource = _pagedSubs;
+    }
+
+    private void RefreshSubPage()
+    {
+        // Guard: called during XAML init before UI elements exist
+        if (SubPagingText is null || SubPageNumText is null ||
+            SubPrevPageBtn is null || SubNextPageBtn is null) return;
+
+        _pagedSubs.Clear();
+        var total = _subscriptions.Count;
+        var start = (_subPage - 1) * _subPageSize;
+        var items = _subscriptions.Skip(start).Take(_subPageSize).ToList();
+        foreach (var s in items) _pagedSubs.Add(s);
+
+        var end = start + items.Count;
+        SubPagingText.Text  = total == 0
+            ? "No entries"
+            : $"Showing {start + 1} to {end} of {total} entries";
+        SubPageNumText.Text  = _subPage.ToString();
+        SubPrevPageBtn.IsEnabled = _subPage > 1;
+        SubNextPageBtn.IsEnabled = end < total;
+        SubCountText.Text = $"{total} Subscription{(total == 1 ? "" : "(s)")}";
+    }
+
+    private void SubPageSizeBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (SubPageSizeBox.SelectedItem is System.Windows.Controls.ComboBoxItem item &&
+            int.TryParse(item.Content?.ToString(), out var size))
+        {
+            _subPageSize = size;
+            _subPage     = 1;
+            RefreshSubPage();
+        }
+    }
+
+    private void SubPrevPageBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (_subPage > 1) { _subPage--; RefreshSubPage(); }
+    }
+
+    private void SubNextPageBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if ((_subPage * _subPageSize) < _subscriptions.Count) { _subPage++; RefreshSubPage(); }
     }
 
     private async void SubFetchDbBtn_Click(object sender, RoutedEventArgs e)
@@ -2252,8 +2621,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
 
             foreach (var p in packages) _subscriptions.Add(p);
+            _subPage = 1; RefreshSubPage();
 
-            SubCountText.Text            = $"{_subscriptions.Count} subscription(s)";
             SubChangeExpiryBtn.IsEnabled = false;
             SubStatusText.Text           = _subscriptions.Count > 0
                 ? $"✅  Loaded {_subscriptions.Count} subscription(s) from Host DB."
@@ -2589,6 +2958,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
 
     private async void SubAutoFillCompanyBtn_Click(object sender, RoutedEventArgs e)
     {
+        // overlay not shown for quick operation
         // Determine current company ID (pre-select after loading)
         var custom   = EntityCustomBox?.Text?.Trim() ?? "";
         string currentCompanyId = "";
@@ -2771,7 +3141,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
                 foreach (var p in inactive) _subscriptions.Add(p);
             }
 
-            SubCountText.Text        = $"{_subscriptions.Count} subscription(s)";
+            _subPage = 1; RefreshSubPage();
             SubChangeExpiryBtn.IsEnabled = false;
 
             if (_subscriptions.Count > 0)
@@ -2864,7 +3234,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
 
             SubStatusText.Text       = $"✅  '{label}' deleted from Host DB.";
             SubStatusText.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
-            SubCountText.Text        = $"{_subscriptions.Count} subscription(s)";
+            RefreshSubPage();
         }
         finally
         {
@@ -3060,8 +3430,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
         SubAddCard.Visibility          = Visibility.Visible;
         SubAddStatus.Text              = "⏳  Loading available packages…";
 
-        SubAddPackageBox.Items.Clear();
-        SubAddPlanBox.Items.Clear();
+        SubPackagePlanPanel.Children.Clear();
         SubAddStartDatePicker.SelectedDate = DateTime.Today;
 
         try
@@ -3077,12 +3446,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
             }
 
             _availablePackages = helper.Packages;
-            foreach (var pkg in helper.Packages)
-                SubAddPackageBox.Items.Add(new System.Windows.Controls.ComboBoxItem
-                    { Content = pkg.Name, Tag = pkg.Id.ToString() });
-
-            if (SubAddPackageBox.Items.Count > 0)
-                SubAddPackageBox.SelectedIndex = 0;
+            BuildPackagePlanTable();
 
             SubAddStatus.Text       = $"✅  {helper.Packages.Count} package(s) available.";
             SubAddStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
@@ -3094,21 +3458,208 @@ ORDER BY MAX(s.ExpiresOn) DESC";
         }
     }
 
-    private void SubAddPackageBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    /// <summary>Walks SubPackagePlanPanel and returns the checked RadioButton, or null.</summary>
+    private System.Windows.Controls.RadioButton? GetCheckedPlanRadioButton()
     {
-        SubAddPlanBox.Items.Clear();
-        if (SubAddPackageBox.SelectedItem is not System.Windows.Controls.ComboBoxItem item) return;
-        if (!Guid.TryParse(item.Tag?.ToString(), out var pkgId)) return;
+        return SubPackagePlanPanel
+            .Children.OfType<System.Windows.Controls.Grid>()
+            .SelectMany(g => g.Children.OfType<System.Windows.Controls.RadioButton>())
+            .FirstOrDefault(rb => rb.IsChecked == true);
+    }
 
-        var pkg = _availablePackages.FirstOrDefault(p => p.Id == pkgId);
-        if (pkg?.Plans == null) return;
+    /// <summary>
+    /// Builds the pricing table: plan-type columns × package rows, each cell a RadioButton + price.
+    /// </summary>
+    private void BuildPackagePlanTable()
+    {
+        SubPackagePlanPanel.Children.Clear();
+        if (_availablePackages.Count == 0) return;
 
-        foreach (var plan in pkg.Plans)
-            SubAddPlanBox.Items.Add(new System.Windows.Controls.ComboBoxItem
-                { Content = plan.DisplayName, Tag = plan.Id.ToString() });
+        // Collect unique plan names ordered by MonthMultiplier (shortest → longest term)
+        var planColumns = _availablePackages
+            .SelectMany(p => p.Plans)
+            .Where(p => !string.IsNullOrWhiteSpace(p.Name))
+            .GroupBy(p => p.Name!)
+            .Select(g => g.OrderByDescending(p => p.MonthMultiplier ?? 0).First())
+            .OrderBy(p => p.MonthMultiplier ?? 0)
+            .ToList();
 
-        if (SubAddPlanBox.Items.Count > 0)
-            SubAddPlanBox.SelectedIndex = 0;
+        if (planColumns.Count == 0) return;
+
+        // "Best value" = longest term (highest MonthMultiplier)
+        var bestName = planColumns.MaxBy(p => p.MonthMultiplier ?? 0)?.Name;
+
+        // ── Build WPF Grid ──────────────────────────────────────────────────────
+        var grid = new System.Windows.Controls.Grid();
+
+        // Column 0 = Module label, remaining = one per plan type
+        grid.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition
+            { Width = new System.Windows.GridLength(180) });
+        foreach (var _ in planColumns)
+            grid.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition
+                { Width = new System.Windows.GridLength(1, System.Windows.GridUnitType.Star) });
+
+        int rowIdx = 0;
+
+        // ── Header row ──────────────────────────────────────────────────────────
+        grid.RowDefinitions.Add(new System.Windows.Controls.RowDefinition
+            { Height = System.Windows.GridLength.Auto });
+
+        var moduleHdr = new System.Windows.Controls.TextBlock
+        {
+            Text       = "Module",
+            FontSize   = 13,
+            FontWeight = System.Windows.FontWeights.SemiBold,
+            Foreground = (System.Windows.Media.Brush)FindResource("LabelFg"),
+            Margin     = new System.Windows.Thickness(10, 10, 8, 10),
+            VerticalAlignment = System.Windows.VerticalAlignment.Center
+        };
+        System.Windows.Controls.Grid.SetRow(moduleHdr, rowIdx);
+        System.Windows.Controls.Grid.SetColumn(moduleHdr, 0);
+        grid.Children.Add(moduleHdr);
+
+        for (int c = 0; c < planColumns.Count; c++)
+        {
+            var plan        = planColumns[c];
+            var isBest      = plan.Name == bestName && planColumns.Count > 1;
+            var blue        = new WpfBrush(WpfColor.FromRgb(29, 78, 216));
+            var grayBrush   = (System.Windows.Media.Brush)FindResource("HintFg");
+
+            var hdrStack = new System.Windows.Controls.StackPanel
+            {
+                Orientation = System.Windows.Controls.Orientation.Horizontal,
+                Margin      = new System.Windows.Thickness(8, 10, 8, 10),
+                VerticalAlignment = System.Windows.VerticalAlignment.Center
+            };
+
+            // "Plan Name (per month)" label
+            var nameRow = new System.Windows.Controls.StackPanel
+                { Orientation = System.Windows.Controls.Orientation.Horizontal };
+            nameRow.Children.Add(new System.Windows.Controls.TextBlock
+            {
+                Text       = plan.Name,
+                FontSize   = 13,
+                FontWeight = System.Windows.FontWeights.Bold,
+                Foreground = blue
+            });
+            nameRow.Children.Add(new System.Windows.Controls.TextBlock
+            {
+                Text              = " (per month)",
+                FontSize          = 11,
+                Foreground        = grayBrush,
+                VerticalAlignment = System.Windows.VerticalAlignment.Bottom,
+                Margin            = new System.Windows.Thickness(0, 0, 0, 1)
+            });
+            hdrStack.Children.Add(nameRow);
+
+            if (isBest)
+            {
+                hdrStack.Children.Add(new System.Windows.Controls.Border
+                {
+                    Background    = new WpfBrush(WpfColor.FromRgb(219, 234, 254)),
+                    CornerRadius  = new System.Windows.CornerRadius(4),
+                    Padding       = new System.Windows.Thickness(6, 2, 6, 2),
+                    Margin        = new System.Windows.Thickness(8, 0, 0, 0),
+                    Child         = new System.Windows.Controls.TextBlock
+                    {
+                        Text       = "BEST VALUE",
+                        FontSize   = 10,
+                        FontWeight = System.Windows.FontWeights.Bold,
+                        Foreground = blue
+                    }
+                });
+            }
+
+            System.Windows.Controls.Grid.SetRow(hdrStack, rowIdx);
+            System.Windows.Controls.Grid.SetColumn(hdrStack, c + 1);
+            grid.Children.Add(hdrStack);
+        }
+        rowIdx++;
+
+        // ── Package rows ────────────────────────────────────────────────────────
+        bool firstRadio = true;
+        foreach (var pkg in _availablePackages)
+        {
+            // Separator line
+            grid.RowDefinitions.Add(new System.Windows.Controls.RowDefinition
+                { Height = System.Windows.GridLength.Auto });
+            var sep = new System.Windows.Shapes.Rectangle
+            {
+                Height = 1,
+                Fill   = (System.Windows.Media.Brush)FindResource("CardBorder")
+            };
+            System.Windows.Controls.Grid.SetRow(sep, rowIdx);
+            System.Windows.Controls.Grid.SetColumnSpan(sep, planColumns.Count + 1);
+            grid.Children.Add(sep);
+            rowIdx++;
+
+            // Data row
+            grid.RowDefinitions.Add(new System.Windows.Controls.RowDefinition
+                { Height = System.Windows.GridLength.Auto });
+
+            // Module name
+            var modLabel = new System.Windows.Controls.TextBlock
+            {
+                Text       = pkg.Name ?? pkg.Id.ToString(),
+                FontSize   = 13,
+                FontWeight = System.Windows.FontWeights.SemiBold,
+                Foreground = (System.Windows.Media.Brush)FindResource("PrimaryText"),
+                Margin     = new System.Windows.Thickness(10, 12, 8, 12),
+                VerticalAlignment = System.Windows.VerticalAlignment.Center
+            };
+            System.Windows.Controls.Grid.SetRow(modLabel, rowIdx);
+            System.Windows.Controls.Grid.SetColumn(modLabel, 0);
+            grid.Children.Add(modLabel);
+
+            // Plan cells
+            for (int c = 0; c < planColumns.Count; c++)
+            {
+                var matched = pkg.Plans.FirstOrDefault(p => p.Name == planColumns[c].Name);
+                if (matched == null) continue;
+
+                var cell = new System.Windows.Controls.StackPanel
+                {
+                    Orientation       = System.Windows.Controls.Orientation.Horizontal,
+                    Margin            = new System.Windows.Thickness(8, 12, 8, 12),
+                    VerticalAlignment = System.Windows.VerticalAlignment.Center
+                };
+
+                var rb = new System.Windows.Controls.RadioButton
+                {
+                    GroupName         = "SubPkgPlanGroup",
+                    Tag               = $"{pkg.Id}|{matched.Id}",
+                    IsChecked         = firstRadio,
+                    VerticalAlignment = System.Windows.VerticalAlignment.Center,
+                    Margin            = new System.Windows.Thickness(0, 0, 8, 0)
+                };
+                firstRadio = false;
+                cell.Children.Add(rb);
+
+                cell.Children.Add(new System.Windows.Controls.TextBlock
+                {
+                    Text       = $"${matched.MonthlyPrice:F2}",
+                    FontSize   = 13,
+                    FontWeight = System.Windows.FontWeights.SemiBold,
+                    Foreground = (System.Windows.Media.Brush)FindResource("PrimaryText"),
+                    VerticalAlignment = System.Windows.VerticalAlignment.Center
+                });
+                cell.Children.Add(new System.Windows.Controls.TextBlock
+                {
+                    Text       = " /mo",
+                    FontSize   = 11,
+                    Foreground = (System.Windows.Media.Brush)FindResource("HintFg"),
+                    VerticalAlignment = System.Windows.VerticalAlignment.Center
+                });
+
+                System.Windows.Controls.Grid.SetRow(cell, rowIdx);
+                System.Windows.Controls.Grid.SetColumn(cell, c + 1);
+                grid.Children.Add(cell);
+            }
+
+            rowIdx++;
+        }
+
+        SubPackagePlanPanel.Children.Add(grid);
     }
 
     private void SubAddCancelBtn_Click(object sender, RoutedEventArgs e)
@@ -3119,20 +3670,20 @@ ORDER BY MAX(s.ExpiresOn) DESC";
         var companyIdStr = SubCompanyIdBox.Text.Trim();
         if (!Guid.TryParse(companyIdStr, out var companyId)) return;
 
-        if (SubAddPackageBox.SelectedItem is not System.Windows.Controls.ComboBoxItem pkgItem ||
-            !Guid.TryParse(pkgItem.Tag?.ToString(), out var packageId) ||
-            packageId == Guid.Empty)
+        // Find the selected plan radio button — Tag is "packageId|planId"
+        var checkedRb = GetCheckedPlanRadioButton();
+        if (checkedRb == null)
         {
-            SubAddStatus.Text       = "❌  Select a package.";
+            SubAddStatus.Text       = "❌  Select a plan.";
             SubAddStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
             return;
         }
-
-        if (SubAddPlanBox.SelectedItem is not System.Windows.Controls.ComboBoxItem planItem ||
-            !Guid.TryParse(planItem.Tag?.ToString(), out var planId) ||
-            planId == Guid.Empty)
+        var tagParts = checkedRb.Tag?.ToString()?.Split('|') ?? [];
+        if (tagParts.Length != 2 ||
+            !Guid.TryParse(tagParts[0], out var packageId) ||
+            !Guid.TryParse(tagParts[1], out var planId))
         {
-            SubAddStatus.Text       = "❌  Select a plan.";
+            SubAddStatus.Text       = "❌  Invalid plan selection.";
             SubAddStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
             return;
         }
@@ -3144,34 +3695,30 @@ ORDER BY MAX(s.ExpiresOn) DESC";
             return;
         }
 
-        var startDate  = SubAddStartDatePicker.SelectedDate ?? DateTime.Today;
-        var autoRenew  = SubAddAutoRenewChk.IsChecked == true;
+        var startDate = SubAddStartDatePicker.SelectedDate ?? DateTime.Today;
+        var autoRenew = SubAddAutoRenewChk.IsChecked == true;
+        var settings  = Services.SettingsService.Load();
 
-        var settings = Services.SettingsService.Load();
+        var token = settings.BqeJwtToken;
+        if (string.IsNullOrEmpty(token))
+        {
+            SubAddStatus.Text       = "❌  Not signed in — go to Settings → BQE Core Account → Sign In";
+            SubAddStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
+            return;
+        }
 
         SubPlaceOrderBtn.IsEnabled = false;
-        SubAddStatus.Text          = "⏳  Getting company token…";
+        SubAddStatus.Text          = $"⏳  Placing order for company {companyId.ToString()[..8]}…";
         SubAddStatus.Foreground    = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
 
         try
         {
-            // Get company-specific token — PlaceOrder requires the token to match the company
-            // Use the stored Business Token — Admin Portal will use it to call GetCompanyToken on Host
-            var token = settings.BqeJwtToken;
-            if (string.IsNullOrEmpty(token))
-            {
-                SubAddStatus.Text       = "❌  Not signed in — go to Settings → BQE Core Account → Sign In";
-                SubAddStatus.Foreground = new WpfBrush(WpfColor.FromRgb(220, 38, 38));
-                return;
-            }
-
-            SubAddStatus.Text = $"⏳  Placing order for company {companyId.ToString()[..8]}…";
             var (ok, err, placeLog) = await Services.BqeSubscriptionService.PlaceOrderAsync(
                 settings.BqeCoreBaseUrl, token,
                 companyId, packageId, planId,
                 licenses, startDate, autoRenew);
 
-            // If all API endpoints failed, fall back to direct DB insert into BQECoreHost
+            // Fall back to direct DB insert if API failed
             if (!ok)
             {
                 SubAddStatus.Text = "⏳  API endpoints unavailable — trying direct DB insert…";
@@ -3180,11 +3727,9 @@ ORDER BY MAX(s.ExpiresOn) DESC";
 
                 if (!string.IsNullOrWhiteSpace(connStr))
                 {
-                    // Get MonthMultiplier from the selected plan so ExpiresOn is correct
                     var pkg  = _availablePackages.FirstOrDefault(p => p.Id == packageId);
                     var plan = pkg?.Plans?.FirstOrDefault(pl => pl.Id == planId);
 
-                    // If the API didn't return MonthMultiplier, infer it from the plan name
                     int months;
                     if (plan?.MonthMultiplier is int mm && mm > 0)
                     {
@@ -3200,7 +3745,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
                                  planName.Contains("2 year", StringComparison.OrdinalIgnoreCase) ||
                                  planName.Contains("2year",  StringComparison.OrdinalIgnoreCase)  ? 24
                                : planName.Contains("month", StringComparison.OrdinalIgnoreCase)   ? 1
-                               : 12; // default: 1 year
+                               : 12;
                     }
                     placeLog += $"\n[DB-INSERT] Plan='{plan?.Name}' MonthMultiplier={plan?.MonthMultiplier?.ToString() ?? "null(API)"} → using {months} months";
 
@@ -3213,7 +3758,6 @@ ORDER BY MAX(s.ExpiresOn) DESC";
                 }
             }
 
-            // Always show the log
             if (!string.IsNullOrWhiteSpace(placeLog))
             {
                 SubRawLogBox.Text        = placeLog;
@@ -3229,10 +3773,30 @@ ORDER BY MAX(s.ExpiresOn) DESC";
                 return;
             }
 
-            Services.WebhookLogger.LogSuccess("Add Subscription", $"Company={companyId} Package={packageId}");
+            Services.WebhookLogger.LogSuccess("Add Subscription", $"Company={companyId} Package={packageId} Plan={planId}");
+
+            // Promote company from Trial (2) → Active (0) now that a subscription exists
+            try
+            {
+                var statusConnStr = !string.IsNullOrWhiteSpace(settings.LocalMainDbConnectionString)
+                    ? settings.LocalMainDbConnectionString : settings.HostDbConnectionString;
+                if (!string.IsNullOrWhiteSpace(statusConnStr))
+                {
+                    var (sOk, sErr, sLog) = await Services.BqeSubscriptionService
+                        .UpdateCompanyStatusToActiveAsync(statusConnStr, companyId);
+                    SubRawLogBox.Text += "\n\n" + sLog;
+                    if (!sOk)
+                        Services.WebhookLogger.LogError("UpdateCompanyStatus", sErr ?? "Unknown", $"Company={companyId}");
+                }
+            }
+            catch (Exception statusEx)
+            {
+                SubRawLogBox.Text += $"\n\n[UpdateCompanyStatus] Exception: {statusEx.Message}";
+            }
+
             SubAddStatus.Foreground = new WpfBrush(WpfColor.FromRgb(22, 101, 52));
-            SubAddStatus.Text       = "✅  Subscription added — click Fetch from DB to verify.";
-            SubAddCard.Visibility   = Visibility.Collapsed;
+            // Keep card open so user can immediately add another plan
+            SubAddStatus.Text = "✅  Subscription added — company status set to Active. Select another plan to add more, or close this card.";
         }
         finally
         {
@@ -3248,6 +3812,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
     /// </summary>
     private async void TxnGridFixDiscrepancyBtn_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         if ((sender as System.Windows.Controls.Button)?.Tag is not Transaction txn) return;
 
         // Scroll the row into view without changing SelectionUnit
@@ -3427,6 +3992,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
 
     private async void RunAllTestsBtn_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         var url = WebhookUrlBox.Text.Trim();
         if (string.IsNullOrEmpty(url))
         {
@@ -3474,6 +4040,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
 
     private async void RunSingleTestBtn_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         if (sender is not System.Windows.Controls.Button btn) return;
         if (btn.Tag is not WebhookTestCase tc) return;
 
@@ -3765,6 +4332,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
 
     private async void CheckSignupStateBtn_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         if (SignupStateResult is null) return;
         SignupStateResult.Text    = "⏳ Checking…";
         SignupStateResult.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
@@ -4173,6 +4741,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
     /// </summary>
     private async void AutoDetectLocalSettingsBtn_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
+        // overlay not shown for quick operation
         AutoDetectStatusText.Text = "Detecting…";
         try
         {
@@ -4202,6 +4771,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
 
     private async void FetchIdsByEmailBtn_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         var email   = CoreAccountEmailBox.Text.Trim();
         var connStr = LocalMainDbBox.Text.Trim();
 
@@ -4640,6 +5210,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
     /// </summary>
     private async Task OpenPayrixPortalWithAutoFillAsync()
     {
+        SetBusy(true);
         var s = Services.SettingsService.Load();
         var bqeToken   = s.BqeJwtToken?.Trim();
         var bqeBaseUrl = s.BqeCoreBaseUrl?.TrimEnd('/');
@@ -4927,6 +5498,7 @@ ORDER BY MAX(s.ExpiresOn) DESC";
 
     private async void CreateMerchantInPayrixBtn_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
         if (string.IsNullOrEmpty(apiKey))
         {
@@ -5880,6 +6452,7 @@ WHERE {filter}
 
     private async void AchPostBtn_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         var url = WebhookUrlBox.Text.Trim();
         if (string.IsNullOrEmpty(url))
         {
@@ -6019,6 +6592,7 @@ WHERE {filter}
 
     private async void AchFetchBtn_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
         if (string.IsNullOrEmpty(apiKey))
         {
@@ -6515,6 +7089,7 @@ WHERE {filter}
 
     private async void SearchAllWebhooksBtn_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
         if (string.IsNullOrEmpty(apiKey))
         {
@@ -7069,6 +7644,7 @@ WHERE {filter}
     // Auto-fill and submit the login form via JavaScript
     private async void PortalLoginBtn_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         if (!_portalInitialised)
         {
             _portalInitialised = true;
@@ -8548,6 +9124,7 @@ WHERE {filter}
 
     private async void FetchEntityCustomFromDbBtn_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         var email   = CoreAccountEmailBox.Text.Trim();
         var connStr = LocalMainDbBox.Text.Trim();
 
@@ -9947,6 +10524,7 @@ WHERE {filter}
 
     private async void VdUpdateMemberBtn_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         var memberId = VdUpdateMemberId.Text.Trim();
         if (string.IsNullOrEmpty(memberId))
         {
@@ -10341,6 +10919,7 @@ WHERE {filter}
 
     private async void FetchDisbursementBtn_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         var disbId   = DisbursementIdBox.Text.Trim();
         var limit    = int.TryParse(DisbLimitBox.Text.Trim(), out var l) && l > 0 ? l : 20;
         var specific = !string.IsNullOrEmpty(disbId);
@@ -10354,6 +10933,7 @@ WHERE {filter}
 
         FetchDisbursementBtn.IsEnabled = false;
         SetStatus(specific ? $"Fetching disbursement {disbId}…" : $"Fetching latest {limit} disbursement(s)…");
+        SetBusyText("🌐  Fetching from Payrix API…");
 
         try
         {
@@ -10364,6 +10944,7 @@ WHERE {filter}
             if (specific)
             {
                 // ── Fetch one specific disbursement by ID ─────────────────────────
+                SetBusyCount(1, "disbursements");
                 var (wp, wJson, rec, disbEntries, wErr) = await service.GetWithdrawalWebhookAsync(disbId: disbId);
 
                 if (wErr is null && wp is not null && rec is not null)
@@ -10413,10 +10994,19 @@ WHERE {filter}
 
                     foreach (var txn in filteredTxns)
                         txn.DisbursementId = disbId;
-                    await Task.WhenAll(filteredTxns.Select(txn => EnrichTransactionAsync(service, txn, envLabel, bulkMode: true)));
-                    _suppressKpiRefresh = true;
-                    try   { foreach (var txn in filteredTxns) _transactions.Add(txn); }
-                    finally { _suppressKpiRefresh = false; RefreshOverviewKpis(); }
+                    SetBusyCount(filteredTxns.Count, "transactions");
+                    await Task.WhenAll(filteredTxns.Select(async txn =>
+                    {
+                        await EnrichTransactionAsync(service, txn, envLabel, bulkMode: true);
+                        await Dispatcher.InvokeAsync(() =>
+                        {
+                            _suppressKpiRefresh = true;
+                            _transactions.Add(txn);
+                            _suppressKpiRefresh = false;
+                        });
+                        IncrementBusyProgress();
+                    }));
+                    RefreshOverviewKpis();
 
                     UpdateSummary();
                     ShowItemsPlaceholder(true);
@@ -10424,6 +11014,7 @@ WHERE {filter}
 
                 var txnNote = filteredTxns.Count > 0 ? $"  +  {filteredTxns.Count} transaction(s) loaded." : "";
                 SetStatus($"[{envLabel}] Disbursement {disbId} ready.{txnNote}");
+                ShowToast($"Disbursement {disbId} fetched — enjoy! 🎉");
             }
             else
             {
@@ -10444,6 +11035,8 @@ WHERE {filter}
 
                 int totalTxns = 0;
                 var disbLock  = new object();
+                var validRecs = records.Count(r => r.Id is not null);
+                SetBusyCount(validRecs, "disbursements");
 
                 await Task.WhenAll(records.Where(rec => rec.Id is not null).Select(async rec =>
                 {
@@ -10462,23 +11055,28 @@ WHERE {filter}
                         ? txns.Where(t => t.Id is not null && validIds.Contains(t.Id)).ToList()
                         : txns;
 
-                    // Enrich all transactions for this disbursement in parallel
+                    // Enrich all transactions for this disbursement in parallel, add each as ready
                     foreach (var txn in filtered)
                         txn.DisbursementId = rec.Id;
-                    await Task.WhenAll(filtered.Select(txn => EnrichTransactionAsync(service, txn, envLabel, bulkMode: true)));
-
-                    lock (disbLock)
+                    await Task.WhenAll(filtered.Select(async txn =>
                     {
-                        _suppressKpiRefresh = true;
-                        try   { foreach (var txn in filtered) _transactions.Add(txn); }
-                        finally { _suppressKpiRefresh = false; RefreshOverviewKpis(); }
-                        totalTxns += filtered.Count;
-                    }
+                        await EnrichTransactionAsync(service, txn, envLabel, bulkMode: true);
+                        await Dispatcher.InvokeAsync(() =>
+                        {
+                            _suppressKpiRefresh = true;
+                            _transactions.Add(txn);
+                            _suppressKpiRefresh = false;
+                        });
+                    }));
+                    lock (disbLock) totalTxns += filtered.Count;
+                    await Dispatcher.InvokeAsync(RefreshOverviewKpis);
+                    IncrementBusyProgress(); // one tick per fully-processed disbursement
                 }));
 
                 UpdateSummary();
                 ShowItemsPlaceholder(true);
                 SetStatus($"[{envLabel}] Loaded {records.Count} disbursement(s)  |  {totalTxns} transaction(s).");
+                ShowToast($"All {records.Count} disbursement(s) fetched — enjoy! 🎉");
             }
         }
         catch (Exception ex)
@@ -10487,6 +11085,7 @@ WHERE {filter}
         }
         finally
         {
+            SetBusy(false);
             FetchDisbursementBtn.IsEnabled = true;
         }
     }
@@ -12381,6 +12980,7 @@ WHERE {filter}
 
     private async void HttpSend_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         var url = Interpolate(HttpUrlBox.Text?.Trim() ?? "");
         if (string.IsNullOrEmpty(url)) { WpfMessageBox.Show("Enter a URL first.", "HTTP Client"); return; }
 
@@ -13114,9 +13714,20 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
     // ── Merchants tab ─────────────────────────────────────────────────────────
 
     private readonly System.Collections.ObjectModel.ObservableCollection<Models.Merchant> _merchants = [];
-    private List<Models.Merchant> _allMerchants = [];
+    private List<Models.Merchant> _allMerchants    = [];
+    private List<Models.Merchant> _filteredMerchants = [];
+
+    // Disbursements pagination
+    private List<DisbursementRecord> _allDisbRecords = [];
+    private int _dPage     = 1;
+    private int _dPageSize = 20;
+
     private Models.Merchant? _selectedMerchant;
     private string _merchantStatusFilter = "All"; // "All" | "Active" | "Inactive" | "Suspended"
+
+    // Merchant pagination
+    private int _mPage     = 1;
+    private int _mPageSize = 20;
 
     // Pinned merchant IDs (persists across re-loads within a session)
     private const string DefaultPinnedMerchantId = "t1_mer_626f798aec3d7dea43bb707";
@@ -13129,6 +13740,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
 
     private async void LoadMerchants_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         var apiKey   = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
         var envLabel = IsSandbox ? "Sandbox" : "Production";
 
@@ -13198,6 +13810,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
         }
         finally
         {
+            SetBusy(false);
             LoadMerchantsBtn.IsEnabled = true;
             LoadMerchantsBtn.Content   = "⟳  Load Merchants";
         }
@@ -13241,15 +13854,132 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
             _             => rest
         };
 
-        var filtered = pinned.Concat(sorted).ToList();
+        _filteredMerchants = pinned.Concat(sorted).ToList();
+        _mPage = 1;
+        RefreshMerchantPage();
+    }
 
-        MerchantList.ItemsSource = filtered;
-        MerchantEmptyState.Visibility = filtered.Count == 0 && _allMerchants.Count > 0
+    private void RefreshMerchantPage()
+    {
+        if (MerchantPagingText is null || MerchantPageNumText is null ||
+            MerchantPrevPageBtn is null || MerchantNextPageBtn is null) return;
+
+        var total = _filteredMerchants.Count;
+        var start = (_mPage - 1) * _mPageSize;
+        var page  = _filteredMerchants.Skip(start).Take(_mPageSize).ToList();
+        var end   = start + page.Count;
+
+        MerchantList.ItemsSource = page;
+
+        MerchantEmptyState.Visibility = total == 0 && _allMerchants.Count > 0
             ? Visibility.Visible : Visibility.Collapsed;
-        if (filtered.Count == 0 && _allMerchants.Count > 0)
+        if (total == 0 && _allMerchants.Count > 0)
             MerchantEmptyText.Text = _merchantStatusFilter == "All"
                 ? "No merchants match your search."
                 : $"No {_merchantStatusFilter.ToLower()} merchants found.";
+
+        MerchantPagingText.Text = total == 0
+            ? "No merchants loaded"
+            : $"Showing {start + 1} to {end} of {total} merchants";
+        MerchantPageNumText.Text    = _mPage.ToString();
+        MerchantPrevPageBtn.IsEnabled = _mPage > 1;
+        MerchantNextPageBtn.IsEnabled = end < total;
+    }
+
+    private void MerchantPageSizeBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        _mPageSize = MerchantPageSizeBox.SelectedIndex switch
+        {
+            1 => 50,
+            2 => 100,
+            _ => 20
+        };
+        _mPage = 1;
+        RefreshMerchantPage();
+    }
+
+    private void MerchantPrevPageBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (_mPage > 1) { _mPage--; RefreshMerchantPage(); }
+    }
+
+    private void MerchantNextPageBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var maxPage = (int)Math.Ceiling(_filteredMerchants.Count / (double)_mPageSize);
+        if (_mPage < maxPage) { _mPage++; RefreshMerchantPage(); }
+    }
+
+    // ── Disbursements pagination ──────────────────────────────────────────────
+
+    private void RefreshDisbPage()
+    {
+        if (DisbPagingText is null || DisbPageNumText is null ||
+            DisbPrevPageBtn is null || DisbNextPageBtn is null) return;
+
+        var total = _allDisbRecords.Count;
+        var start = (_dPage - 1) * _dPageSize;
+        var page  = _allDisbRecords.Skip(start).Take(_dPageSize).ToList();
+        var end   = start + page.Count;
+
+        DisbGrid.ItemsSource = page;
+
+        DisbEmptyState.Visibility = total == 0 ? Visibility.Visible : Visibility.Collapsed;
+        DisbGrid.Visibility       = total  > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        DisbPagingText.Text    = total == 0
+            ? "No disbursements loaded"
+            : $"Showing {start + 1} to {end} of {total} disbursements";
+        DisbPageNumText.Text      = _dPage.ToString();
+        DisbPrevPageBtn.IsEnabled = _dPage > 1;
+        DisbNextPageBtn.IsEnabled = end < total;
+    }
+
+    private void DisbPageSizeBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        _dPageSize = DisbPageSizeBox.SelectedIndex switch { 1 => 50, 2 => 100, _ => 20 };
+        _dPage = 1;
+        RefreshDisbPage();
+    }
+
+    private void DisbPrevPageBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dPage > 1) { _dPage--; RefreshDisbPage(); }
+    }
+
+    private void DisbNextPageBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var maxPage = (int)Math.Ceiling(_allDisbRecords.Count / (double)_dPageSize);
+        if (_dPage < maxPage) { _dPage++; RefreshDisbPage(); }
+    }
+
+    private void DisbLimitBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e) { }
+
+    // ── Disbursements export ──────────────────────────────────────────────────
+
+    private void ExportDisbJson_Click(object sender, RoutedEventArgs e)
+    {
+        if (_allDisbRecords.Count == 0) { SetStatus("No disbursements to export."); return; }
+        var dlg = new Microsoft.Win32.SaveFileDialog
+            { FileName = "disbursements", DefaultExt = ".json", Filter = "JSON|*.json" };
+        if (dlg.ShowDialog() != true) return;
+        var json = System.Text.Json.JsonSerializer.Serialize(_allDisbRecords,
+            new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        System.IO.File.WriteAllText(dlg.FileName, json);
+        SetStatus($"Exported {_allDisbRecords.Count} disbursements to {dlg.FileName}");
+    }
+
+    private void ExportDisbCsv_Click(object sender, RoutedEventArgs e)
+    {
+        if (_allDisbRecords.Count == 0) { SetStatus("No disbursements to export."); return; }
+        var dlg = new Microsoft.Win32.SaveFileDialog
+            { FileName = "disbursements", DefaultExt = ".csv", Filter = "CSV|*.csv" };
+        if (dlg.ShowDialog() != true) return;
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("ID,Date,Amount,Status,Settlement,Payout,Description");
+        foreach (var r in _allDisbRecords)
+            sb.AppendLine($"\"{r.Id}\",\"{r.CreatedDateFormatted}\",\"{r.AmountAlertFormatted}\",\"{r.StatusLabel}\",\"{r.Settlement}\",\"{r.Payout}\",\"{r.Description}\"");
+        System.IO.File.WriteAllText(dlg.FileName, sb.ToString());
+        SetStatus($"Exported {_allDisbRecords.Count} disbursements to {dlg.FileName}");
     }
 
     // ── Merchant sort ─────────────────────────────────────────────────────────
@@ -13277,7 +14007,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
         {
             var label = column switch
             {
-                "DisplayName" => "NAME", "Descriptor" => "DESCRIPTOR",
+                "DisplayName" => "NAME", "Descriptor" => "DESCRIPTION",
                 "Status" => "STATUS", "KycCode" => "KYC", "Created" => "CREATED", _ => column
             };
             btn.Content = label + arrow;
@@ -13289,7 +14019,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
     private void ResetMSortArrows()
     {
         MSortName.Content       = "NAME";
-        MSortDescriptor.Content = "DESCRIPTOR";
+        MSortDescriptor.Content = "DESCRIPTION";
         MSortStatus.Content     = "STATUS";
         MSortKyc.Content        = "KYC";
         MSortCreated.Content    = "CREATED";
@@ -13380,6 +14110,9 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
         m.IsSelected = true;
         _selectedMerchant = m;
 
+        // Update detail header
+        MerchantDetailHeaderText.Text = m.DisplayName;
+
         // Populate detail panel
         MDetailName.Text       = m.DisplayName;
         MDetailId.Text         = m.Id;
@@ -13450,6 +14183,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
 
     private async void ToggleMerchantStatus_Merchants_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         e.Handled = true;
         var btn = sender as System.Windows.Controls.Button;
         var merchantId = btn?.Tag?.ToString();
@@ -13465,6 +14199,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
 
     private async void ToggleMerchantDetail_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         if (_selectedMerchant == null) return;
         await DoToggleMerchantStatus(_selectedMerchant);
     }
@@ -14263,6 +14998,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
 
     private async void ValidateApis_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         // Need a resolved baseUrl to test against
         var baseUrl = _activeEnvironment?
             .Variables.FirstOrDefault(v => v.Key == "baseUrl")?.Value?.TrimEnd('/') ?? "";
@@ -14741,6 +15477,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
 
     private async void PerfRun_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         if (PerfModeWeb.IsChecked == true)
             await RunWebPerfAsync();
         else if (PerfModeSingleApi.IsChecked == true)
@@ -15198,6 +15935,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
 
     private async void GenerateReport_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
         if (string.IsNullOrEmpty(apiKey))
         {
@@ -15366,6 +16104,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
 
     private async void ExportReport_Click(object sender, RoutedEventArgs e)
     {
+        // overlay not shown for quick operation
         if (_lastReportFiltered.Count == 0 && _reportFailedRows.Count == 0)
         {
             WpfMessageBox.Show("No report data to export. Click Generate first.",
@@ -15436,6 +16175,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
 
     private async void LoadAccounts_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         try
         {
             var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
@@ -15539,6 +16279,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
         }
         finally
         {
+            SetBusy(false);
             LoadAccountsBtn.IsEnabled = true;
             LoadAccountsBtn.Content   = "⟳  Load Accounts";
         }
@@ -15635,6 +16376,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
 
     private async void ToggleMerchantStatus_Click(object sender, RoutedEventArgs e)
     {
+        SetBusy(true);
         e.Handled = true;
         var btn = sender as System.Windows.Controls.Button;
         var merchantId = btn?.Tag?.ToString();
@@ -15749,15 +16491,15 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
 
     private async void LoadDisbursements_Click(object sender, RoutedEventArgs e)
     {
+        var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            SetStatus("⚠ No API key — configure one on the Settings tab.");
+            return;
+        }
+
         try
         {
-            var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
-            if (string.IsNullOrWhiteSpace(apiKey))
-            {
-                SetStatus("⚠ No API key — configure one on the Settings tab.");
-                return;
-            }
-
             DisbLoadBtn.IsEnabled  = false;
             DisbLoadBtn.Content    = "⟳  Loading…";
             DisbEmptyState.Visibility  = Visibility.Collapsed;
@@ -15765,13 +16507,13 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
             DisbEntryPanel.Visibility  = Visibility.Collapsed;
             DisbEntryRow.Height        = new System.Windows.GridLength(0);
             _disbRecords.Clear();
+            _allDisbRecords.Clear();
             _disbDetailEntries.Clear();
 
             var environment = IsSandbox ? PayrixEnvironment.Sandbox : PayrixEnvironment.Production;
             var service = new PayrixService(apiKey, environment);
 
-            if (!int.TryParse(DisbTabLimitBox.Text.Trim(), out var limit) || limit < 1) limit = 20;
-            if (limit > 200) limit = 200;
+            var limit = DisbTabLimitBox.SelectedIndex switch { 1 => 50, 2 => 100, 3 => 200, _ => 20 };
 
             SetStatus($"Fetching up to {limit} disbursements…");
             var records = await service.GetLatestDisbursementsAsync(limit);
@@ -15783,9 +16525,16 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
                 return;
             }
 
-            foreach (var r in records) _disbRecords.Add(r);
+            foreach (var r in records)
+            {
+                _disbRecords.Add(r);
+                _allDisbRecords.Add(r);
+            }
 
-            DisbGrid.Visibility = Visibility.Visible;
+            _dPage = 1;
+            RefreshDisbPage();
+
+            DisbSubtitle.Text = $"{records.Count} disbursement{(records.Count == 1 ? "" : "s")} loaded";
             SetStatus($"Loaded {records.Count} disbursement(s).");
         }
         catch (Exception ex)
@@ -15911,10 +16660,632 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
         badge.Visibility  = System.Windows.Visibility.Visible;
     }
 
+    // ── Processing overlay ───────────────────────────────────────────────────
+    private static MainWindow?  _appInstance;
+    private static System.Windows.Threading.DispatcherTimer? _progressTimer;
+    private static System.Windows.Threading.DispatcherTimer? _busyTimer;
+    private static System.Windows.Media.Animation.Storyboard? _spinSb;
+    private static bool   _isBusy;
+    private static double _simProgress;   // 0–100 simulated progress
+    private static DateTime _busyStart;
+    private static int    _simTotalItems;    // 0 = no counter; >0 = real-progress mode
+    private static int    _simDoneItems;     // items completed so far
+    private static string _simItemLabel  = "transactions"; // label shown in counter
+
+    private static void SetBusy(bool busy)
+    {
+        _appInstance?.Dispatcher.Invoke(() =>
+        {
+            var w = _appInstance;
+            if (w?.GlobalProgressBar is not { } bar) return;
+            if (busy)
+            {
+                if (_isBusy) return;
+                _isBusy       = true;
+                _simProgress  = 0;
+                _busyStart    = DateTime.UtcNow;
+                bar.Visibility = System.Windows.Visibility.Visible;
+                bar.IsHitTestVisible = true;   // block clicks/scroll while overlay is up
+                ApplyOverlayFadeIn(w, bar);
+                SetOverlayStep(w, 1);
+                StartSpinner(w);
+                StartProgressSimulation(w);
+                StartBusyWatchdog(bar, w);
+                // Advance to step 2 after 400 ms
+                var t = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+                t.Tick += (_, _) => { t.Stop(); SetOverlayStep(w, 2); };
+                t.Start();
+            }
+            else
+            {
+                if (!_isBusy) return;
+                _isBusy = false;
+                _busyTimer?.Stop();
+                _progressTimer?.Stop();
+                _simTotalItems = 0;   // clear counter on completion
+                SetCounterText(w, "");
+                SetOverlayStep(w, 3);
+                // Fill to 100 % quickly, flash step 4 green, then fade out
+                AnimateProgressTo(w, 100, ms: 300, onDone: () =>
+                {
+                    SetOverlayStep(w, 4);
+                    var delay = new System.Windows.Threading.DispatcherTimer
+                        { Interval = TimeSpan.FromMilliseconds(400) };
+                    delay.Tick += (_, _) => { delay.Stop(); DismissOverlay(w, bar); };
+                    delay.Start();
+                });
+            }
+        });
+    }
+
+    /// <summary>
+    /// Switches the overlay to real-progress mode (called after the initial API response
+    /// when the actual item count is known).  The timer simulation is stopped; the bar
+    /// continues from its current position and fills to 100 % as IncrementBusyProgress()
+    /// is called.  Pass total = 0 to stay in timer-simulation mode (no counter).
+    /// </summary>
+    // ── Success toast ─────────────────────────────────────────────────────────
+    /// <summary>
+    /// Shows a brief green success toast at the bottom of the window for <paramref name="durationMs"/> ms.
+    /// Safe to call from the UI thread; the toast slides in, waits, then fades out automatically.
+    /// </summary>
+    public static void ShowToast(string message, int durationMs = 3500)
+    {
+        if (_appInstance is not { } w) return;
+
+        w.ToastText.Text         = message;
+        w.ToastBorder.Visibility = System.Windows.Visibility.Visible;
+        ShowCelebration();
+
+        // Slide-in + fade-in
+        var sb = new System.Windows.Media.Animation.Storyboard();
+
+        var fadeIn = new System.Windows.Media.Animation.DoubleAnimation
+            { From = 0, To = 1, Duration = TimeSpan.FromMilliseconds(280),
+              EasingFunction = new System.Windows.Media.Animation.CubicEase
+                  { EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut } };
+        System.Windows.Media.Animation.Storyboard.SetTarget(fadeIn, w.ToastBorder);
+        System.Windows.Media.Animation.Storyboard.SetTargetProperty(fadeIn,
+            new System.Windows.PropertyPath(UIElement.OpacityProperty));
+
+        var slideIn = new System.Windows.Media.Animation.DoubleAnimation
+            { From = 40, To = 0, Duration = TimeSpan.FromMilliseconds(280),
+              EasingFunction = new System.Windows.Media.Animation.CubicEase
+                  { EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut } };
+        System.Windows.Media.Animation.Storyboard.SetTarget(slideIn, w.ToastSlide);
+        System.Windows.Media.Animation.Storyboard.SetTargetProperty(slideIn,
+            new System.Windows.PropertyPath(System.Windows.Media.TranslateTransform.YProperty));
+
+        sb.Children.Add(fadeIn);
+        sb.Children.Add(slideIn);
+        sb.Begin();
+
+        // Auto-dismiss after duration
+        var hold = new System.Windows.Threading.DispatcherTimer
+            { Interval = TimeSpan.FromMilliseconds(durationMs) };
+        hold.Tick += (_, _) =>
+        {
+            hold.Stop();
+            var sbOut = new System.Windows.Media.Animation.Storyboard();
+            var fadeOut = new System.Windows.Media.Animation.DoubleAnimation
+                { From = 1, To = 0, Duration = TimeSpan.FromMilliseconds(350),
+                  EasingFunction = new System.Windows.Media.Animation.CubicEase
+                      { EasingMode = System.Windows.Media.Animation.EasingMode.EaseIn } };
+            System.Windows.Media.Animation.Storyboard.SetTarget(fadeOut, w.ToastBorder);
+            System.Windows.Media.Animation.Storyboard.SetTargetProperty(fadeOut,
+                new System.Windows.PropertyPath(UIElement.OpacityProperty));
+            sbOut.Children.Add(fadeOut);
+            sbOut.Completed += (_, _) =>
+            {
+                w.ToastBorder.Visibility = System.Windows.Visibility.Collapsed;
+                w.ToastSlide.Y = 40; // reset for next use
+            };
+            sbOut.Begin();
+        };
+        hold.Start();
+    }
+
+    // ── Balloon-burst celebration ─────────────────────────────────────────────
+    private static readonly System.Random _celebRng = new();
+
+    // Balloon colours + matching string colours for confetti
+    private static readonly System.Windows.Media.Color[] _balloonColors =
+    [
+        System.Windows.Media.Color.FromRgb(0xFF, 0x4D, 0x4D), // red
+        System.Windows.Media.Color.FromRgb(0xFF, 0xA5, 0x00), // orange
+        System.Windows.Media.Color.FromRgb(0xFF, 0xE0, 0x00), // yellow
+        System.Windows.Media.Color.FromRgb(0x4C, 0xAF, 0x50), // green
+        System.Windows.Media.Color.FromRgb(0x21, 0x96, 0xF3), // blue
+        System.Windows.Media.Color.FromRgb(0x9C, 0x27, 0xB0), // purple
+        System.Windows.Media.Color.FromRgb(0xFF, 0x40, 0x81), // pink
+        System.Windows.Media.Color.FromRgb(0x00, 0xBC, 0xD4), // cyan
+    ];
+
+    /// <summary>
+    /// Launch the balloon-burst + confetti animation.  Automatically cleans up after itself.
+    /// </summary>
+    public static void ShowCelebration()
+    {
+        if (_appInstance is not { } w) return;
+        var canvas = w.CelebrationCanvas;
+        double W = canvas.ActualWidth  > 10 ? canvas.ActualWidth  : w.ActualWidth;
+        double H = canvas.ActualHeight > 10 ? canvas.ActualHeight : w.ActualHeight;
+
+        const int BalloonCount   = 18;
+        const int ConfettiPerBurst = 14;
+
+        // Track all living nodes so we can clear at the end
+        var allNodes = new System.Collections.Generic.List<UIElement>();
+
+        for (int i = 0; i < BalloonCount; i++)
+        {
+            int idx = i; // capture
+            double delay = _celebRng.NextDouble() * 900; // stagger 0–900 ms
+
+            var color    = _balloonColors[_celebRng.Next(_balloonColors.Length)];
+            double bW    = 34 + _celebRng.NextDouble() * 22;  // 34–56 px
+            double bH    = bW * 1.3;
+            double startX = 60 + _celebRng.NextDouble() * (W - 120);
+            double popY   = H * (0.18 + _celebRng.NextDouble() * 0.45); // pop 18–63 % from top
+
+            // ── Balloon ellipse ──
+            var balloon = new System.Windows.Shapes.Ellipse
+            {
+                Width  = bW,
+                Height = bH,
+                Fill   = new System.Windows.Media.SolidColorBrush(color),
+                Opacity = 0,
+                RenderTransformOrigin = new System.Windows.Point(0.5, 0.5),
+                RenderTransform = new System.Windows.Media.ScaleTransform(1, 1),
+            };
+            System.Windows.Controls.Canvas.SetLeft(balloon, startX - bW / 2);
+            System.Windows.Controls.Canvas.SetTop(balloon,  H + 10);
+            canvas.Children.Add(balloon);
+            allNodes.Add(balloon);
+
+            // ── String (thin line from bottom of balloon) ──
+            var str = new System.Windows.Shapes.Line
+            {
+                X1 = startX, Y1 = H + 10,
+                X2 = startX, Y2 = H + 10 + bH * 0.55,
+                Stroke = new System.Windows.Media.SolidColorBrush(
+                    System.Windows.Media.Color.FromArgb(180,
+                        color.R, color.G, color.B)),
+                StrokeThickness = 1.2,
+                Opacity = 0,
+            };
+            canvas.Children.Add(str);
+            allNodes.Add(str);
+
+            // Launch after staggered delay
+            var launchTimer = new System.Windows.Threading.DispatcherTimer
+                { Interval = TimeSpan.FromMilliseconds(delay) };
+            launchTimer.Tick += (_, _) =>
+            {
+                launchTimer.Stop();
+
+                // 1. Fade in
+                var sb = new System.Windows.Media.Animation.Storyboard();
+                void AddAnim(DependencyObject target, System.Windows.PropertyPath path,
+                             double from, double to, double ms, double beginMs = 0,
+                             System.Windows.Media.Animation.IEasingFunction? ease = null)
+                {
+                    var a = new System.Windows.Media.Animation.DoubleAnimation
+                        { From = from, To = to,
+                          Duration = TimeSpan.FromMilliseconds(ms),
+                          BeginTime = TimeSpan.FromMilliseconds(beginMs),
+                          EasingFunction = ease };
+                    System.Windows.Media.Animation.Storyboard.SetTarget(a, target);
+                    System.Windows.Media.Animation.Storyboard.SetTargetProperty(a, path);
+                    sb.Children.Add(a);
+                }
+
+                var rise = H - popY + bH / 2;        // pixels to travel upward
+                double riseMs = 900 + _celebRng.NextDouble() * 500;
+
+                // Balloon: fade in, rise
+                AddAnim(balloon, new System.Windows.PropertyPath(UIElement.OpacityProperty),
+                        0, 1, 200);
+                AddAnim(balloon, new System.Windows.PropertyPath(System.Windows.Controls.Canvas.TopProperty),
+                        H + 10, popY - bH / 2, riseMs,
+                        ease: new System.Windows.Media.Animation.CubicEase
+                            { EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut });
+
+                // String: fade in, rise with balloon
+                AddAnim(str, new System.Windows.PropertyPath(UIElement.OpacityProperty), 0, 1, 200);
+                AddAnim(str, new System.Windows.PropertyPath(System.Windows.Shapes.Line.Y1Property),
+                        H + 10, popY + bH * 0.5, riseMs,
+                        ease: new System.Windows.Media.Animation.CubicEase
+                            { EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut });
+                AddAnim(str, new System.Windows.PropertyPath(System.Windows.Shapes.Line.Y2Property),
+                        H + 10 + bH * 0.55, popY + bH * 0.5 + bH * 0.55, riseMs,
+                        ease: new System.Windows.Media.Animation.CubicEase
+                            { EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut });
+
+                // Pop: scale up then fade to 0
+                var scaleTx = (System.Windows.Media.ScaleTransform)balloon.RenderTransform;
+                AddAnim(scaleTx, new System.Windows.PropertyPath(System.Windows.Media.ScaleTransform.ScaleXProperty),
+                        1, 2.4, 220, riseMs,
+                        ease: new System.Windows.Media.Animation.CubicEase
+                            { EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut });
+                AddAnim(scaleTx, new System.Windows.PropertyPath(System.Windows.Media.ScaleTransform.ScaleYProperty),
+                        1, 2.4, 220, riseMs,
+                        ease: new System.Windows.Media.Animation.CubicEase
+                            { EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut });
+                AddAnim(balloon, new System.Windows.PropertyPath(UIElement.OpacityProperty),
+                        1, 0, 220, riseMs);
+                AddAnim(str, new System.Windows.PropertyPath(UIElement.OpacityProperty),
+                        1, 0, 180, riseMs);
+
+                sb.Begin();
+
+                // After pop, emit confetti burst
+                var burstTimer = new System.Windows.Threading.DispatcherTimer
+                    { Interval = TimeSpan.FromMilliseconds(riseMs + 30) };
+                burstTimer.Tick += (_, _) =>
+                {
+                    burstTimer.Stop();
+                    double bx = startX;
+                    double by = popY;
+
+                    for (int c = 0; c < ConfettiPerBurst; c++)
+                    {
+                        var cc = _balloonColors[_celebRng.Next(_balloonColors.Length)];
+                        bool isRect = _celebRng.NextDouble() > 0.4;
+                        UIElement piece;
+                        double cw = 5 + _celebRng.NextDouble() * 7;
+                        double ch = isRect ? cw * 2.2 : cw;
+                        if (isRect)
+                            piece = new System.Windows.Shapes.Rectangle
+                                { Width = cw, Height = ch,
+                                  Fill = new System.Windows.Media.SolidColorBrush(cc),
+                                  RenderTransformOrigin = new System.Windows.Point(0.5, 0.5),
+                                  RenderTransform = new System.Windows.Media.RotateTransform(
+                                      _celebRng.NextDouble() * 360) };
+                        else
+                            piece = new System.Windows.Shapes.Ellipse
+                                { Width = cw, Height = ch,
+                                  Fill = new System.Windows.Media.SolidColorBrush(cc) };
+
+                        System.Windows.Controls.Canvas.SetLeft(piece, bx - cw / 2);
+                        System.Windows.Controls.Canvas.SetTop(piece,  by - ch / 2);
+                        canvas.Children.Add(piece);
+                        allNodes.Add(piece);
+
+                        // Random outward velocity
+                        double angle   = _celebRng.NextDouble() * Math.PI * 2;
+                        double speed   = 60 + _celebRng.NextDouble() * 130;
+                        double targetX = bx + Math.Cos(angle) * speed;
+                        double targetY = by + Math.Sin(angle) * speed + 80; // gravity pull
+                        double fallMs  = 600 + _celebRng.NextDouble() * 600;
+
+                        var sbC = new System.Windows.Media.Animation.Storyboard();
+                        void AC(DependencyObject t, System.Windows.PropertyPath p, double f, double to, double ms)
+                        {
+                            var a = new System.Windows.Media.Animation.DoubleAnimation
+                                { From = f, To = to, Duration = TimeSpan.FromMilliseconds(ms),
+                                  EasingFunction = new System.Windows.Media.Animation.CubicEase
+                                      { EasingMode = System.Windows.Media.Animation.EasingMode.EaseIn } };
+                            System.Windows.Media.Animation.Storyboard.SetTarget(a, t);
+                            System.Windows.Media.Animation.Storyboard.SetTargetProperty(a, p);
+                            sbC.Children.Add(a);
+                        }
+                        AC(piece, new System.Windows.PropertyPath(System.Windows.Controls.Canvas.LeftProperty),
+                           bx - cw / 2, targetX - cw / 2, fallMs);
+                        AC(piece, new System.Windows.PropertyPath(System.Windows.Controls.Canvas.TopProperty),
+                           by - ch / 2, targetY - ch / 2, fallMs);
+                        AC(piece, new System.Windows.PropertyPath(UIElement.OpacityProperty),
+                           1, 0, fallMs);
+                        if (piece.RenderTransform is System.Windows.Media.RotateTransform rt)
+                        {
+                            var spin = new System.Windows.Media.Animation.DoubleAnimation
+                                { From = rt.Angle, To = rt.Angle + (_celebRng.NextDouble() > 0.5 ? 540 : -540),
+                                  Duration = TimeSpan.FromMilliseconds(fallMs) };
+                            System.Windows.Media.Animation.Storyboard.SetTarget(spin, rt);
+                            System.Windows.Media.Animation.Storyboard.SetTargetProperty(spin,
+                                new System.Windows.PropertyPath(System.Windows.Media.RotateTransform.AngleProperty));
+                            sbC.Children.Add(spin);
+                        }
+                        sbC.Begin();
+                    }
+                };
+                burstTimer.Start();
+            };
+            launchTimer.Start();
+        }
+
+        // Clean up all nodes after 4.5 seconds
+        var cleanTimer = new System.Windows.Threading.DispatcherTimer
+            { Interval = TimeSpan.FromMilliseconds(4500) };
+        cleanTimer.Tick += (_, _) =>
+        {
+            cleanTimer.Stop();
+            foreach (var node in allNodes)
+                canvas.Children.Remove(node);
+        };
+        cleanTimer.Start();
+    }
+
+    /// <summary>
+    /// Show arbitrary status text in the counter badge without switching to count mode.
+    /// The time-based progress simulation continues.  Call this during long fetch phases
+    /// before the actual item count is known.
+    /// </summary>
+    public static void SetBusyText(string text)
+    {
+        if (_appInstance is not { } w) return;
+        SetCounterText(w, text);
+    }
+
+    public static void SetBusyCount(int total, string label = "transactions")
+    {
+        _simTotalItems = Math.Max(0, total);
+        _simDoneItems  = 0;
+        _simItemLabel  = label;
+
+        // Always called on the UI thread (event handler or UI-thread continuation).
+        // Call SetCounterText directly — no Dispatcher.Invoke wrapper needed.
+        if (_appInstance is not { } w) return;
+        if (_simTotalItems > 0)
+        {
+            // Stop the time-based simulation; real item counts drive the bar from here.
+            _progressTimer?.Stop();
+            SetCounterText(w, $"📋  1 / {_simTotalItems} {_simItemLabel}");
+        }
+        else
+        {
+            SetCounterText(w, "");
+        }
+    }
+
+    /// <summary>
+    /// Call once per completed item.  Advances the bar from its current position toward
+    /// 100 %, distributing the remaining distance evenly across the remaining items.
+    /// Does NOT auto-dismiss — the caller's finally block must call SetBusy(false).
+    /// </summary>
+    public static void IncrementBusyProgress()
+    {
+        if (_simTotalItems <= 0 || !_isBusy) return;
+        int done = System.Threading.Interlocked.Increment(ref _simDoneItems);
+        // Map done/total into the remaining bar: current position → 100 %
+        double startPct = _simProgress;
+        double pct = startPct + (100.0 - startPct) * done / _simTotalItems;
+        pct = Math.Min(99.0, pct); // never hit 100 % here — SetBusy(false) does the final fill
+        _appInstance?.Dispatcher.BeginInvoke(() =>
+        {
+            if (_appInstance is not { } w) return;
+            _simProgress = pct;
+            UpdateProgressBar(w, pct);
+        });
+    }
+
+    // ── Step indicator ───────────────────────────────────────────────────────
+    private static readonly WpfColor ActiveBlue    = WpfColor.FromRgb(0x1D, 0x4E, 0xD8);
+    private static readonly WpfColor CompletedFill = WpfColor.FromRgb(0x1D, 0x4E, 0xD8);
+    private static readonly WpfColor PendingGrey   = WpfColor.FromRgb(0xD1, 0xD5, 0xDB);
+    private static readonly WpfColor PendingText   = WpfColor.FromRgb(0x9C, 0xA3, 0xAF);
+    private static readonly WpfColor GreenComplete = WpfColor.FromRgb(0x16, 0xA3, 0x4A);
+
+    private static void SetOverlayStep(MainWindow w, int step)
+    {
+        // bubbles: 1=StepBubble1..4, labels: StepLbl1..4, nums: StepNum1..4, lines: StepLine12..34
+        var bubbles = new[] { w.StepBubble1, w.StepBubble2, w.StepBubble3, w.StepBubble4 };
+        var nums    = new[] { w.StepNum1,    w.StepNum2,    w.StepNum3,    w.StepNum4    };
+        var labels  = new[] { w.StepLbl1,    w.StepLbl2,    w.StepLbl3,    w.StepLbl4   };
+        var lines   = new[] { w.StepLine12,  w.StepLine23,  w.StepLine34                };
+
+        for (int i = 0; i < 4; i++)
+        {
+            bool completed = (i + 1) < step;
+            bool active    = (i + 1) == step;
+            bool done4     = step == 4 && i == 3;
+
+            var bubbleColor  = completed || done4 ? CompletedFill : WpfColor.FromArgb(0, 0, 0, 0);
+            var borderColor  = completed || active || done4 ? (done4 ? GreenComplete : ActiveBlue) : PendingGrey;
+            var textColor    = completed || done4 ? WpfColor.FromRgb(255,255,255)
+                             : active             ? ActiveBlue
+                             :                      PendingText;
+            var labelColor   = active    ? ActiveBlue
+                             : completed || done4 ? WpfColor.FromRgb(0x11,0x18,0x27)
+                             :                      PendingText;
+
+            bubbles[i].Background   = new WpfBrush(bubbleColor);
+            bubbles[i].BorderBrush  = new WpfBrush(borderColor);
+            nums[i].Foreground      = new WpfBrush(textColor);
+            labels[i].Foreground    = new WpfBrush(labelColor);
+            labels[i].FontWeight    = active ? FontWeights.Bold : FontWeights.Normal;
+            nums[i].Text            = completed ? "✓" : (i + 1).ToString();
+            if (done4) { nums[i].Text = "✓"; bubbles[i].Background = new WpfBrush(GreenComplete); }
+        }
+
+        // Colour connecting lines
+        if (lines.Length >= 1) lines[0].Fill = new WpfBrush(step > 1 ? ActiveBlue : PendingGrey);
+        if (lines.Length >= 2) lines[1].Fill = new WpfBrush(step > 2 ? ActiveBlue : PendingGrey);
+        if (lines.Length >= 3) lines[2].Fill = new WpfBrush(step > 3 ? (step == 4 ? GreenComplete : ActiveBlue) : PendingGrey);
+
+        // Update subtitle text
+        w.OverlaySubTitle.Text = step switch
+        {
+            1 => "Starting up…",
+            2 => "Processing your request…",
+            3 => "Finalizing…",
+            4 => "Completed ✓",
+            _ => "Processing…"
+        };
+        w.OverlayTitle.Text = step == 4 ? "Done!" : "Processing…";
+    }
+
+    // ── Spinner (rotating dots) ───────────────────────────────────────────────
+    private static void StartSpinner(MainWindow w)
+    {
+        _spinSb?.Stop();
+        var sb = new System.Windows.Media.Animation.Storyboard
+            { RepeatBehavior = System.Windows.Media.Animation.RepeatBehavior.Forever };
+        var rot = new System.Windows.Media.Animation.DoubleAnimation
+            { From = 0, To = 360, Duration = TimeSpan.FromSeconds(1.0) };
+        System.Windows.Media.Animation.Storyboard.SetTarget(rot, w.SpinnerRotate);
+        System.Windows.Media.Animation.Storyboard.SetTargetProperty(rot,
+            new System.Windows.PropertyPath(System.Windows.Media.RotateTransform.AngleProperty));
+        sb.Children.Add(rot);
+        sb.Begin();
+        _spinSb = sb;
+    }
+
+    // ── Progress bar simulation ───────────────────────────────────────────────
+    // Time-based exponential fill: pct = 90 × (1 − e^(−t / τ))
+    // τ = 35 s  →  15 % at 6 s, 40 % at 18 s, 65 % at 35 s, 83 % at 65 s
+    // The bar keeps moving the entire time the operation runs, never freezes at 88%.
+    private const double _simTau = 35.0; // seconds — tune this for typical op duration
+
+    private static void StartProgressSimulation(MainWindow w)
+    {
+        _progressTimer?.Stop();
+        _simProgress = 0;
+        // Real-progress mode: bar is driven by IncrementBusyProgress(), skip timer
+        if (_simTotalItems > 0) return;
+        _progressTimer = new System.Windows.Threading.DispatcherTimer
+            { Interval = TimeSpan.FromMilliseconds(150) };
+        _progressTimer.Tick += (_, _) =>
+        {
+            double elapsed = (DateTime.UtcNow - _busyStart).TotalSeconds;
+            // Asymptotic fill toward 90 % — never reaches it, so 100 % only on real completion
+            double target = 90.0 * (1.0 - Math.Exp(-elapsed / _simTau));
+            _simProgress = Math.Min(90, target);
+            UpdateProgressBar(w, _simProgress);
+        };
+        _progressTimer.Start();
+    }
+
+    private static void UpdateProgressBar(MainWindow w, double pct)
+    {
+        var fillWidth = Math.Max(0, w.ProgBarTrack.ActualWidth > 0 ? w.ProgBarTrack.ActualWidth : 500) * pct / 100.0;
+        w.ProgFill.Width = fillWidth;
+        w.ProgPct.Text   = $"{(int)pct}%";
+
+        // Live item counter — shown below the bar
+        if (_simTotalItems > 0)
+        {
+            int done = Math.Clamp(_simDoneItems, 1, _simTotalItems);
+            SetCounterText(w, pct >= 100
+                ? $"✓  {_simTotalItems} / {_simTotalItems} {_simItemLabel} — done!"
+                : $"📋  {done} / {_simTotalItems} {_simItemLabel}");
+        }
+        else
+        {
+            SetCounterText(w, "");
+        }
+
+        // Estimated time remaining
+        if (pct > 2)
+        {
+            var elapsed = (DateTime.UtcNow - _busyStart).TotalSeconds;
+            double estTotal = elapsed / (pct / 100.0);
+            double remaining = Math.Max(0, estTotal - elapsed);
+            w.EstTimeText.Text = remaining < 1 ? "Almost done…"
+                               : $"Estimated time remaining: {TimeSpan.FromSeconds(remaining):mm\\:ss}";
+        }
+    }
+
+    private static void SetCounterText(MainWindow w, string text)
+    {
+        w.OverlayCountText.Text        = text;
+        w.OverlayCountBadge.Visibility = string.IsNullOrEmpty(text)
+            ? System.Windows.Visibility.Collapsed
+            : System.Windows.Visibility.Visible;
+    }
+
+    private static void AnimateProgressTo(MainWindow w, double targetPct, int ms, Action? onDone = null)
+    {
+        var timer = new System.Windows.Threading.DispatcherTimer
+            { Interval = TimeSpan.FromMilliseconds(16) };
+        double start = _simProgress;
+        var startTime = DateTime.UtcNow;
+        timer.Tick += (_, _) =>
+        {
+            double t = Math.Min(1.0, (DateTime.UtcNow - startTime).TotalMilliseconds / ms);
+            double ease = 1 - Math.Pow(1 - t, 3);   // cubic ease-out
+            _simProgress = start + (targetPct - start) * ease;
+            UpdateProgressBar(w, _simProgress);
+            if (t >= 1.0) { timer.Stop(); onDone?.Invoke(); }
+        };
+        timer.Start();
+    }
+
+    // ── Fade-in / dismiss ─────────────────────────────────────────────────────
+    private static void ApplyOverlayFadeIn(MainWindow w, System.Windows.UIElement bar)
+    {
+        bar.Opacity = 0;
+        var sb = new System.Windows.Media.Animation.Storyboard();
+        var fa = new System.Windows.Media.Animation.DoubleAnimation
+            { From = 0, To = 1, Duration = TimeSpan.FromMilliseconds(250),
+              EasingFunction = new System.Windows.Media.Animation.CubicEase
+                  { EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut } };
+        System.Windows.Media.Animation.Storyboard.SetTarget(fa, bar);
+        System.Windows.Media.Animation.Storyboard.SetTargetProperty(fa,
+            new System.Windows.PropertyPath(UIElement.OpacityProperty));
+        sb.Children.Add(fa);
+        sb.Begin();
+    }
+
+    private static void DismissOverlay(MainWindow w, System.Windows.UIElement bar)
+    {
+        _spinSb?.Stop();
+        var sb = new System.Windows.Media.Animation.Storyboard();
+        var fa = new System.Windows.Media.Animation.DoubleAnimation
+            { From = 1, To = 0, Duration = TimeSpan.FromMilliseconds(350),
+              EasingFunction = new System.Windows.Media.Animation.CubicEase
+                  { EasingMode = System.Windows.Media.Animation.EasingMode.EaseIn } };
+        System.Windows.Media.Animation.Storyboard.SetTarget(fa, bar);
+        System.Windows.Media.Animation.Storyboard.SetTargetProperty(fa,
+            new System.Windows.PropertyPath(UIElement.OpacityProperty));
+        sb.Children.Add(fa);
+        sb.Completed += (_, _) =>
+        {
+            bar.Visibility = System.Windows.Visibility.Collapsed;
+            bar.IsHitTestVisible = false;  // restore scroll/click to content beneath
+            // Reset for next use
+            w.ProgFill.Width   = 0;
+            w.ProgPct.Text     = "0%";
+            SetCounterText(w, "");
+            w.EstTimeText.Text = "Estimating…";
+            w.OverlayTitle.Text   = "Processing…";
+            _simTotalItems        = 0;
+            _simDoneItems         = 0;
+            SetOverlayStep(w, 0);
+        };
+        sb.Begin();
+    }
+
+    // ── Safety watchdog ───────────────────────────────────────────────────────
+    private static void StartBusyWatchdog(System.Windows.UIElement bar, MainWindow w)
+    {
+        if (_busyTimer == null)
+        {
+            _busyTimer = new System.Windows.Threading.DispatcherTimer();
+            _busyTimer.Tick += (_, _) =>
+            {
+                _busyTimer?.Stop();
+                _isBusy = false;
+                _progressTimer?.Stop();
+                _spinSb?.Stop();
+                bar.Visibility = System.Windows.Visibility.Collapsed;
+                bar.IsHitTestVisible = false;
+            };
+        }
+        // Scale watchdog with expected item count: 5 s per item, minimum 120 s, maximum 1800 s
+        int watchdogSecs = _simTotalItems > 0
+            ? Math.Clamp(_simTotalItems * 5, 120, 1800)
+            : 120;
+        _busyTimer.Interval = TimeSpan.FromSeconds(watchdogSecs);
+        _busyTimer.Stop();
+        _busyTimer.Start();
+    }
+
     private static void SetActionBadge(System.Windows.Controls.Border badge,
                                        System.Windows.Controls.TextBlock label,
                                        bool ok, string text)
     {
+        SetBusy(false);
         badge.Background = ok
             ? new WpfBrush(WpfColor.FromRgb(0x1A, 0x3A, 0x1A))
             : new WpfBrush(WpfColor.FromRgb(0x3A, 0x10, 0x10));
@@ -16051,6 +17422,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
     // ── Section 1: Host DB ────────────────────────────────────────────────────
     private async void RefreshHostServers_Click(object sender, RoutedEventArgs e)
     {
+        // overlay not shown for quick operation
         var btn = (System.Windows.Controls.Button)sender;
         var prev = btn.Content; btn.Content = "…"; btn.IsEnabled = false;
         try
@@ -16072,6 +17444,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
 
     private async void LoadHostDatabases_Click(object sender, RoutedEventArgs e)
     {
+        // overlay not shown for quick operation
         var server = HostServerBox.Text.Trim();
         if (string.IsNullOrEmpty(server))
         {
@@ -16108,6 +17481,42 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
     }
 
     // ── Reset handlers ────────────────────────────────────────────────────────
+
+    private void HostPasswordEye_Click(object sender, RoutedEventArgs e)
+    {
+        if (HostPasswordBox.Visibility == Visibility.Visible)
+        {
+            HostPasswordVisible.Text       = HostPasswordBox.Password;
+            HostPasswordBox.Visibility     = Visibility.Collapsed;
+            HostPasswordVisible.Visibility = Visibility.Visible;
+            HostPasswordEyeBtn.Content     = "🙈";
+        }
+        else
+        {
+            HostPasswordBox.Password       = HostPasswordVisible.Text;
+            HostPasswordVisible.Visibility = Visibility.Collapsed;
+            HostPasswordBox.Visibility     = Visibility.Visible;
+            HostPasswordEyeBtn.Content     = "👁";
+        }
+    }
+
+    private void CorePasswordEye_Click(object sender, RoutedEventArgs e)
+    {
+        if (CorePasswordBox.Visibility == Visibility.Visible)
+        {
+            CorePasswordVisible.Text       = CorePasswordBox.Password;
+            CorePasswordBox.Visibility     = Visibility.Collapsed;
+            CorePasswordVisible.Visibility = Visibility.Visible;
+            CorePasswordEyeBtn.Content     = "🙈";
+        }
+        else
+        {
+            CorePasswordBox.Password       = CorePasswordVisible.Text;
+            CorePasswordVisible.Visibility = Visibility.Collapsed;
+            CorePasswordBox.Visibility     = Visibility.Visible;
+            CorePasswordEyeBtn.Content     = "👁";
+        }
+    }
 
     private void ResetHostDb_Click(object sender, RoutedEventArgs e)
     {
@@ -16338,6 +17747,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
     // ── Section 2: Core DB ────────────────────────────────────────────────────
     private async void RefreshCoreServers_Click(object sender, RoutedEventArgs e)
     {
+        // overlay not shown for quick operation
         var btn = (System.Windows.Controls.Button)sender;
         var prev = btn.Content; btn.Content = "…"; btn.IsEnabled = false;
         try
@@ -16358,6 +17768,7 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
 
     private async void LoadCoreDatabases_Click(object sender, RoutedEventArgs e)
     {
+        // overlay not shown for quick operation
         var server = CoreServerBox.Text.Trim();
         if (string.IsNullOrEmpty(server))
         {
@@ -16594,6 +18005,36 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
     }
 
     // ── Section 3: Actions ────────────────────────────────────────────────────
+
+    private async void SanitizeDb_Click(object sender, RoutedEventArgs e)
+    {
+        if (_coreConn?.State != System.Data.ConnectionState.Open)
+        {
+            SetActionBadge(ActionResultBadge, ActionResultText, false, "✗  Not connected to Core DB.");
+            return;
+        }
+
+        var log = new System.Text.StringBuilder();
+        try
+        {
+            var restoreEmail = RestoreEmailBox.Text.Trim();
+            if (string.IsNullOrEmpty(restoreEmail) && _coreUserEmailMap.TryGetValue(CoreUsersBox.Text.Trim(), out var em))
+                restoreEmail = em.StartsWith("__empid_") ? "" : em;
+
+            var sanitizeCs = BuildConnStr(
+                CoreServerBox.Text.Trim(),
+                CoreUserBox.Text.Trim(),
+                CorePasswordBox.Password,
+                CoreDatabaseBox.Text.Trim());
+            await SanitizeCoreDb(sanitizeCs, log, restoreEmail);
+            SetActionBadge(ActionResultBadge, ActionResultText, true, log.ToString().TrimEnd());
+        }
+        catch (Exception ex)
+        {
+            SetActionBadge(ActionResultBadge, ActionResultText, false, $"✗  {ex.Message}\n{log}".TrimEnd());
+        }
+        finally { }
+    }
 
     private async void ExtendExpiry_Click(object sender, RoutedEventArgs e)
     {
@@ -16867,12 +18308,75 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
 
     // ── Sanitize Core DB ──────────────────────────────────────────────────────
     private static async Task SanitizeCoreDb(
-        Microsoft.Data.SqlClient.SqlConnection conn,
-        System.Text.StringBuilder log)
+        string connectionString,
+        System.Text.StringBuilder log,
+        string restoreEmail = "")
     {
-        // Tables whose rows should be fully deleted (auth tokens, session data, notifications)
-        var deleteTables = new[]
+        // Each section opens its own fresh connection — isolates any SQL error from affecting other sections.
+        async Task<Microsoft.Data.SqlClient.SqlConnection> OpenConn()
         {
+            var c = new Microsoft.Data.SqlClient.SqlConnection(connectionString);
+            await c.OpenAsync();
+            return c;
+        }
+
+        // ── CoreUtility-matching steps ────────────────────────────────────────
+        try
+        {
+            async Task TryExec(string sql, string label)
+            {
+                try
+                {
+                    await using var conn = await OpenConn();
+                    await using var c = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+                    int r = await c.ExecuteNonQueryAsync();
+                    if (r > 0) log.AppendLine($"✓  {label} ({r} row(s)).");
+                }
+                catch { /* table may not exist */ }
+            }
+
+            await TryExec("UPDATE [dbo].[CreditCardPayment] SET Number = NULL",                                 "CreditCardPayment.Number cleared");
+            await TryExec("UPDATE [dbo].[ThirdPartySettings] SET AccessToken = NULL WHERE Type = 1",           "ThirdPartySettings AccessToken (Type=1) cleared");
+            await TryExec("UPDATE [dbo].[ThirdPartySettings] SET AccessToken = NULL",                          "ThirdPartySettings AccessToken cleared");
+            await TryExec("UPDATE [dbo].[ThirdPartySettings] SET AccountID = NULL",                            "ThirdPartySettings AccountID cleared");
+            await TryExec("UPDATE [dbo].[TokenStore] SET Token = NULL",                                        "TokenStore.Token cleared");
+            await TryExec("UPDATE [dbo].[IntegrationLinks] SET RecordSyncToken = NULL",                        "IntegrationLinks.RecordSyncToken cleared");
+            await TryExec("UPDATE [dbo].[AutoRunSettings] SET EmailTo = NULL, Emailbody = NULL, EmailClientGps = NULL, EmailEmpGps = NULL, EmailEmpLTitles = NULL", "AutoRunSettings email cleared");
+
+            await TryExec(@"DELETE FROM [dbo].[AssignedRules]
+                            WHERE Rule_ID IN (
+                                SELECT ar.Rule_ID FROM [dbo].[Rules] r
+                                INNER JOIN [dbo].[AssignedRules] ar ON r.Rule_ID = ar.Rule_ID
+                                WHERE r.RuleID = 26)",
+                           "AssignedRules (auto-email invoice rule) deleted");
+
+            await TryExec("UPDATE [dbo].[ClientAuthorization] SET [Email] = NULL",                             "ClientAuthorization.Email cleared");
+            await TryExec("UPDATE [dbo].[MemorizedReport] SET [ScheduleDataSetQuery] = NULL",                  "MemorizedReport connection strings cleared");
+            await TryExec("UPDATE [dbo].[ReportSchedule]   SET [EmailBody] = NULL, [EmailSubject] = NULL",     "ReportSchedule email cleared");
+            await TryExec("UPDATE [dbo].[InvoiceReminder]  SET [EmailBody] = NULL, [EmailSubject] = NULL",     "InvoiceReminder email cleared");
+            await TryExec("UPDATE [dbo].[AlertDetails]     SET [EmailMessageBody] = NULL, [EmailSubject] = NULL", "AlertDetails email cleared");
+
+            if (!string.IsNullOrEmpty(restoreEmail))
+            {
+                await TryExec($"UPDATE [dbo].[Communication] SET [value] = '{restoreEmail}' " +
+                               "WHERE [CommunicationType_ID] IN (" +
+                               "'00000002-0000-0000-0000-000000000000'," +
+                               "'7A938CA2-405E-4D1A-B0D5-DA77B1E33D50')",
+                               "Communication email updated");
+                await TryExec($"UPDATE [dbo].[GlobalSetting] SET [Value] = '{restoreEmail}', [DefaultValue] = '{restoreEmail}' " +
+                               "WHERE [Value] LIKE '%@%.%' AND [Value] NOT LIKE '%@test.bqe.com'",
+                               "GlobalSetting emails updated");
+                await TryExec($"UPDATE [dbo].[Preference] SET [value] = '{restoreEmail}' " +
+                               "WHERE [SettingName] IN ('EMAIL_ADDRESS','EMAIL_BCCMAILTO','EMAIL_CCMAILTO')",
+                               "Preference email updated");
+                await TryExec("UPDATE [dbo].[Preference] SET [Value] = 0 WHERE [SettingName] = 'NOTIFY_EMAIL'",
+                               "NOTIFY_EMAIL disabled");
+            }
+        }
+        catch (Exception ex) { log.AppendLine($"⚠  CoreUtility sanitize steps error: {ex.Message}"); }
+
+        // Delete token/session tables
+        var deleteTables = new[] {
             "AuthToken", "RefreshToken", "UserToken", "AccessToken",
             "OAuthToken", "TokenInfo", "tblToken", "tblAuthToken",
             "SessionInfo", "UserSession", "tblSession",
@@ -16880,115 +18384,58 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
             "PasswordResetToken", "VerificationToken", "TwoFactorToken",
             "ApiKey", "tblApiKey",
         };
-
         foreach (var tbl in deleteTables)
         {
             try
             {
-                var existsSql =
-                    $"SELECT 1 FROM INFORMATION_SCHEMA.TABLES " +
-                    $"WHERE TABLE_NAME='{tbl}' AND TABLE_TYPE='BASE TABLE'";
+                await using var conn = await OpenConn();
+                var existsSql = $"SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='{tbl}' AND TABLE_TYPE='BASE TABLE'";
                 await using var existsCmd = new Microsoft.Data.SqlClient.SqlCommand(existsSql, conn);
                 if (await existsCmd.ExecuteScalarAsync() == null) continue;
-
-                await using var delCmd = new Microsoft.Data.SqlClient.SqlCommand(
-                    $"DELETE FROM [dbo].[{tbl}]", conn);
+                await using var delCmd = new Microsoft.Data.SqlClient.SqlCommand($"DELETE FROM [dbo].[{tbl}]", conn);
                 int rows = await delCmd.ExecuteNonQueryAsync();
                 if (rows > 0) log.AppendLine($"✓  Deleted {rows} token/session row(s) from [{tbl}].");
             }
-            catch { /* table may not exist or have FK constraints */ }
+            catch { }
         }
 
-        // ── Mask email addresses in user/account tables ──────────────────────────
-        // Each entry: (table, email-column, id-column-used-for-unique-placeholder)
-        var emailMaskCandidates = new[]
-        {
-            ("UserInfo",    "Email",    "UserID"),
-            ("UserInfo",    "UserName", "UserID"),
-            ("AccountInfo", "Email",    "AccountID"),
-            ("tblUser",     "EmailID",  "UserID"),
-            ("ContactInfo", "Email",    "ContactID"),
-            ("EmployeeInfo","Email",    "EmployeeID"),
-        };
-
-        foreach (var (tbl, col, idCol) in emailMaskCandidates)
-        {
-            try
-            {
-                var chkSql = $"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS " +
-                             $"WHERE TABLE_NAME='{tbl}' AND COLUMN_NAME='{col}'";
-                await using var chk = new Microsoft.Data.SqlClient.SqlCommand(chkSql, conn);
-                if (await chk.ExecuteScalarAsync() == null) continue;
-
-                var maskSql = $"""
-                    UPDATE [dbo].[{tbl}]
-                       SET [{col}] = LOWER(REPLACE(CAST([{idCol}] AS NVARCHAR(50)),'-',''))
-                                     + '@test.bqe.com'
-                     WHERE [{col}] IS NOT NULL
-                       AND [{col}] NOT LIKE '%@test.bqe.com';
-                    """;
-                await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(maskSql, conn);
-                int rows = await cmd.ExecuteNonQueryAsync();
-                if (rows > 0) log.AppendLine($"✓  Masked {rows} email(s) in [{tbl}].[{col}].");
-            }
-            catch { /* non-fatal */ }
-        }
-
-        // ── Mask Employee table (main Core DB employee records) ───────────────────
-        // Masks Email/EMail and name fields.
-        // IMPORTANT: HostAccount_ID is intentionally NOT touched — it is the link
-        // back to the Host DB Account record and must survive sanitize so that the
-        // dropdown can still show eligible users.
+        // Mask Employee table (HostAccount_ID intentionally preserved)
         try
         {
-            // Discover actual column names — schema varies across Core DB versions
-            async Task<bool> HasCol(string table, string column) =>
-                await new Microsoft.Data.SqlClient.SqlCommand(
-                    $"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' " +
-                    $"AND TABLE_NAME=@t AND COLUMN_NAME=@c", conn)
-                    { Parameters = { new("@t", table), new("@c", column) } }
-                    .ExecuteScalarAsync() != null;
-
-            bool hasEmpTbl   = await HasCol("Employee", "Employee_ID");
-            if (hasEmpTbl)
+            async Task<bool> HasCol(string table, string column)
             {
-                // Email column (Email or EMail)
+                await using var hconn = await OpenConn();
+                await using var hc = new Microsoft.Data.SqlClient.SqlCommand(
+                    "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME=@t AND COLUMN_NAME=@c", hconn);
+                hc.Parameters.AddWithValue("@t", table);
+                hc.Parameters.AddWithValue("@c", column);
+                return await hc.ExecuteScalarAsync() != null;
+            }
+
+            if (await HasCol("Employee", "Employee_ID"))
+            {
                 bool hasEmail  = await HasCol("Employee", "Email");
                 bool hasEMail  = !hasEmail && await HasCol("Employee", "EMail");
                 string? emailCol = hasEmail ? "Email" : hasEMail ? "EMail" : null;
-
-                // Name columns
                 bool hasFirst  = await HasCol("Employee", "FirstName");
                 bool hasLast   = await HasCol("Employee", "LastName");
 
-                // Discover the PK to use as a unique placeholder seed
-                // Try Employee_ID (GUID), then fall back to any int-identity column
-                bool hasPkGuid = await HasCol("Employee", "Employee_ID");
-                string pkExpr  = hasPkGuid
-                    ? "LOWER(REPLACE(CAST([Employee_ID] AS NVARCHAR(50)),'-',''))"
-                    : "CAST(Employee_ID AS NVARCHAR(50))"; // generic fallback
-
+                string pkExpr = "LOWER(REPLACE(CAST([Employee_ID] AS NVARCHAR(50)),'-',''))";
                 var setClauses = new List<string>();
-
-                if (emailCol != null)
-                    setClauses.Add($"[{emailCol}] = {pkExpr} + '@test.bqe.com'");
-                if (hasFirst)
-                    setClauses.Add($"[FirstName] = 'User'");
-                if (hasLast)
-                    setClauses.Add($"[LastName]  = {pkExpr}");
+                if (emailCol != null) setClauses.Add($"[{emailCol}] = {pkExpr} + '@test.bqe.com'");
+                if (hasFirst)         setClauses.Add("[FirstName] = 'User'");
+                if (hasLast)          setClauses.Add($"[LastName] = {pkExpr}");
 
                 if (setClauses.Count > 0)
                 {
-                    // WHERE guard: skip rows already sanitized (email ends with @test.bqe.com)
                     string whereGuard = emailCol != null
                         ? $"WHERE [{emailCol}] IS NULL OR [{emailCol}] NOT LIKE '%@test.bqe.com'"
                         : "WHERE 1=1";
-
-                    var empMaskSql =
-                        $"UPDATE [dbo].[Employee] SET {string.Join(", ", setClauses)} {whereGuard}";
-                    await using var empCmd = new Microsoft.Data.SqlClient.SqlCommand(empMaskSql, conn);
+                    var empSql = $"UPDATE [dbo].[Employee] SET {string.Join(", ", setClauses)} {whereGuard}";
+                    await using var econn = await OpenConn();
+                    await using var empCmd = new Microsoft.Data.SqlClient.SqlCommand(empSql, econn);
                     int empRows = await empCmd.ExecuteNonQueryAsync();
-                    log.AppendLine($"✓  Employee: masked {empRows} row(s) (email/name only — HostAccount_ID preserved).");
+                    log.AppendLine($"✓  Employee: masked {empRows} row(s) (HostAccount_ID preserved).");
                 }
             }
         }
@@ -16999,46 +18446,32 @@ body{{background:{bg};color:{fg};font-family:'Cascadia Code','Consolas','Courier
         {
             const string paymentSql = """
                 IF OBJECT_ID('dbo.PaymentInfo','U') IS NOT NULL
-                    UPDATE [dbo].[PaymentInfo]
-                       SET [CardNumber] = '0000000000000000',
-                           [CVV]        = '000',
-                           [CardToken]  = NULL
-                     WHERE 1=1;
-
+                    UPDATE [dbo].[PaymentInfo] SET [CardNumber]='0000000000000000',[CVV]='000',[CardToken]=NULL WHERE 1=1;
                 IF OBJECT_ID('dbo.CreditCardInfo','U') IS NOT NULL
-                    UPDATE [dbo].[CreditCardInfo]
-                       SET [CardNumber] = '0000000000000000',
-                           [CVV]        = '000'
-                     WHERE 1=1;
+                    UPDATE [dbo].[CreditCardInfo] SET [CardNumber]='0000000000000000',[CVV]='000' WHERE 1=1;
                 """;
+            await using var conn = await OpenConn();
             await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(paymentSql, conn);
             await cmd.ExecuteNonQueryAsync();
             log.AppendLine("✓  Payment card data masked.");
         }
-        catch { /* non-fatal */ }
+        catch { }
 
         // Mask passwords
         try
         {
             const string pwdSql = """
                 IF OBJECT_ID('dbo.UserInfo','U') IS NOT NULL
-                    UPDATE [dbo].[UserInfo]
-                       SET [Password]     = NULL,
-                           [PasswordHash] = NULL,
-                           [PasswordSalt] = NULL
-                     WHERE 1=1;
-
+                    UPDATE [dbo].[UserInfo] SET [Password]=NULL,[PasswordHash]=NULL,[PasswordSalt]=NULL WHERE 1=1;
                 IF OBJECT_ID('dbo.tblUser','U') IS NOT NULL
-                    UPDATE [dbo].[tblUser]
-                       SET [Password]     = NULL,
-                           [PasswordHash] = NULL
-                     WHERE 1=1;
+                    UPDATE [dbo].[tblUser] SET [Password]=NULL,[PasswordHash]=NULL WHERE 1=1;
                 """;
+            await using var conn = await OpenConn();
             await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(pwdSql, conn);
             await cmd.ExecuteNonQueryAsync();
             log.AppendLine("✓  Password hashes cleared.");
         }
-        catch { /* non-fatal */ }
+        catch { }
     }
 
     // ── CoreDatabaseBox selection → auto-prefill fields from selected DB ──────
@@ -18987,6 +20420,7 @@ ORDER BY c.Name, c.ID";
     // ── Exec connection — server list ─────────────────────────────────────────
     private async void RefreshExecServers_Click(object sender, RoutedEventArgs e)
     {
+        // overlay not shown for quick operation
         var btn = sender as System.Windows.Controls.Button;
         var prev = ExecServerBox.Text;
         if (btn != null) btn.Content = "…";
@@ -19038,6 +20472,7 @@ ORDER BY c.Name, c.ID";
 
     private async void LoadExecDatabases_Click(object sender, RoutedEventArgs e)
     {
+        // overlay not shown for quick operation
         var server = ExecServerBox.Text.Trim();
         var user   = ExecUserBox.Text.Trim();
         var pass   = ExecPasswordBox.Password;
@@ -19219,11 +20654,37 @@ ORDER BY c.Name, c.ID";
                         CommandTimeout = timeout
                     };
 
-                    int rows = await cmd.ExecuteNonQueryAsync();
-                    if (rows >= 0)
-                        output.AppendLine($"[Batch {batchNum}]  {rows} row(s) affected.");
-                    else
-                        output.AppendLine($"[Batch {batchNum}]  Done.");
+                    await using var reader = await cmd.ExecuteReaderAsync();
+                    int resultSet = 0;
+                    do
+                    {
+                        resultSet++;
+                        if (reader.FieldCount > 0)
+                        {
+                            // Column headers
+                            var cols = Enumerable.Range(0, reader.FieldCount)
+                                                 .Select(i => reader.GetName(i).PadRight(20));
+                            output.AppendLine($"[Batch {batchNum} · Result {resultSet}]");
+                            output.AppendLine(string.Join("  ", cols));
+                            output.AppendLine(new string('-', Math.Min(120, reader.FieldCount * 22)));
+
+                            int rowCount = 0;
+                            while (await reader.ReadAsync())
+                            {
+                                rowCount++;
+                                var cells = Enumerable.Range(0, reader.FieldCount)
+                                                      .Select(i => (reader.IsDBNull(i) ? "NULL" : reader.GetValue(i)?.ToString() ?? "").PadRight(20));
+                                output.AppendLine(string.Join("  ", cells));
+                            }
+                            output.AppendLine($"({rowCount} row(s))");
+                            output.AppendLine();
+                        }
+                        else
+                        {
+                            output.AppendLine($"[Batch {batchNum}]  Done.");
+                        }
+                    }
+                    while (await reader.NextResultAsync());
                 }
                 catch (Exception bex)
                 {
@@ -19315,6 +20776,7 @@ ORDER BY c.Name, c.ID";
 
     private async void TestMaintConn_Click(object sender, RoutedEventArgs e)
     {
+        // overlay not shown for quick operation
         MaintConnBadge.Visibility = System.Windows.Visibility.Collapsed;
         TestMaintConnBtn.IsEnabled = false;
         try
@@ -20572,7 +22034,14 @@ ORDER BY c.Name, c.ID";
             try
             {
                 if (sanitize)
-                    await SanitizeCoreDb(_coreConn, log);
+                {
+                    var sanitizeCs = BuildConnStr(
+                        CoreServerBox.Text.Trim(),
+                        CoreUserBox.Text.Trim(),
+                        CorePasswordBox.Password,
+                        CoreDatabaseBox.Text.Trim());
+                    await SanitizeCoreDb(sanitizeCs, log);
+                }
             }
             catch (Exception ex) { throw new Exception($"Step 6 (Sanitize): {ex.Message}", ex); }
 
