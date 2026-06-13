@@ -936,6 +936,43 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             CoreDbUser       = CoreUserBox.Text.Trim(),
             CoreDbPassword   = CorePasswordBox.Password,
         });
+
+        // Keep PaymentServiceManager .cs line 2359 in sync with entity custom
+        PatchPaymentServiceManagerCustom(EntityCustomBox.Text.Trim());
+    }
+
+    // ── PaymentServiceManager custom-field patcher ───────────────────────────
+
+    private static readonly string PaymentServiceManagerPath =
+        @"C:\Projects\Core\BQECoreHost\Applications\BQECoreHostBusinessLogic\PaymentServiceManager .cs";
+
+    /// <summary>
+    /// Patches line 2359 of PaymentServiceManager .cs so the hardcoded custom override
+    /// matches whatever EntityCustom is set to in this app.
+    /// </summary>
+    private static void PatchPaymentServiceManagerCustom(string custom)
+    {
+        if (string.IsNullOrWhiteSpace(custom)) return;
+        if (!System.IO.File.Exists(PaymentServiceManagerPath)) return;
+
+        var lines = System.IO.File.ReadAllLines(PaymentServiceManagerPath);
+        if (lines.Length < 2359) return;
+
+        // Line numbers are 1-based; array is 0-based → index 2358
+        const int targetIndex = 2358;
+        var original = lines[targetIndex];
+
+        // Only touch lines that look like the hardcoded custom assignment
+        if (!original.TrimStart().StartsWith("custom =", StringComparison.Ordinal) &&
+            !original.TrimStart().StartsWith("//custom =", StringComparison.Ordinal))
+            return;
+
+        // Preserve leading whitespace
+        var indent = original.Length - original.TrimStart().Length;
+        var leadingSpaces = original[..indent];
+
+        lines[targetIndex] = $"{leadingSpaces}custom = \"{custom}\";";
+        System.IO.File.WriteAllLines(PaymentServiceManagerPath, lines);
     }
 
     // ── Fiddler / HTTP Proxy ──────────────────────────────────────────────────
@@ -3992,7 +4029,6 @@ ORDER BY MAX(s.ExpiresOn) DESC";
 
     private async void RunAllTestsBtn_Click(object sender, RoutedEventArgs e)
     {
-        SetBusy(true);
         var url = WebhookUrlBox.Text.Trim();
         if (string.IsNullOrEmpty(url))
         {
@@ -4040,7 +4076,6 @@ ORDER BY MAX(s.ExpiresOn) DESC";
 
     private async void RunSingleTestBtn_Click(object sender, RoutedEventArgs e)
     {
-        SetBusy(true);
         if (sender is not System.Windows.Controls.Button btn) return;
         if (btn.Tag is not WebhookTestCase tc) return;
 
@@ -4332,7 +4367,6 @@ ORDER BY MAX(s.ExpiresOn) DESC";
 
     private async void CheckSignupStateBtn_Click(object sender, RoutedEventArgs e)
     {
-        SetBusy(true);
         if (SignupStateResult is null) return;
         SignupStateResult.Text    = "⏳ Checking…";
         SignupStateResult.Foreground = new WpfBrush(WpfColor.FromRgb(107, 114, 128));
@@ -4771,7 +4805,6 @@ ORDER BY MAX(s.ExpiresOn) DESC";
 
     private async void FetchIdsByEmailBtn_Click(object sender, RoutedEventArgs e)
     {
-        SetBusy(true);
         var email   = CoreAccountEmailBox.Text.Trim();
         var connStr = LocalMainDbBox.Text.Trim();
 
@@ -6452,7 +6485,6 @@ WHERE {filter}
 
     private async void AchPostBtn_Click(object sender, RoutedEventArgs e)
     {
-        SetBusy(true);
         var url = WebhookUrlBox.Text.Trim();
         if (string.IsNullOrEmpty(url))
         {
@@ -6592,7 +6624,6 @@ WHERE {filter}
 
     private async void AchFetchBtn_Click(object sender, RoutedEventArgs e)
     {
-        SetBusy(true);
         var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
         if (string.IsNullOrEmpty(apiKey))
         {
@@ -7011,6 +7042,7 @@ WHERE {filter}
             // Build payload from transaction if not already built
             if (webhookPayload is null && txn is not null)
             {
+                // For CC Refund/Return: if user provided a fortxn override, apply it
                 webhookPayload = typeIdx switch
                 {
                     1 => WebhookTestService.BuildECheckReturnPayloadFromTransaction(txn),
@@ -7089,7 +7121,6 @@ WHERE {filter}
 
     private async void SearchAllWebhooksBtn_Click(object sender, RoutedEventArgs e)
     {
-        SetBusy(true);
         var apiKey = IsSandbox ? SandboxApiKeyBox.Password.Trim() : ProductionApiKeyBox.Password.Trim();
         if (string.IsNullOrEmpty(apiKey))
         {
@@ -9103,6 +9134,14 @@ WHERE {filter}
             icon.Text = collapse ? "⊞  " : "⊟  ";
     }
 
+    private void EntityCustomBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        var custom = EntityCustomBox?.Text?.Trim() ?? "";
+        if (!string.IsNullOrEmpty(custom))
+            PatchPaymentServiceManagerCustom(custom);
+        SaveSettings();
+    }
+
     private void UseDbIdsForCustomBtn_Click(object sender, RoutedEventArgs e)
     {
         // Pull AccountID + CompanyID from the Core DB strip (strip the "(via ...)" suffix)
@@ -9119,12 +9158,13 @@ WHERE {filter}
         }
 
         EntityCustomBox.Text = $"{accountId},{companyId}";
+        PatchPaymentServiceManagerCustom(EntityCustomBox.Text);
+        SaveSettings();
         SetStatus($"Entity custom set: {EntityCustomBox.Text}");
     }
 
     private async void FetchEntityCustomFromDbBtn_Click(object sender, RoutedEventArgs e)
     {
-        SetBusy(true);
         var email   = CoreAccountEmailBox.Text.Trim();
         var connStr = LocalMainDbBox.Text.Trim();
 
@@ -9201,6 +9241,8 @@ WHERE {filter}
         Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input, () =>
         {
             EntityCustomBox.Text = $"{first.accountId},{first.companyId}";
+            PatchPaymentServiceManagerCustom(EntityCustomBox.Text);
+            SaveSettings();
         });
 
         // Wire up selection-changed so switching in the dropdown updates Text + the blue strip
@@ -9235,6 +9277,8 @@ WHERE {filter}
         Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input, () =>
         {
             EntityCustomBox.Text = raw;
+            PatchPaymentServiceManagerCustom(raw);
+            SaveSettings();
         });
     }
 
@@ -12980,7 +13024,6 @@ WHERE {filter}
 
     private async void HttpSend_Click(object sender, RoutedEventArgs e)
     {
-        SetBusy(true);
         var url = Interpolate(HttpUrlBox.Text?.Trim() ?? "");
         if (string.IsNullOrEmpty(url)) { WpfMessageBox.Show("Enter a URL first.", "HTTP Client"); return; }
 

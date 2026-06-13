@@ -3981,6 +3981,7 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="Auto"/>
@@ -4291,6 +4292,7 @@
                                                       FontFamily="Consolas" FontSize="11"
                                                       VerticalContentAlignment="Center"
                                                       BorderBrush="#FED7AA" BorderThickness="1"
+                                                      LostFocus="EntityCustomBox_LostFocus"
                                                       ToolTip="AccountID,CompanyID — e.g. 5F523389-...,672209C4-...&#x0a;When multiple companies are found, use the dropdown to switch between them."/>
                                             <Button x:Name="UseDbIdsForCustomBtn"
                                                     Content="⟵ Use DB IDs" Height="28" Padding="10,0"
@@ -4727,6 +4729,7 @@
                                         </Button.Template>
                                     </Button>
                                 </StackPanel>
+
                             </Grid>
                         </Border>
                         </ScrollViewer>
